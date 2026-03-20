@@ -1,0 +1,28 @@
+[package]
+name = "tina4"
+version = "3.0.0"
+edition = "2021"
+description = "Tina4 — Unified CLI for Python, PHP, Ruby, and Node.js frameworks"
+license = "MIT"
+repository = "https://github.com/tina4stack/tina4"
+homepage = "https://tina4.com"
+keywords = ["cli", "web-framework", "scss", "dev-tools"]
+categories = ["command-line-utilities", "development-tools", "web-programming"]
+
+[[bin]]
+name = "tina4"
+path = "src/main.rs"
+
+[dependencies]
+grass = { version = "0.13", default-features = false }
+notify = "7"
+clap = { version = "4", features = ["derive"] }
+colored = "2"
+which = "7"
+ctrlc = "3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1

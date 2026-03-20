@@ -1,10 +1,11 @@
 #!/bin/sh
 # Tina4 CLI installer — https://tina4.com
-# Usage: curl -fsSL https://tina4.com/install.sh | sh
+# Usage: curl -fsSL https://raw.githubusercontent.com/tina4stack/tina4/main/install.sh | sh
+#    or: wget -qO- https://raw.githubusercontent.com/tina4stack/tina4/main/install.sh | sh
 set -e
 
 REPO="tina4stack/tina4"
-INSTALL_DIR="/usr/local/bin"
+INSTALL_DIR="${TINA4_INSTALL_DIR:-/usr/local/bin}"
 
 # Detect OS and architecture
 OS="$(uname -s)"
@@ -14,36 +15,63 @@ case "$OS" in
   Darwin)  PLATFORM="darwin" ;;
   Linux)   PLATFORM="linux" ;;
   MINGW*|MSYS*|CYGWIN*) PLATFORM="windows" ;;
-  *) echo "Unsupported OS: $OS"; exit 1 ;;
+  *) echo "Error: Unsupported OS: $OS" >&2; exit 1 ;;
 esac
 
 case "$ARCH" in
-  x86_64|amd64)  ARCH="amd64" ;;
-  arm64|aarch64)  ARCH="arm64" ;;
-  *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+  x86_64|amd64)  ARCH_NAME="amd64" ;;
+  arm64|aarch64)  ARCH_NAME="arm64" ;;
+  *) echo "Error: Unsupported architecture: $ARCH" >&2; exit 1 ;;
 esac
 
 if [ "$PLATFORM" = "windows" ]; then
   BINARY="tina4-windows-amd64.exe"
 else
-  BINARY="tina4-${PLATFORM}-${ARCH}"
+  BINARY="tina4-${PLATFORM}-${ARCH_NAME}"
 fi
 
+# Helper: download a URL to stdout
+fetch() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$1"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO- "$1"
+  else
+    echo "Error: curl or wget is required" >&2
+    exit 1
+  fi
+}
+
+# Helper: download a URL to a file
+fetch_to() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$1" -o "$2"
+  else
+    wget -q "$1" -O "$2"
+  fi
+}
+
 # Get latest release tag
-LATEST=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
+LATEST=$(fetch "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
 
 if [ -z "$LATEST" ]; then
-  echo "Error: Could not determine latest release"
+  echo "Error: Could not determine latest release" >&2
   exit 1
 fi
 
 URL="https://github.com/${REPO}/releases/download/${LATEST}/${BINARY}"
 
-echo "Installing tina4 ${LATEST} (${PLATFORM}/${ARCH})..."
-echo "Downloading ${URL}"
+echo ""
+echo "  Tina4 CLI Installer"
+echo "  ==================="
+echo "  Version:      ${LATEST}"
+echo "  Platform:     ${PLATFORM}/${ARCH_NAME}"
+echo "  Install to:   ${INSTALL_DIR}/tina4"
+echo ""
 
 TMP=$(mktemp)
-curl -fsSL "$URL" -o "$TMP"
+echo "Downloading ${BINARY}..."
+fetch_to "$URL" "$TMP"
 chmod +x "$TMP"
 
 # Install — try without sudo first
@@ -54,5 +82,11 @@ else
   sudo mv "$TMP" "${INSTALL_DIR}/tina4"
 fi
 
-echo "✓ tina4 installed to ${INSTALL_DIR}/tina4"
-tina4 --version
+echo ""
+echo "✓ tina4 ${LATEST} installed successfully"
+echo ""
+echo "Get started:"
+echo "  tina4 doctor   — Check your environment"
+echo "  tina4 init     — Create a new project"
+echo "  tina4 serve    — Start development server"
+echo ""

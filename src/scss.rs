@@ -102,6 +102,7 @@ fn compile_file(
 }
 
 /// Compile a single SCSS string to CSS (used for testing / one-off).
+#[allow(dead_code)]
 pub fn compile_string(scss: &str, minify: bool) -> Result<String, String> {
     let options = grass::Options::default().style(if minify {
         grass::OutputStyle::Compressed

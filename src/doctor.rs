@@ -184,7 +184,7 @@ fn extract_version_number(raw: &str) -> String {
     let first_line = raw.lines().next().unwrap_or("");
     for word in first_line.split_whitespace() {
         let trimmed = word.trim_start_matches('v');
-        if trimmed.contains('.') && trimmed.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+        if trimmed.contains('.') && trimmed.chars().next().is_some_and(|c| c.is_ascii_digit()) {
             return trimmed.to_string();
         }
     }

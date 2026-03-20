@@ -3,6 +3,7 @@ use std::path::Path;
 /// Information about a detected Tina4 project.
 pub struct ProjectInfo {
     pub language: String,
+    #[allow(dead_code)]
     pub version: Option<String>,
 }
 
@@ -119,9 +120,9 @@ fn extract_version_json(content: &str, key: &str) -> Option<String> {
     let rest = &content[pos + pattern.len()..];
     let colon = rest.find(':')?;
     let after_colon = rest[colon + 1..].trim_start();
-    if after_colon.starts_with('"') {
-        let end = after_colon[1..].find('"')?;
-        return Some(after_colon[1..1 + end].to_string());
+    if let Some(stripped) = after_colon.strip_prefix('"') {
+        let end = stripped.find('"')?;
+        return Some(stripped[..end].to_string());
     }
     None
 }

@@ -53,6 +53,10 @@ enum Commands {
         /// Force dev server even if a production server is available
         #[arg(long)]
         dev: bool,
+
+        /// Install and use the best production server for the detected framework
+        #[arg(long)]
+        production: bool,
     },
 
     /// Compile SCSS files from src/scss/ to src/public/css/
@@ -98,7 +102,7 @@ fn main() {
 
         Commands::Init { lang, path } => init::run(lang.as_deref(), path.as_deref()),
 
-        Commands::Serve { port, host, dev } => handle_serve(port, &host, dev),
+        Commands::Serve { port, host, dev, production } => handle_serve(port, &host, dev, production),
 
         Commands::Scss {
             input,
@@ -135,7 +139,7 @@ fn main() {
 
 // ── Serve ────────────────────────────────────────────────────────
 
-fn handle_serve(port: Option<u16>, host: &str, force_dev: bool) {
+fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_production: bool) {
     let lang = detect::detect_language();
 
     let info = match lang {
@@ -166,6 +170,16 @@ fn handle_serve(port: Option<u16>, host: &str, force_dev: bool) {
             "{} Dev mode forced — production server detection disabled",
             "ℹ".blue()
         );
+    }
+
+    // --production: install best production server if not available, force debug off
+    if force_production {
+        std::env::set_var("TINA4_DEBUG", "false");
+        println!(
+            "{} Production mode — installing best server if needed",
+            "▶".green()
+        );
+        install_production_server(&info);
     }
 
     // Compile SCSS
@@ -199,6 +213,53 @@ fn handle_serve(port: Option<u16>, host: &str, force_dev: bool) {
         "👁".green()
     );
     watcher::watch_and_reload(scss_dir, css_dir, &info, port, host, &mut server);
+}
+
+fn install_production_server(info: &detect::ProjectInfo) {
+    let (check_cmd, install_cmd, name) = match info.language.as_str() {
+        "python" => ("uvicorn --version", "uv add uvicorn", "uvicorn"),
+        "php" => ("php -m", "echo 'OPcache is built-in'", "opcache"),
+        "ruby" => ("gem list puma", "gem install puma --no-doc", "puma"),
+        "nodejs" => ("echo 'cluster is built-in'", "echo 'ok'", "cluster"),
+        _ => return,
+    };
+
+    // Check if already installed
+    let check = std::process::Command::new("sh")
+        .args(["-c", check_cmd])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    let needs_install = match info.language.as_str() {
+        "python" => check.map(|s| !s.success()).unwrap_or(true),
+        "ruby" => {
+            let out = std::process::Command::new("sh")
+                .args(["-c", "gem list puma | grep puma"])
+                .output();
+            out.map(|o| o.stdout.is_empty()).unwrap_or(true)
+        }
+        _ => false, // PHP opcache and Node cluster are built-in
+    };
+
+    if needs_install {
+        println!(
+            "  {} Installing {}...",
+            "▶".green(),
+            name.cyan()
+        );
+        let result = std::process::Command::new("sh")
+            .args(["-c", install_cmd])
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status();
+        match result {
+            Ok(s) if s.success() => println!("  {} {} installed", "✓".green(), name.cyan()),
+            _ => println!("  {} Failed to install {} — using dev server", "⚠".yellow(), name),
+        }
+    } else {
+        println!("  {} {} already installed", "✓".green(), name.cyan());
+    }
 }
 
 fn start_language_server(

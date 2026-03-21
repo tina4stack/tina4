@@ -1,5 +1,6 @@
 mod detect;
 mod doctor;
+mod generate;
 mod init;
 mod install;
 mod scss;
@@ -88,6 +89,16 @@ enum Commands {
     /// List registered routes (delegates to language CLI)
     Routes,
 
+    /// Generate scaffolding: model, route, migration, middleware
+    Generate {
+        /// What to generate: model, route, migration, middleware
+        #[arg()]
+        what: String,
+        /// Name or path
+        #[arg()]
+        name: String,
+    },
+
     /// Self-update the tina4 binary
     Update,
 }
@@ -132,6 +143,8 @@ fn main() {
         Commands::Test => delegate_command(vec!["test".into()]),
 
         Commands::Routes => delegate_command(vec!["routes".into()]),
+
+        Commands::Generate { what, name } => generate::run(&what, &name),
 
         Commands::Update => handle_update(),
     }

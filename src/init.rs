@@ -68,19 +68,25 @@ fn init_project(language: &str, path: &str) {
     // Step 3 -- Create project directory
     create_project_dir(abs);
 
-    // Step 4 -- Delegate to language-specific init (scaffold + install deps)
-    delegate_init(language, abs);
+    // Step 4 -- Create the full scaffold directly (no delegation)
+    scaffold_project(language, abs);
 
-    // Step 5 -- Create .env file
-    create_env_file(abs);
+    // Step 5 -- Run package manager install (non-fatal)
+    install_deps(language, abs);
 
     // Step 6 -- Summary
     println!();
-    println!("Project created at {}", abs);
+    println!("{} Project created at {}", "✓".green(), abs);
     println!();
     println!("Next steps:");
     println!("  cd {}", abs);
-    println!("  tina4 serve");
+    match language {
+        "python" => println!("  uv run python app.py"),
+        "php" => println!("  php -S localhost:7145 index.php"),
+        "ruby" => println!("  ruby app.rb"),
+        "nodejs" => println!("  npx ts-node app.ts"),
+        _ => println!("  tina4 serve"),
+    }
     println!();
 }
 
@@ -360,149 +366,327 @@ fn create_project_dir(path: &str) {
     }
 }
 
-// -- Step 4: Delegate to language-specific init ------------------------------
+// -- Step 4: Scaffold project (direct file creation) -------------------------
 
-fn delegate_init(language: &str, path: &str) {
+fn scaffold_project(language: &str, path: &str) {
     println!(
-        "\n{} Running {} project init...",
+        "\n{} Scaffolding {} project...",
         "▶".green(),
         language.cyan()
     );
 
+    // Common directories shared by all languages
+    let common_dirs = [
+        "src/routes",
+        "src/orm",
+        "src/templates",
+        "src/public/css",
+        "src/public/js",
+        "src/public/images",
+        "src/scss",
+        "migrations",
+        "data",
+        "logs",
+    ];
+
+    for dir in &common_dirs {
+        let full = Path::new(path).join(dir);
+        fs::create_dir_all(&full).unwrap_or_else(|e| {
+            eprintln!("  {} Failed to create {}: {}", "✗".red(), dir, e);
+        });
+    }
+    println!("  {} Created directory structure", "✓".green());
+
+    // .env
+    write_file(path, ".env", "TINA4_DEBUG=true\nTINA4_LOG_LEVEL=ALL\n");
+
+    // Language-specific files
     match language {
-        "python" => {
-            // uv init sets up pyproject.toml and venv, then add tina4-python,
-            // then run the framework's own init to scaffold routes/templates
-            if !run_cmd_in(path, "uv", &["init"]) {
-                eprintln!(
-                    "  {} uv init failed. Run manually:\n      cd {} && uv init && uv add tina4-python && uv run tina4python init .",
-                    "✗".red(),
-                    path
-                );
-                std::process::exit(1);
-            }
-            if !run_cmd_in(path, "uv", &["add", "tina4-python"]) {
-                eprintln!(
-                    "  {} uv add failed. Run manually:\n      cd {} && uv add tina4-python",
-                    "✗".red(),
-                    path
-                );
-                std::process::exit(1);
-            }
-            // Delegate to the framework CLI to scaffold routes, templates, etc.
-            if !run_cmd_in(path, "uv", &["run", "tina4python", "init", "."]) {
-                println!(
-                    "  {} tina4python init skipped (framework CLI may not be available yet)",
-                    "⚠".yellow()
-                );
-            }
-        }
-        "php" => {
-            if !run_cmd_in(
-                path,
-                "composer",
-                &["init", "--no-interaction", "--name=tina4/my-project"],
-            ) {
-                eprintln!(
-                    "  {} composer init failed. Run manually:\n      cd {} && composer init --no-interaction --name=tina4/my-project",
-                    "✗".red(),
-                    path
-                );
-                std::process::exit(1);
-            }
-            if !run_cmd_in(path, "composer", &["require", "tina4stack/tina4-php"]) {
-                eprintln!(
-                    "  {} composer require failed. Run manually:\n      cd {} && composer require tina4stack/tina4-php",
-                    "✗".red(),
-                    path
-                );
-                std::process::exit(1);
-            }
-            // Delegate to the framework CLI to scaffold routes, templates, etc.
-            if !run_cmd_in(
-                path,
-                "php",
-                &["vendor/bin/tina4php", "init", "."],
-            ) {
-                println!(
-                    "  {} tina4php init skipped (framework CLI may not be available yet)",
-                    "⚠".yellow()
-                );
-            }
-        }
-        "ruby" => {
-            if !run_cmd_in(path, "bundle", &["init"]) {
-                eprintln!(
-                    "  {} bundle init failed. Run manually:\n      cd {} && bundle init",
-                    "✗".red(),
-                    path
-                );
-                std::process::exit(1);
-            }
-            if !run_cmd_in(path, "bundle", &["add", "tina4-ruby"]) {
-                eprintln!(
-                    "  {} bundle add failed. Run manually:\n      cd {} && bundle add tina4-ruby",
-                    "✗".red(),
-                    path
-                );
-                std::process::exit(1);
-            }
-            // Delegate to the framework CLI to scaffold routes, templates, etc.
-            if !run_cmd_in(path, "bundle", &["exec", "tina4ruby", "init", "."]) {
-                println!(
-                    "  {} tina4ruby init skipped (framework CLI may not be available yet)",
-                    "⚠".yellow()
-                );
-            }
-        }
-        "nodejs" => {
-            if !run_cmd_in(path, "npm", &["init", "-y"]) {
-                eprintln!(
-                    "  {} npm init failed. Run manually:\n      cd {} && npm init -y",
-                    "✗".red(),
-                    path
-                );
-                std::process::exit(1);
-            }
-            if !run_cmd_in(path, "npm", &["install", "tina4-nodejs"]) {
-                eprintln!(
-                    "  {} npm install failed. Run manually:\n      cd {} && npm install tina4-nodejs",
-                    "✗".red(),
-                    path
-                );
-                std::process::exit(1);
-            }
-            // Delegate to the framework CLI to scaffold routes, templates, etc.
-            if !run_cmd_in(path, "npx", &["tina4nodejs", "init", "."]) {
-                println!(
-                    "  {} tina4nodejs init skipped (framework CLI may not be available yet)",
-                    "⚠".yellow()
-                );
-            }
-        }
+        "python" => scaffold_python(path),
+        "php" => scaffold_php(path),
+        "ruby" => scaffold_ruby(path),
+        "nodejs" => scaffold_nodejs(path),
         _ => {}
     }
-
-    println!("  {} Dependencies installed", "✓".green());
 }
 
-// -- Step 5: Create .env file ------------------------------------------------
+fn scaffold_python(path: &str) {
+    let project_name = project_name_from_path(path);
 
-fn create_env_file(path: &str) {
-    let env_path = Path::new(path).join(".env");
-    if env_path.exists() {
+    write_file(
+        path,
+        "app.py",
+        "from tina4_python.core import run\n\nrun()\n",
+    );
+
+    write_file(
+        path,
+        ".gitignore",
+        ".venv/\n__pycache__/\n*.pyc\n*.pyo\ndata/\nlogs/\nsecrets/\n.env\n",
+    );
+
+    let pyproject = format!(
+        r#"[project]
+name = "{name}"
+version = "0.1.0"
+description = "A Tina4 Python project"
+requires-python = ">=3.12"
+dependencies = [
+    "tina4-python>=3.0.0rc1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+"#,
+        name = project_name
+    );
+    write_file(path, "pyproject.toml", &pyproject);
+
+    // Sample route
+    write_file(
+        path,
+        "src/routes/hello.py",
+        r#"from tina4_python.core.router import get
+
+@get("/hello")
+async def hello(request, response):
+    """A sample route that returns a greeting."""
+    return response({"message": "Hello from Tina4!", "status": "ok"})
+"#,
+    );
+
+    println!("  {} Created Python scaffold", "✓".green());
+}
+
+fn scaffold_php(path: &str) {
+    let project_name = project_name_from_path(path);
+
+    write_file(
+        path,
+        "index.php",
+        r#"<?php
+
+require_once __DIR__ . '/vendor/autoload.php';
+
+$app = new \Tina4\App();
+$app->run();
+"#,
+    );
+
+    write_file(
+        path,
+        ".gitignore",
+        "vendor/\ndata/\nlogs/\n.env\n",
+    );
+
+    let composer = format!(
+        r#"{{
+    "name": "tina4/{name}",
+    "description": "A Tina4 PHP project",
+    "type": "project",
+    "require": {{
+        "tina4stack/tina4-php": "^3.0"
+    }},
+    "autoload": {{
+        "psr-4": {{
+            "App\\": "src/"
+        }}
+    }}
+}}
+"#,
+        name = project_name
+    );
+    write_file(path, "composer.json", &composer);
+
+    // Sample route
+    write_file(
+        path,
+        "src/routes/hello.php",
+        r#"<?php
+
+\Tina4\Get::add("/hello", function (\Tina4\Response $response) {
+    return $response("Hello from Tina4!", HTTP_OK);
+});
+"#,
+    );
+
+    println!("  {} Created PHP scaffold", "✓".green());
+}
+
+fn scaffold_ruby(path: &str) {
+    write_file(
+        path,
+        "app.rb",
+        r#"require "tina4"
+
+Tina4.initialize!(__dir__)
+Tina4::App.new.run!
+"#,
+    );
+
+    write_file(
+        path,
+        ".gitignore",
+        ".bundle/\nvendor/\ndata/\nlogs/\n.env\nGemfile.lock\n",
+    );
+
+    write_file(
+        path,
+        "Gemfile",
+        r#"source "https://rubygems.org"
+
+gem "tina4-ruby", "~> 3.0"
+"#,
+    );
+
+    // Sample route
+    write_file(
+        path,
+        "src/routes/hello.rb",
+        r#"Tina4.get "/hello" do |_request, response|
+  response.text "Hello from Tina4!", 200
+end
+"#,
+    );
+
+    println!("  {} Created Ruby scaffold", "✓".green());
+}
+
+fn scaffold_nodejs(path: &str) {
+    let project_name = project_name_from_path(path);
+
+    write_file(
+        path,
+        "app.ts",
+        r#"import { startServer } from "tina4-nodejs";
+
+startServer();
+"#,
+    );
+
+    write_file(
+        path,
+        ".gitignore",
+        "node_modules/\ndist/\ndata/\nlogs/\n.env\n",
+    );
+
+    let package_json = format!(
+        r#"{{
+  "name": "{name}",
+  "version": "0.1.0",
+  "description": "A Tina4 Node.js project",
+  "main": "app.ts",
+  "scripts": {{
+    "start": "ts-node app.ts",
+    "build": "tsc"
+  }},
+  "dependencies": {{
+    "tina4-nodejs": "^3.0.0"
+  }},
+  "devDependencies": {{
+    "typescript": "^5.0.0",
+    "ts-node": "^10.0.0",
+    "@types/node": "^20.0.0"
+  }}
+}}
+"#,
+        name = project_name
+    );
+    write_file(path, "package.json", &package_json);
+
+    write_file(
+        path,
+        "tsconfig.json",
+        r#"{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "lib": ["ES2020"],
+    "outDir": "./dist",
+    "rootDir": ".",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": true
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}
+"#,
+    );
+
+    // Sample route
+    write_file(
+        path,
+        "src/routes/hello.ts",
+        r#"import { get } from "tina4-nodejs";
+
+get("/hello", async (_request, response) => {
+    return response("Hello from Tina4!", 200);
+});
+"#,
+    );
+
+    println!("  {} Created Node.js scaffold", "✓".green());
+}
+
+// -- Step 5: Install dependencies (non-fatal) --------------------------------
+
+fn install_deps(language: &str, path: &str) {
+    println!(
+        "\n{} Installing dependencies...",
+        "▶".green()
+    );
+
+    let ok = match language {
+        "python" => run_cmd_in(path, "uv", &["sync"]),
+        "php" => run_cmd_in(path, "composer", &["install"]),
+        "ruby" => run_cmd_in(path, "bundle", &["install"]),
+        "nodejs" => run_cmd_in(path, "npm", &["install"]),
+        _ => true,
+    };
+
+    if ok {
+        println!("  {} Dependencies installed", "✓".green());
+    } else {
         println!(
-            "  {} .env already exists, skipping",
+            "  {} Dependency install failed — you can run it manually later",
             "⚠".yellow()
+        );
+    }
+}
+
+// -- File helpers ------------------------------------------------------------
+
+fn write_file(base: &str, rel_path: &str, contents: &str) {
+    let full = Path::new(base).join(rel_path);
+    if full.exists() {
+        println!(
+            "  {} {} already exists, skipping",
+            "⚠".yellow(),
+            rel_path
         );
         return;
     }
-    fs::write(&env_path, "TINA4_DEBUG=true\nTINA4_LOG_LEVEL=ALL\n").unwrap_or_else(|e| {
-        eprintln!(
-            "  {} Failed to create .env: {}",
-            "✗".red(),
-            e
-        );
+    // Ensure parent directory exists
+    if let Some(parent) = full.parent() {
+        fs::create_dir_all(parent).unwrap_or_else(|e| {
+            eprintln!("  {} Failed to create directory for {}: {}", "✗".red(), rel_path, e);
+        });
+    }
+    fs::write(&full, contents).unwrap_or_else(|e| {
+        eprintln!("  {} Failed to write {}: {}", "✗".red(), rel_path, e);
     });
-    println!("  {} Created .env", "✓".green());
+    println!("  {} Created {}", "✓".green(), rel_path);
+}
+
+fn project_name_from_path(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "tina4-project".to_string())
+        .replace(' ', "-")
+        .to_lowercase()
 }

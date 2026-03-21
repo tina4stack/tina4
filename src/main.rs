@@ -1,5 +1,6 @@
 mod detect;
 mod doctor;
+mod init;
 mod install;
 mod scss;
 mod watcher;
@@ -30,13 +31,12 @@ enum Commands {
         lang: String,
     },
 
-    /// Scaffold a new Tina4 project
+    /// Scaffold a new Tina4 project: tina4 init <language> <path>
     Init {
-        /// Project directory name
-        dir: String,
         /// Language: python, php, ruby, nodejs
-        #[arg(short, long)]
         lang: String,
+        /// Project directory (absolute or relative path)
+        path: String,
     },
 
     /// Start the dev server with file watcher and SCSS compilation
@@ -91,7 +91,7 @@ fn main() {
 
         Commands::Install { lang } => install::run(&lang),
 
-        Commands::Init { dir, lang } => handle_init(&dir, &lang),
+        Commands::Init { lang, path } => init::run(&lang, &path),
 
         Commands::Serve { port, host } => handle_serve(port, &host),
 
@@ -128,66 +128,6 @@ fn main() {
     }
 }
 
-// ── Init ─────────────────────────────────────────────────────────
-
-fn handle_init(dir: &str, lang: &str) {
-    let lang_norm = lang.to_lowercase();
-    let cli_name = match lang_norm.as_str() {
-        "python" | "py" => "tina4python",
-        "php" => "tina4php",
-        "ruby" | "rb" => "tina4ruby",
-        "nodejs" | "node" | "js" | "typescript" | "ts" => "tina4nodejs",
-        _ => {
-            eprintln!(
-                "{} Unknown language: {}. Use: python, php, ruby, nodejs",
-                "✗".red(),
-                lang
-            );
-            std::process::exit(1);
-        }
-    };
-
-    if which::which(cli_name).is_err() {
-        eprintln!(
-            "{} {} not found. Run: tina4 install {}",
-            "✗".red(),
-            cli_name,
-            lang_norm
-        );
-        std::process::exit(1);
-    }
-
-    println!(
-        "{} Scaffolding {} project in {}/",
-        "▶".green(),
-        lang_norm.cyan(),
-        dir.cyan()
-    );
-
-    let status = std::process::Command::new(cli_name)
-        .args(["init", dir])
-        .status();
-
-    match status {
-        Ok(s) if s.success() => {
-            println!("{} Project created at {}/", "✓".green(), dir);
-            let scss_dir = format!("{}/src/scss", dir);
-            let css_dir = format!("{}/src/public/css", dir);
-            if std::path::Path::new(&scss_dir).exists() {
-                scss::compile_dir(&scss_dir, &css_dir, false);
-            }
-        }
-        Ok(s) => {
-            eprintln!("{} Init failed (exit {:?})", "✗".red(), s.code());
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("{} Failed to run {}: {}", "✗".red(), cli_name, e);
-            std::process::exit(1);
-        }
-    }
-}
-
 // ── Serve ────────────────────────────────────────────────────────
 
 fn handle_serve(port: Option<u16>, host: &str) {
@@ -197,7 +137,7 @@ fn handle_serve(port: Option<u16>, host: &str) {
         Some(i) => i,
         None => {
             eprintln!(
-                "{} No Tina4 project detected. Run: tina4 init <dir> --lang <language>",
+                "{} No Tina4 project detected. Run: tina4 init <language> <path>",
                 "✗".red()
             );
             std::process::exit(1);

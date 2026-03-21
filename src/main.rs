@@ -34,9 +34,9 @@ enum Commands {
     /// Scaffold a new Tina4 project: tina4 init <language> <path>
     Init {
         /// Language: python, php, ruby, nodejs
-        lang: String,
+        lang: Option<String>,
         /// Project directory (absolute or relative path)
-        path: String,
+        path: Option<String>,
     },
 
     /// Start the dev server with file watcher and SCSS compilation
@@ -91,7 +91,7 @@ fn main() {
 
         Commands::Install { lang } => install::run(&lang),
 
-        Commands::Init { lang, path } => init::run(&lang, &path),
+        Commands::Init { lang, path } => init::run(lang.as_deref(), path.as_deref()),
 
         Commands::Serve { port, host } => handle_serve(port, &host),
 

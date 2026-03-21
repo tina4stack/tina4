@@ -4,7 +4,23 @@ use std::path::Path;
 use std::process::Command;
 
 /// Run the full init flow: check runtime, check package manager, scaffold, install deps.
-pub fn run(lang: &str, path: &str) {
+pub fn run(lang: Option<&str>, path: Option<&str>) {
+    let lang = match lang {
+        Some(l) => l,
+        None => {
+            print_usage();
+            std::process::exit(1);
+        }
+    };
+
+    let path = match path {
+        Some(p) => p,
+        None => {
+            print_usage();
+            std::process::exit(1);
+        }
+    };
+
     let lang_norm = lang.to_lowercase();
 
     match lang_norm.as_str() {
@@ -18,9 +34,18 @@ pub fn run(lang: &str, path: &str) {
                 "✗".red(),
                 lang
             );
+            println!();
+            print_usage();
             std::process::exit(1);
         }
     }
+}
+
+fn print_usage() {
+    println!("Usage: tina4 init <language> <path>");
+    println!();
+    println!("Languages: python, php, ruby, nodejs");
+    println!("Example:   tina4 init python ./my-app");
 }
 
 fn init_project(language: &str, path: &str) {
@@ -34,38 +59,32 @@ fn init_project(language: &str, path: &str) {
         abs.cyan()
     );
 
-    // Step 1 — Check / install language runtime
+    // Step 1 -- Check / install language runtime
     check_runtime(language);
 
-    // Step 2 — Check / install package manager
+    // Step 2 -- Check / install package manager
     check_package_manager(language);
 
-    // Step 3 — Scaffold project
-    scaffold(language, abs);
+    // Step 3 -- Create project directory
+    create_project_dir(abs);
 
-    // Step 4 — Install framework package
-    install_deps(language, abs);
+    // Step 4 -- Delegate to language-specific init (scaffold + install deps)
+    delegate_init(language, abs);
 
-    // Step 5 — Summary
-    let port = default_port(language);
+    // Step 5 -- Create .env file
+    create_env_file(abs);
+
+    // Step 6 -- Summary
     println!();
-    println!(
-        "{} Tina4 project created at {}",
-        "✓".green(),
-        abs.cyan()
-    );
+    println!("Project created at {}", abs);
     println!();
+    println!("Next steps:");
     println!("  cd {}", abs);
     println!("  tina4 serve");
     println!();
-    println!(
-        "  Your app will run at http://localhost:{} ({} default)",
-        port, language
-    );
-    println!();
 }
 
-// ── Helpers ──────────────────────────────────────────────────────
+// -- Helpers -----------------------------------------------------------------
 
 fn to_absolute(path: &str) -> String {
     let p = Path::new(path);
@@ -75,16 +94,6 @@ fn to_absolute(path: &str) -> String {
         std::env::current_dir()
             .map(|cwd| cwd.join(p).to_string_lossy().to_string())
             .unwrap_or_else(|_| path.to_string())
-    }
-}
-
-fn default_port(language: &str) -> u16 {
-    match language {
-        "python" => 7145,
-        "php" => 7146,
-        "ruby" => 7147,
-        "nodejs" => 7148,
-        _ => 7145,
     }
 }
 
@@ -152,7 +161,7 @@ fn run_cmd_in(dir: &str, cmd: &str, args: &[&str]) -> bool {
     }
 }
 
-// ── Step 1: Runtime ──────────────────────────────────────────────
+// -- Step 1: Runtime ---------------------------------------------------------
 
 fn check_runtime(language: &str) {
     println!("\n{} Checking {} runtime...", "▶".green(), language.cyan());
@@ -166,7 +175,13 @@ fn check_runtime(language: &str) {
             } else {
                 println!("  {} python3 not found — attempting install", "⚠".yellow());
                 if cmd_exists("brew") {
-                    run_cmd("brew", &["install", "python"]);
+                    if !run_cmd("brew", &["install", "python"]) {
+                        eprintln!(
+                            "  {} brew install failed. Please install Python 3 manually:\n      https://www.python.org/downloads/",
+                            "✗".red()
+                        );
+                        std::process::exit(1);
+                    }
                 } else {
                     eprintln!(
                         "  {} Please install Python 3: https://www.python.org/downloads/",
@@ -182,7 +197,13 @@ fn check_runtime(language: &str) {
             } else {
                 println!("  {} php not found — attempting install", "⚠".yellow());
                 if cmd_exists("brew") {
-                    run_cmd("brew", &["install", "php"]);
+                    if !run_cmd("brew", &["install", "php"]) {
+                        eprintln!(
+                            "  {} brew install failed. Please install PHP manually:\n      https://www.php.net/downloads",
+                            "✗".red()
+                        );
+                        std::process::exit(1);
+                    }
                 } else {
                     eprintln!(
                         "  {} Please install PHP: https://www.php.net/downloads",
@@ -198,7 +219,13 @@ fn check_runtime(language: &str) {
             } else {
                 println!("  {} ruby not found — attempting install", "⚠".yellow());
                 if cmd_exists("brew") {
-                    run_cmd("brew", &["install", "ruby"]);
+                    if !run_cmd("brew", &["install", "ruby"]) {
+                        eprintln!(
+                            "  {} brew install failed. Please install Ruby manually:\n      https://www.ruby-lang.org/en/downloads/",
+                            "✗".red()
+                        );
+                        std::process::exit(1);
+                    }
                 } else {
                     eprintln!(
                         "  {} Please install Ruby: https://www.ruby-lang.org/en/downloads/",
@@ -214,7 +241,13 @@ fn check_runtime(language: &str) {
             } else {
                 println!("  {} node not found — attempting install", "⚠".yellow());
                 if cmd_exists("brew") {
-                    run_cmd("brew", &["install", "node"]);
+                    if !run_cmd("brew", &["install", "node"]) {
+                        eprintln!(
+                            "  {} brew install failed. Please install Node.js manually:\n      https://nodejs.org/",
+                            "✗".red()
+                        );
+                        std::process::exit(1);
+                    }
                 } else {
                     eprintln!(
                         "  {} Please install Node.js: https://nodejs.org/",
@@ -228,13 +261,10 @@ fn check_runtime(language: &str) {
     }
 }
 
-// ── Step 2: Package manager ──────────────────────────────────────
+// -- Step 2: Package manager -------------------------------------------------
 
 fn check_package_manager(language: &str) {
-    println!(
-        "\n{} Checking package manager...",
-        "▶".green()
-    );
+    println!("\n{} Checking package manager...", "▶".green());
 
     match language {
         "python" => {
@@ -248,9 +278,10 @@ fn check_package_manager(language: &str) {
                 );
                 if !ok {
                     eprintln!(
-                        "  {} Install uv manually: curl -LsSf https://astral.sh/uv/install.sh | sh",
+                        "  {} Failed to install uv. Install it manually:\n      curl -LsSf https://astral.sh/uv/install.sh | sh",
                         "✗".red()
                     );
+                    std::process::exit(1);
                 }
             }
         }
@@ -260,12 +291,19 @@ fn check_package_manager(language: &str) {
             } else {
                 println!("  {} composer not found — attempting install", "⚠".yellow());
                 if cmd_exists("brew") {
-                    run_cmd("brew", &["install", "composer"]);
+                    if !run_cmd("brew", &["install", "composer"]) {
+                        eprintln!(
+                            "  {} Failed to install composer. Install it manually:\n      https://getcomposer.org/download/",
+                            "✗".red()
+                        );
+                        std::process::exit(1);
+                    }
                 } else {
                     eprintln!(
-                        "  {} Install Composer: https://getcomposer.org/download/",
+                        "  {} Please install Composer: https://getcomposer.org/download/",
                         "✗".red()
                     );
+                    std::process::exit(1);
                 }
             }
         }
@@ -274,7 +312,13 @@ fn check_package_manager(language: &str) {
                 println!("  {} bundler found", "✓".green());
             } else {
                 println!("  {} bundler not found — installing via gem", "⚠".yellow());
-                run_cmd("gem", &["install", "bundler"]);
+                if !run_cmd("gem", &["install", "bundler"]) {
+                    eprintln!(
+                        "  {} Failed to install bundler. Install it manually:\n      gem install bundler",
+                        "✗".red()
+                    );
+                    std::process::exit(1);
+                }
             }
         }
         "nodejs" => {
@@ -285,322 +329,180 @@ fn check_package_manager(language: &str) {
                     "  {} npm not found — it should come with Node.js. Reinstall Node.",
                     "✗".red()
                 );
+                std::process::exit(1);
             }
         }
         _ => {}
     }
 }
 
-// ── Step 3: Scaffold ─────────────────────────────────────────────
+// -- Step 3: Create project directory ----------------------------------------
 
-fn scaffold(language: &str, path: &str) {
-    println!("\n{} Creating project scaffold...", "▶".green());
-
+fn create_project_dir(path: &str) {
     let p = Path::new(path);
     if p.exists() {
-        eprintln!(
-            "{} Directory already exists: {}",
-            "✗".red(),
+        println!(
+            "  {} Directory already exists: {} — using it",
+            "⚠".yellow(),
             path
         );
-        std::process::exit(1);
-    }
-
-    // Common directories
-    let dirs = [
-        "",
-        "src",
-        "src/routes",
-        "src/orm",
-        "src/templates",
-        "src/public",
-        "src/public/css",
-        "src/scss",
-        "migrations",
-        "logs",
-    ];
-    for d in &dirs {
-        let full = if d.is_empty() {
-            p.to_path_buf()
-        } else {
-            p.join(d)
-        };
-        fs::create_dir_all(&full).unwrap_or_else(|e| {
+    } else {
+        fs::create_dir_all(p).unwrap_or_else(|e| {
             eprintln!(
-                "{} Failed to create {}: {}",
+                "{} Failed to create directory {}: {}",
                 "✗".red(),
-                full.display(),
+                path,
                 e
             );
             std::process::exit(1);
         });
+        println!("  {} Created directory {}", "✓".green(), path);
     }
+}
 
-    // .env
-    write_file(
-        p,
-        ".env",
-        "TINA4_DEBUG_LEVEL=ALL\n",
+// -- Step 4: Delegate to language-specific init ------------------------------
+
+fn delegate_init(language: &str, path: &str) {
+    println!(
+        "\n{} Running {} project init...",
+        "▶".green(),
+        language.cyan()
     );
 
-    // .gitignore (language-specific)
-    write_file(p, ".gitignore", &gitignore_for(language));
-
-    // Language-specific files
     match language {
-        "python" => scaffold_python(p),
-        "php" => scaffold_php(p),
-        "ruby" => scaffold_ruby(p),
-        "nodejs" => scaffold_nodejs(p),
+        "python" => {
+            // uv init sets up pyproject.toml and venv, then add tina4-python,
+            // then run the framework's own init to scaffold routes/templates
+            if !run_cmd_in(path, "uv", &["init"]) {
+                eprintln!(
+                    "  {} uv init failed. Run manually:\n      cd {} && uv init && uv add tina4-python && uv run tina4python init .",
+                    "✗".red(),
+                    path
+                );
+                std::process::exit(1);
+            }
+            if !run_cmd_in(path, "uv", &["add", "tina4-python"]) {
+                eprintln!(
+                    "  {} uv add failed. Run manually:\n      cd {} && uv add tina4-python",
+                    "✗".red(),
+                    path
+                );
+                std::process::exit(1);
+            }
+            // Delegate to the framework CLI to scaffold routes, templates, etc.
+            if !run_cmd_in(path, "uv", &["run", "tina4python", "init", "."]) {
+                println!(
+                    "  {} tina4python init skipped (framework CLI may not be available yet)",
+                    "⚠".yellow()
+                );
+            }
+        }
+        "php" => {
+            if !run_cmd_in(
+                path,
+                "composer",
+                &["init", "--no-interaction", "--name=tina4/my-project"],
+            ) {
+                eprintln!(
+                    "  {} composer init failed. Run manually:\n      cd {} && composer init --no-interaction --name=tina4/my-project",
+                    "✗".red(),
+                    path
+                );
+                std::process::exit(1);
+            }
+            if !run_cmd_in(path, "composer", &["require", "tina4stack/tina4-php"]) {
+                eprintln!(
+                    "  {} composer require failed. Run manually:\n      cd {} && composer require tina4stack/tina4-php",
+                    "✗".red(),
+                    path
+                );
+                std::process::exit(1);
+            }
+            // Delegate to the framework CLI to scaffold routes, templates, etc.
+            if !run_cmd_in(
+                path,
+                "php",
+                &["vendor/bin/tina4php", "init", "."],
+            ) {
+                println!(
+                    "  {} tina4php init skipped (framework CLI may not be available yet)",
+                    "⚠".yellow()
+                );
+            }
+        }
+        "ruby" => {
+            if !run_cmd_in(path, "bundle", &["init"]) {
+                eprintln!(
+                    "  {} bundle init failed. Run manually:\n      cd {} && bundle init",
+                    "✗".red(),
+                    path
+                );
+                std::process::exit(1);
+            }
+            if !run_cmd_in(path, "bundle", &["add", "tina4-ruby"]) {
+                eprintln!(
+                    "  {} bundle add failed. Run manually:\n      cd {} && bundle add tina4-ruby",
+                    "✗".red(),
+                    path
+                );
+                std::process::exit(1);
+            }
+            // Delegate to the framework CLI to scaffold routes, templates, etc.
+            if !run_cmd_in(path, "bundle", &["exec", "tina4ruby", "init", "."]) {
+                println!(
+                    "  {} tina4ruby init skipped (framework CLI may not be available yet)",
+                    "⚠".yellow()
+                );
+            }
+        }
+        "nodejs" => {
+            if !run_cmd_in(path, "npm", &["init", "-y"]) {
+                eprintln!(
+                    "  {} npm init failed. Run manually:\n      cd {} && npm init -y",
+                    "✗".red(),
+                    path
+                );
+                std::process::exit(1);
+            }
+            if !run_cmd_in(path, "npm", &["install", "tina4-nodejs"]) {
+                eprintln!(
+                    "  {} npm install failed. Run manually:\n      cd {} && npm install tina4-nodejs",
+                    "✗".red(),
+                    path
+                );
+                std::process::exit(1);
+            }
+            // Delegate to the framework CLI to scaffold routes, templates, etc.
+            if !run_cmd_in(path, "npx", &["tina4nodejs", "init", "."]) {
+                println!(
+                    "  {} tina4nodejs init skipped (framework CLI may not be available yet)",
+                    "⚠".yellow()
+                );
+            }
+        }
         _ => {}
     }
 
-    println!("  {} Scaffold created", "✓".green());
+    println!("  {} Dependencies installed", "✓".green());
 }
 
-fn write_file(base: &Path, rel: &str, content: &str) {
-    let full = base.join(rel);
-    if let Some(parent) = full.parent() {
-        let _ = fs::create_dir_all(parent);
+// -- Step 5: Create .env file ------------------------------------------------
+
+fn create_env_file(path: &str) {
+    let env_path = Path::new(path).join(".env");
+    if env_path.exists() {
+        println!(
+            "  {} .env already exists, skipping",
+            "⚠".yellow()
+        );
+        return;
     }
-    fs::write(&full, content).unwrap_or_else(|e| {
+    fs::write(&env_path, "TINA4_DEBUG=true\nTINA4_LOG_LEVEL=ALL\n").unwrap_or_else(|e| {
         eprintln!(
-            "{} Failed to write {}: {}",
+            "  {} Failed to create .env: {}",
             "✗".red(),
-            full.display(),
             e
         );
-        std::process::exit(1);
     });
-}
-
-fn gitignore_for(language: &str) -> String {
-    let mut lines = vec![
-        ".env",
-        "logs/",
-        ".DS_Store",
-        "*.log",
-    ];
-
-    match language {
-        "python" => {
-            lines.extend_from_slice(&[
-                "__pycache__/",
-                "*.pyc",
-                ".venv/",
-                "dist/",
-                "*.egg-info/",
-            ]);
-        }
-        "php" => {
-            lines.extend_from_slice(&["vendor/", "composer.lock"]);
-        }
-        "ruby" => {
-            lines.extend_from_slice(&[".bundle/", "vendor/bundle/"]);
-        }
-        "nodejs" => {
-            lines.extend_from_slice(&["node_modules/", "dist/", "*.js.map"]);
-        }
-        _ => {}
-    }
-
-    lines.join("\n") + "\n"
-}
-
-fn scaffold_python(base: &Path) {
-    write_file(
-        base,
-        "app.py",
-        r#"from tina4_python.core import run
-
-
-if __name__ == "__main__":
-    run()
-"#,
-    );
-
-    write_file(
-        base,
-        "pyproject.toml",
-        r#"[project]
-name = "tina4-app"
-version = "0.1.0"
-description = "A Tina4 Python application"
-requires-python = ">=3.10"
-dependencies = [
-    "tina4-python",
-]
-"#,
-    );
-}
-
-fn scaffold_php(base: &Path) {
-    write_file(
-        base,
-        "index.php",
-        r#"<?php
-
-require_once __DIR__ . '/vendor/autoload.php';
-
-$app = new \Tina4\App();
-
-$app->start();
-
-$app->dispatch();
-"#,
-    );
-
-    write_file(
-        base,
-        "composer.json",
-        r#"{
-    "name": "tina4/app",
-    "description": "A Tina4 PHP application",
-    "type": "project",
-    "require": {
-        "tina4stack/tina4-php": "^3.0"
-    },
-    "autoload": {
-        "psr-4": {
-            "App\\": "src/"
-        }
-    }
-}
-"#,
-    );
-}
-
-fn scaffold_ruby(base: &Path) {
-    write_file(
-        base,
-        "app.rb",
-        r#"require "tina4"
-
-app = Tina4::App.new
-rack = Tina4::RackApp.new(app)
-Tina4::WebServer.start(rack)
-"#,
-    );
-
-    write_file(
-        base,
-        "Gemfile",
-        r#"source "https://rubygems.org"
-
-gem "tina4-ruby", "~> 3.0"
-"#,
-    );
-}
-
-fn scaffold_nodejs(base: &Path) {
-    write_file(
-        base,
-        "app.ts",
-        r#"import { startServer } from "tina4-nodejs";
-
-startServer();
-"#,
-    );
-
-    write_file(
-        base,
-        "package.json",
-        r#"{
-    "name": "tina4-app",
-    "version": "0.1.0",
-    "description": "A Tina4 Node.js application",
-    "private": true,
-    "scripts": {
-        "dev": "npx tsx app.ts",
-        "build": "tsc",
-        "start": "node dist/app.js"
-    },
-    "dependencies": {
-        "tina4-nodejs": "latest"
-    },
-    "devDependencies": {
-        "tsx": "^4.0.0",
-        "typescript": "^5.0.0"
-    }
-}
-"#,
-    );
-
-    write_file(
-        base,
-        "tsconfig.json",
-        r#"{
-    "compilerOptions": {
-        "target": "ES2022",
-        "module": "ESNext",
-        "moduleResolution": "bundler",
-        "esModuleInterop": true,
-        "strict": true,
-        "outDir": "dist",
-        "rootDir": ".",
-        "skipLibCheck": true
-    },
-    "include": ["app.ts", "src/**/*.ts"]
-}
-"#,
-    );
-}
-
-// ── Step 4: Install deps ─────────────────────────────────────────
-
-fn install_deps(language: &str, path: &str) {
-    println!(
-        "\n{} Installing framework dependencies...",
-        "▶".green()
-    );
-
-    match language {
-        "python" => {
-            // uv init sets up the venv, then uv add installs tina4-python
-            if cmd_exists("uv") {
-                run_cmd_in(path, "uv", &["init", "--no-readme"]);
-                run_cmd_in(path, "uv", &["add", "tina4-python"]);
-            } else {
-                eprintln!(
-                    "  {} uv not available. Run manually:\n      cd {} && uv init && uv add tina4-python",
-                    "⚠".yellow(),
-                    path
-                );
-            }
-        }
-        "php" => {
-            if cmd_exists("composer") {
-                run_cmd_in(path, "composer", &["install"]);
-            } else {
-                eprintln!(
-                    "  {} composer not available. Run manually:\n      cd {} && composer install",
-                    "⚠".yellow(),
-                    path
-                );
-            }
-        }
-        "ruby" => {
-            if cmd_exists("bundle") {
-                run_cmd_in(path, "bundle", &["install"]);
-            } else {
-                eprintln!(
-                    "  {} bundler not available. Run manually:\n      cd {} && bundle install",
-                    "⚠".yellow(),
-                    path
-                );
-            }
-        }
-        "nodejs" => {
-            if cmd_exists("npm") {
-                run_cmd_in(path, "npm", &["install"]);
-            } else {
-                eprintln!(
-                    "  {} npm not available. Run manually:\n      cd {} && npm install",
-                    "⚠".yellow(),
-                    path
-                );
-            }
-        }
-        _ => {}
-    }
+    println!("  {} Created .env", "✓".green());
 }

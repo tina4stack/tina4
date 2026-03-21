@@ -41,9 +41,13 @@ enum Commands {
 
     /// Start the dev server with file watcher and SCSS compilation
     Serve {
-        /// Port number (default: 7145)
-        #[arg(short, long, default_value = "7145")]
-        port: u16,
+        /// Port number (default: auto per framework — python:7145, php:7146, ruby:7147, nodejs:7148)
+        #[arg(short, long)]
+        port: Option<u16>,
+
+        /// Host address (default: 0.0.0.0)
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
     },
 
     /// Compile SCSS files from src/scss/ to src/public/css/
@@ -89,7 +93,7 @@ fn main() {
 
         Commands::Init { dir, lang } => handle_init(&dir, &lang),
 
-        Commands::Serve { port } => handle_serve(port),
+        Commands::Serve { port, host } => handle_serve(port, &host),
 
         Commands::Scss {
             input,
@@ -186,7 +190,7 @@ fn handle_init(dir: &str, lang: &str) {
 
 // ── Serve ────────────────────────────────────────────────────────
 
-fn handle_serve(port: u16) {
+fn handle_serve(port: Option<u16>, host: &str) {
     let lang = detect::detect_language();
 
     let info = match lang {
@@ -199,6 +203,9 @@ fn handle_serve(port: u16) {
             std::process::exit(1);
         }
     };
+
+    // Use framework-specific default port if not overridden
+    let port = port.unwrap_or_else(|| info.default_port());
 
     println!(
         "{} Detected {} project",
@@ -216,13 +223,14 @@ fn handle_serve(port: u16) {
     // Start language server
     let cli = info.cli_name();
     println!(
-        "{} Starting {} on port {}",
+        "{} Starting {} on {}:{}",
         "▶".green(),
         cli.cyan(),
+        host.yellow(),
         port.to_string().yellow()
     );
 
-    let mut server = match start_language_server(&info, port) {
+    let mut server = match start_language_server(&info, port, host) {
         Some(child) => child,
         None => {
             eprintln!("{} Failed to start server", "✗".red());
@@ -235,37 +243,39 @@ fn handle_serve(port: u16) {
         "{} File watcher active — src/, migrations/, .env",
         "👁".green()
     );
-    watcher::watch_and_reload(scss_dir, css_dir, &info, port, &mut server);
+    watcher::watch_and_reload(scss_dir, css_dir, &info, port, host, &mut server);
 }
 
 fn start_language_server(
     info: &detect::ProjectInfo,
     port: u16,
+    host: &str,
 ) -> Option<std::process::Child> {
     let port_s = port.to_string();
 
     let result = match info.language.as_str() {
-        "python" => std::process::Command::new("python")
-            .args(["app.py", &port_s])
+        "python" => std::process::Command::new("tina4python")
+            .args(["serve", "--port", &port_s, "--host", host])
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
             .spawn(),
         "php" => {
-            let addr = format!("0.0.0.0:{}", port);
-            std::process::Command::new("php")
-                .args(["-S", &addr, "-t", "."])
+            let addr = format!("{}:{}", host, port);
+            std::process::Command::new("tina4php")
+                .args(["serve", &addr])
                 .stdout(std::process::Stdio::inherit())
                 .stderr(std::process::Stdio::inherit())
                 .spawn()
         }
         "ruby" => std::process::Command::new("tina4ruby")
-            .args(["start", &port_s])
+            .args(["start", "--port", &port_s, "--host", host])
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
             .spawn(),
         "nodejs" => std::process::Command::new("npx")
             .args(["tsx", "app.ts"])
             .env("PORT", &port_s)
+            .env("HOST", host)
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
             .spawn(),

@@ -53,6 +53,7 @@ pub fn watch_and_reload(
     css_dir: &str,
     info: &ProjectInfo,
     port: u16,
+    host: &str,
     server: &mut std::process::Child,
 ) {
     let (tx, rx) = mpsc::channel();
@@ -120,7 +121,7 @@ pub fn watch_and_reload(
                     let _ = server.kill();
                     let _ = server.wait();
 
-                    match crate::start_language_server(info, port) {
+                    match crate::start_language_server(info, port, host) {
                         Some(child) => *server = child,
                         None => {
                             eprintln!("{} Failed to restart server", "✗".red());

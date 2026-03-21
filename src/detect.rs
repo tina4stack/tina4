@@ -18,6 +18,17 @@ impl ProjectInfo {
             _ => "tina4",
         }
     }
+
+    /// Returns the default port for this framework.
+    pub fn default_port(&self) -> u16 {
+        match self.language.as_str() {
+            "python" => 7145,
+            "php" => 7146,
+            "ruby" => 7147,
+            "nodejs" => 7148,
+            _ => 7145,
+        }
+    }
 }
 
 /// Detect the Tina4 project language from files in the current directory.

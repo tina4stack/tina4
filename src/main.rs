@@ -39,7 +39,8 @@ enum Commands {
         path: Option<String>,
     },
 
-    /// Start the dev server with file watcher and SCSS compilation
+    /// Start the server with file watcher and SCSS compilation.
+    /// Production servers are auto-detected; use --dev to force the dev server.
     Serve {
         /// Port number (default: auto per framework — python:7145, php:7146, ruby:7147, nodejs:7148)
         #[arg(short, long)]
@@ -48,6 +49,10 @@ enum Commands {
         /// Host address (default: 0.0.0.0)
         #[arg(long, default_value = "0.0.0.0")]
         host: String,
+
+        /// Force dev server even if a production server is available
+        #[arg(long)]
+        dev: bool,
     },
 
     /// Compile SCSS files from src/scss/ to src/public/css/
@@ -93,7 +98,7 @@ fn main() {
 
         Commands::Init { lang, path } => init::run(lang.as_deref(), path.as_deref()),
 
-        Commands::Serve { port, host } => handle_serve(port, &host),
+        Commands::Serve { port, host, dev } => handle_serve(port, &host, dev),
 
         Commands::Scss {
             input,
@@ -130,7 +135,7 @@ fn main() {
 
 // ── Serve ────────────────────────────────────────────────────────
 
-fn handle_serve(port: Option<u16>, host: &str) {
+fn handle_serve(port: Option<u16>, host: &str, force_dev: bool) {
     let lang = detect::detect_language();
 
     let info = match lang {
@@ -153,6 +158,16 @@ fn handle_serve(port: Option<u16>, host: &str) {
         info.language.cyan()
     );
 
+    // Set TINA4_DEBUG=true when --dev flag is used, so the framework
+    // CLI forces the dev server even if a production server is installed
+    if force_dev {
+        std::env::set_var("TINA4_DEBUG", "true");
+        println!(
+            "{} Dev mode forced — production server detection disabled",
+            "ℹ".blue()
+        );
+    }
+
     // Compile SCSS
     let scss_dir = "src/scss";
     let css_dir = "src/public/css";
@@ -160,7 +175,7 @@ fn handle_serve(port: Option<u16>, host: &str) {
         scss::compile_dir(scss_dir, css_dir, false);
     }
 
-    // Start language server
+    // Start language server (auto-detects production server internally)
     let cli = info.cli_name();
     println!(
         "{} Starting {} on {}:{}",

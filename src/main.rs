@@ -290,8 +290,16 @@ fn start_language_server(
             .spawn(),
         "php" => {
             let addr = format!("{}:{}", host, port);
-            std::process::Command::new("tina4php")
-                .args(["serve", &addr])
+            // Try vendor/bin/tina4php first (composer install), then bin/tina4php
+            let tina4php = if std::path::Path::new("vendor/bin/tina4php").exists() {
+                "vendor/bin/tina4php"
+            } else if std::path::Path::new("bin/tina4php").exists() {
+                "bin/tina4php"
+            } else {
+                "tina4php"
+            };
+            std::process::Command::new("php")
+                .args([tina4php, "serve", &addr])
                 .stdout(std::process::Stdio::inherit())
                 .stderr(std::process::Stdio::inherit())
                 .spawn()

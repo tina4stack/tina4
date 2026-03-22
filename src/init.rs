@@ -80,13 +80,7 @@ fn init_project(language: &str, path: &str) {
     println!();
     println!("Next steps:");
     println!("  cd {}", abs);
-    match language {
-        "python" => println!("  uv run python app.py"),
-        "php" => println!("  php -S localhost:7145 index.php"),
-        "ruby" => println!("  ruby app.rb"),
-        "nodejs" => println!("  npx ts-node app.ts"),
-        _ => println!("  tina4 serve"),
-    }
+    println!("  tina4 serve");
     println!();
 }
 

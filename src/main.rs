@@ -283,14 +283,28 @@ fn start_language_server(
     let port_s = port.to_string();
 
     let result = match info.language.as_str() {
-        "python" => std::process::Command::new("tina4python")
-            .args(["serve", "--port", &port_s, "--host", host])
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .spawn(),
+        "python" => {
+            // Use uv run if .venv exists, otherwise python directly
+            if std::path::Path::new(".venv").exists() {
+                std::process::Command::new("uv")
+                    .args(["run", "python", "app.py"])
+                    .env("PORT", &port_s)
+                    .env("HOST", host)
+                    .stdout(std::process::Stdio::inherit())
+                    .stderr(std::process::Stdio::inherit())
+                    .spawn()
+            } else {
+                std::process::Command::new("python3")
+                    .args(["app.py"])
+                    .env("PORT", &port_s)
+                    .env("HOST", host)
+                    .stdout(std::process::Stdio::inherit())
+                    .stderr(std::process::Stdio::inherit())
+                    .spawn()
+            }
+        }
         "php" => {
             let addr = format!("{}:{}", host, port);
-            // Try vendor/bin/tina4php first (composer install), then bin/tina4php
             let tina4php = if std::path::Path::new("vendor/bin/tina4php").exists() {
                 "vendor/bin/tina4php"
             } else if std::path::Path::new("bin/tina4php").exists() {
@@ -304,18 +318,37 @@ fn start_language_server(
                 .stderr(std::process::Stdio::inherit())
                 .spawn()
         }
-        "ruby" => std::process::Command::new("tina4ruby")
-            .args(["start", "--port", &port_s, "--host", host])
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .spawn(),
-        "nodejs" => std::process::Command::new("npx")
-            .args(["tsx", "app.ts"])
-            .env("PORT", &port_s)
-            .env("HOST", host)
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .spawn(),
+        "ruby" => {
+            // Use bundle exec if Gemfile exists
+            if std::path::Path::new("Gemfile").exists() {
+                std::process::Command::new("bundle")
+                    .args(["exec", "ruby", "app.rb"])
+                    .env("PORT", &port_s)
+                    .env("HOST", host)
+                    .stdout(std::process::Stdio::inherit())
+                    .stderr(std::process::Stdio::inherit())
+                    .spawn()
+            } else {
+                std::process::Command::new("ruby")
+                    .args(["app.rb"])
+                    .env("PORT", &port_s)
+                    .env("HOST", host)
+                    .stdout(std::process::Stdio::inherit())
+                    .stderr(std::process::Stdio::inherit())
+                    .spawn()
+            }
+        }
+        "nodejs" => {
+            // Use npx tsx for TypeScript
+            let entry = if std::path::Path::new("app.ts").exists() { "app.ts" } else { "app.js" };
+            std::process::Command::new("npx")
+                .args(["tsx", entry])
+                .env("PORT", &port_s)
+                .env("HOST", host)
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .spawn()
+        }
         _ => return None,
     };
 

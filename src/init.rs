@@ -485,7 +485,7 @@ $app->run();
     "description": "A Tina4 PHP project",
     "type": "project",
     "require": {{
-        "tina4stack/tina4-php": "^3.0"
+        "tina4stack/tina4php": "^3.0"
     }},
     "autoload": {{
         "psr-4": {{

@@ -31,6 +31,9 @@ jobs:
 
     runs-on: ${{ matrix.os }}
 
+    env:
+      SIGN_ENABLED: ${{ secrets.CERT_THUMBPRINT }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -59,7 +62,7 @@ jobs:
         run: cp target/${{ matrix.target }}/release/tina4.exe ${{ matrix.name }}
 
       - name: Install SimplySign Desktop (Windows)
-        if: runner.os == 'Windows' && secrets.CERT_THUMBPRINT != ''
+        if: runner.os == 'Windows' && env.SIGN_ENABLED != ''
         shell: powershell
         run: |
           Write-Host "Downloading SimplySign Desktop..."
@@ -71,7 +74,7 @@ jobs:
           Write-Host "SimplySign Desktop installed"
 
       - name: Sign Windows binary
-        if: runner.os == 'Windows' && secrets.CERT_THUMBPRINT != ''
+        if: runner.os == 'Windows' && env.SIGN_ENABLED != ''
         shell: powershell
         env:
           SIMPLYSIGN_OTP_URI: ${{ secrets.SIMPLYSIGN_OTP_URI }}

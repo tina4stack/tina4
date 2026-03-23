@@ -427,10 +427,284 @@ fn delegate_command(args: Vec<String>) {
 
 // ── Update ───────────────────────────────────────────────────────
 
+const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const REPO: &str = "tina4stack/tina4";
+
 fn handle_update() {
     println!("{} Checking for updates...", icon_play().green());
+
+    // Step 1: Check for and clean up old v2 CLI binaries
+    clean_v2_binaries();
+
+    // Step 2: Get latest version from GitHub API
+    let latest_tag = match get_latest_version() {
+        Some(tag) => tag,
+        None => {
+            eprintln!(
+                "{} Could not check latest version. Download manually from:\n  https://github.com/{}/releases",
+                icon_warn().yellow(), REPO
+            );
+            return;
+        }
+    };
+
+    let latest_ver = latest_tag.trim_start_matches('v');
     println!(
-        "{} Self-update not yet configured. Download from: https://github.com/tina4stack/tina4/releases",
-        icon_info().blue()
+        "  {} Current: {}  Latest: {}",
+        icon_info().blue(),
+        CURRENT_VERSION.cyan(),
+        latest_ver.cyan()
     );
+
+    if latest_ver == CURRENT_VERSION {
+        println!("{} Already up to date", icon_ok().green());
+        return;
+    }
+
+    // Step 3: Download and replace binary
+    let binary_name = get_binary_name();
+    let download_url = format!(
+        "https://github.com/{}/releases/download/{}/{}",
+        REPO, latest_tag, binary_name
+    );
+
+    println!(
+        "{} Downloading {} ...",
+        icon_play().green(),
+        binary_name.cyan()
+    );
+
+    let current_exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{} Cannot determine current executable path: {}", icon_fail().red(), e);
+            return;
+        }
+    };
+
+    let tmp_path = current_exe.with_extension("tmp");
+
+    if !download_file(&download_url, &tmp_path) {
+        eprintln!(
+            "{} Download failed. Download manually from:\n  https://github.com/{}/releases",
+            icon_fail().red(), REPO
+        );
+        return;
+    }
+
+    // Replace current binary
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(&tmp_path) {
+            let mut perms = meta.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&tmp_path, perms).ok();
+        }
+    }
+
+    let backup_path = current_exe.with_extension("old");
+    // On Windows, can't replace running exe directly — rename current first
+    if std::fs::rename(&current_exe, &backup_path).is_err() {
+        // Try copy instead
+        if std::fs::copy(&current_exe, &backup_path).is_err() {
+            eprintln!("{} Cannot backup current binary", icon_fail().red());
+            std::fs::remove_file(&tmp_path).ok();
+            return;
+        }
+    }
+
+    if std::fs::rename(&tmp_path, &current_exe).is_err() {
+        if std::fs::copy(&tmp_path, &current_exe).is_err() {
+            eprintln!("{} Cannot replace binary — restoring backup", icon_fail().red());
+            std::fs::rename(&backup_path, &current_exe).ok();
+            std::fs::remove_file(&tmp_path).ok();
+            return;
+        }
+        std::fs::remove_file(&tmp_path).ok();
+    }
+
+    // Clean up backup
+    std::fs::remove_file(&backup_path).ok();
+
+    println!(
+        "{} Updated tina4 {} → {}",
+        icon_ok().green(),
+        CURRENT_VERSION.dimmed(),
+        latest_ver.cyan()
+    );
+}
+
+/// Detect and remove old v2 CLI binaries that may shadow the v3 CLI.
+fn clean_v2_binaries() {
+    let stale_names = ["tina4python", "tina4php", "tina4ruby", "tina4nodejs"];
+    let mut found_any = false;
+
+    for name in &stale_names {
+        if let Ok(path) = which::which(name) {
+            // Check if it's a global binary (not in vendor/bin or .venv)
+            let path_str = path.to_string_lossy();
+            if path_str.contains("vendor") || path_str.contains(".venv") || path_str.contains("node_modules") {
+                continue;
+            }
+
+            // Try to detect if it's v2 by running --version
+            let is_v2 = std::process::Command::new(&path)
+                .arg("--version")
+                .output()
+                .map(|o| {
+                    let out = String::from_utf8_lossy(&o.stdout).to_string()
+                        + &String::from_utf8_lossy(&o.stderr);
+                    // v2 indicators: Thor, old version numbers, deprecation warnings
+                    out.contains("Thor") || out.contains("Deprecation") || out.contains("1.") || out.contains("2.")
+                })
+                .unwrap_or(false);
+
+            if is_v2 {
+                if !found_any {
+                    println!(
+                        "\n{} Found old v2 CLI binaries on PATH:",
+                        icon_warn().yellow()
+                    );
+                    found_any = true;
+                }
+                println!("  {} {} ({})", icon_fail().red(), name, path_str.dimmed());
+
+                // Remove it
+                match std::fs::remove_file(&path) {
+                    Ok(_) => println!("    {} Removed", icon_ok().green()),
+                    Err(_) => {
+                        // Try with .bat extension on Windows
+                        let bat_path = path.with_extension("bat");
+                        std::fs::remove_file(&bat_path).ok();
+                        println!(
+                            "    {} Cannot remove — delete manually: {}",
+                            icon_warn().yellow(),
+                            path_str
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check for old non-Rust tina4 binaries
+    if let Ok(tina4_path) = which::which("tina4") {
+        let current_exe = std::env::current_exe().unwrap_or_default();
+        if tina4_path != current_exe {
+            // There's another tina4 on PATH that isn't us
+            let is_old = std::process::Command::new(&tina4_path)
+                .arg("--version")
+                .output()
+                .map(|o| {
+                    let out = String::from_utf8_lossy(&o.stdout).to_string()
+                        + &String::from_utf8_lossy(&o.stderr);
+                    out.contains("Thor") || out.contains("Deprecation") || !out.contains("tina4")
+                })
+                .unwrap_or(false);
+
+            if is_old {
+                if !found_any {
+                    println!(
+                        "\n{} Found old v2 CLI binaries on PATH:",
+                        icon_warn().yellow()
+                    );
+                }
+                let path_str = tina4_path.to_string_lossy();
+                println!("  {} tina4 ({})", icon_fail().red(), path_str.dimmed());
+                match std::fs::remove_file(&tina4_path) {
+                    Ok(_) => {
+                        // Also remove .bat wrapper if present
+                        let bat = tina4_path.with_extension("bat");
+                        std::fs::remove_file(bat).ok();
+                        println!("    {} Removed", icon_ok().green());
+                    }
+                    Err(_) => println!(
+                        "    {} Cannot remove — delete manually: {}",
+                        icon_warn().yellow(),
+                        path_str
+                    ),
+                }
+            }
+        }
+    }
+
+    if found_any {
+        println!();
+    }
+}
+
+fn get_latest_version() -> Option<String> {
+    let api_url = format!("https://api.github.com/repos/{}/releases/latest", REPO);
+
+    let output = if console::is_windows() {
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command",
+                &format!("(Invoke-RestMethod -Uri '{}' -Headers @{{'User-Agent'='tina4-cli'}}).tag_name", api_url)])
+            .output()
+            .ok()?
+    } else {
+        std::process::Command::new("curl")
+            .args(["-fsSL", "-H", "User-Agent: tina4-cli", &api_url])
+            .output()
+            .ok()?
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    if console::is_windows() {
+        // PowerShell returns the tag directly
+        if text.starts_with('v') {
+            return Some(text);
+        }
+    } else {
+        // curl returns JSON, extract tag_name
+        for line in text.lines() {
+            if line.contains("\"tag_name\"") {
+                let tag = line.split('"').nth(3)?;
+                return Some(tag.to_string());
+            }
+        }
+    }
+
+    None
+}
+
+fn get_binary_name() -> String {
+    let os = if cfg!(target_os = "macos") {
+        "darwin"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else {
+        "linux"
+    };
+
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "amd64"
+    };
+
+    if cfg!(target_os = "windows") {
+        format!("tina4-{}-{}.exe", os, arch)
+    } else {
+        format!("tina4-{}-{}", os, arch)
+    }
+}
+
+fn download_file(url: &str, dest: &std::path::Path) -> bool {
+    let dest_str = dest.to_string_lossy();
+
+    let status = if console::is_windows() {
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command",
+                &format!("Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing", url, dest_str)])
+            .status()
+    } else {
+        std::process::Command::new("curl")
+            .args(["-fsSL", "-o", &dest_str, url])
+            .status()
+    };
+
+    matches!(status, Ok(s) if s.success())
 }

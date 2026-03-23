@@ -3,6 +3,8 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use crate::console::{self, icon_fail, icon_ok, icon_play, icon_warn};
+
 /// Run the full init flow: check runtime, check package manager, scaffold, install deps.
 pub fn run(lang: Option<&str>, path: Option<&str>) {
     let lang = match lang {
@@ -31,7 +33,7 @@ pub fn run(lang: Option<&str>, path: Option<&str>) {
         _ => {
             eprintln!(
                 "{} Unknown language: {}. Use: python, php, ruby, nodejs",
-                "✗".red(),
+                icon_fail().red(),
                 lang
             );
             println!();
@@ -54,7 +56,7 @@ fn init_project(language: &str, path: &str) {
 
     println!(
         "\n{} Initialising {} project at {}",
-        "▶".green(),
+        icon_play().green(),
         language.cyan(),
         abs.cyan()
     );
@@ -76,7 +78,7 @@ fn init_project(language: &str, path: &str) {
 
     // Step 6 -- Summary
     println!();
-    println!("{} Project created at {}", "✓".green(), abs);
+    println!("{} Project created at {}", icon_ok().green(), abs);
     println!();
     println!("Next steps:");
     println!("  cd {}", abs);
@@ -104,7 +106,7 @@ fn cmd_exists(cmd: &str) -> bool {
 fn run_cmd(cmd: &str, args: &[&str]) -> bool {
     println!(
         "  {} Running: {} {}",
-        "▶".green(),
+        icon_play().green(),
         cmd,
         args.join(" ")
     );
@@ -113,13 +115,13 @@ fn run_cmd(cmd: &str, args: &[&str]) -> bool {
         Ok(s) => {
             eprintln!(
                 "  {} Command failed (exit {:?})",
-                "✗".red(),
+                icon_fail().red(),
                 s.code()
             );
             false
         }
         Err(e) => {
-            eprintln!("  {} Failed to run {}: {}", "✗".red(), cmd, e);
+            eprintln!("  {} Failed to run {}: {}", icon_fail().red(), cmd, e);
             false
         }
     }
@@ -128,7 +130,7 @@ fn run_cmd(cmd: &str, args: &[&str]) -> bool {
 fn run_cmd_in(dir: &str, cmd: &str, args: &[&str]) -> bool {
     println!(
         "  {} Running: {} {} (in {})",
-        "▶".green(),
+        icon_play().green(),
         cmd,
         args.join(" "),
         dir
@@ -138,7 +140,7 @@ fn run_cmd_in(dir: &str, cmd: &str, args: &[&str]) -> bool {
         Ok(s) => {
             eprintln!(
                 "  {} Command failed (exit {:?}). You can run it manually:\n      cd {} && {} {}",
-                "✗".red(),
+                icon_fail().red(),
                 s.code(),
                 dir,
                 cmd,
@@ -149,7 +151,7 @@ fn run_cmd_in(dir: &str, cmd: &str, args: &[&str]) -> bool {
         Err(e) => {
             eprintln!(
                 "  {} Failed to run {}: {}. You can run it manually:\n      cd {} && {} {}",
-                "✗".red(),
+                icon_fail().red(),
                 cmd,
                 e,
                 dir,
@@ -164,28 +166,33 @@ fn run_cmd_in(dir: &str, cmd: &str, args: &[&str]) -> bool {
 // -- Step 1: Runtime ---------------------------------------------------------
 
 fn check_runtime(language: &str) {
-    println!("\n{} Checking {} runtime...", "▶".green(), language.cyan());
+    println!("\n{} Checking {} runtime...", icon_play().green(), language.cyan());
 
     match language {
         "python" => {
-            if cmd_exists("python3") {
-                println!("  {} python3 found", "✓".green());
-            } else if cmd_exists("python") {
-                println!("  {} python found", "✓".green());
+            let py = console::python_cmd();
+            if cmd_exists(py) {
+                println!("  {} {} found", icon_ok().green(), py);
             } else {
-                println!("  {} python3 not found — attempting install", "⚠".yellow());
-                if cmd_exists("brew") {
+                println!("  {} python not found — attempting install", icon_warn().yellow());
+                if console::is_windows() {
+                    eprintln!(
+                        "  {} Please install Python 3: https://www.python.org/downloads/",
+                        icon_fail().red()
+                    );
+                    std::process::exit(1);
+                } else if cmd_exists("brew") {
                     if !run_cmd("brew", &["install", "python"]) {
                         eprintln!(
                             "  {} brew install failed. Please install Python 3 manually:\n      https://www.python.org/downloads/",
-                            "✗".red()
+                            icon_fail().red()
                         );
                         std::process::exit(1);
                     }
                 } else {
                     eprintln!(
                         "  {} Please install Python 3: https://www.python.org/downloads/",
-                        "✗".red()
+                        icon_fail().red()
                     );
                     std::process::exit(1);
                 }
@@ -193,21 +200,27 @@ fn check_runtime(language: &str) {
         }
         "php" => {
             if cmd_exists("php") {
-                println!("  {} php found", "✓".green());
+                println!("  {} php found", icon_ok().green());
             } else {
-                println!("  {} php not found — attempting install", "⚠".yellow());
-                if cmd_exists("brew") {
+                println!("  {} php not found — attempting install", icon_warn().yellow());
+                if console::is_windows() {
+                    eprintln!(
+                        "  {} Please install PHP: https://www.php.net/downloads",
+                        icon_fail().red()
+                    );
+                    std::process::exit(1);
+                } else if cmd_exists("brew") {
                     if !run_cmd("brew", &["install", "php"]) {
                         eprintln!(
                             "  {} brew install failed. Please install PHP manually:\n      https://www.php.net/downloads",
-                            "✗".red()
+                            icon_fail().red()
                         );
                         std::process::exit(1);
                     }
                 } else {
                     eprintln!(
                         "  {} Please install PHP: https://www.php.net/downloads",
-                        "✗".red()
+                        icon_fail().red()
                     );
                     std::process::exit(1);
                 }
@@ -215,21 +228,27 @@ fn check_runtime(language: &str) {
         }
         "ruby" => {
             if cmd_exists("ruby") {
-                println!("  {} ruby found", "✓".green());
+                println!("  {} ruby found", icon_ok().green());
             } else {
-                println!("  {} ruby not found — attempting install", "⚠".yellow());
-                if cmd_exists("brew") {
+                println!("  {} ruby not found — attempting install", icon_warn().yellow());
+                if console::is_windows() {
+                    eprintln!(
+                        "  {} Please install Ruby: https://rubyinstaller.org/",
+                        icon_fail().red()
+                    );
+                    std::process::exit(1);
+                } else if cmd_exists("brew") {
                     if !run_cmd("brew", &["install", "ruby"]) {
                         eprintln!(
                             "  {} brew install failed. Please install Ruby manually:\n      https://www.ruby-lang.org/en/downloads/",
-                            "✗".red()
+                            icon_fail().red()
                         );
                         std::process::exit(1);
                     }
                 } else {
                     eprintln!(
                         "  {} Please install Ruby: https://www.ruby-lang.org/en/downloads/",
-                        "✗".red()
+                        icon_fail().red()
                     );
                     std::process::exit(1);
                 }
@@ -237,21 +256,27 @@ fn check_runtime(language: &str) {
         }
         "nodejs" => {
             if cmd_exists("node") {
-                println!("  {} node found", "✓".green());
+                println!("  {} node found", icon_ok().green());
             } else {
-                println!("  {} node not found — attempting install", "⚠".yellow());
-                if cmd_exists("brew") {
+                println!("  {} node not found — attempting install", icon_warn().yellow());
+                if console::is_windows() {
+                    eprintln!(
+                        "  {} Please install Node.js: https://nodejs.org/",
+                        icon_fail().red()
+                    );
+                    std::process::exit(1);
+                } else if cmd_exists("brew") {
                     if !run_cmd("brew", &["install", "node"]) {
                         eprintln!(
                             "  {} brew install failed. Please install Node.js manually:\n      https://nodejs.org/",
-                            "✗".red()
+                            icon_fail().red()
                         );
                         std::process::exit(1);
                     }
                 } else {
                     eprintln!(
                         "  {} Please install Node.js: https://nodejs.org/",
-                        "✗".red()
+                        icon_fail().red()
                     );
                     std::process::exit(1);
                 }
@@ -264,22 +289,29 @@ fn check_runtime(language: &str) {
 // -- Step 2: Package manager -------------------------------------------------
 
 fn check_package_manager(language: &str) {
-    println!("\n{} Checking package manager...", "▶".green());
+    println!("\n{} Checking package manager...", icon_play().green());
 
     match language {
         "python" => {
             if cmd_exists("uv") {
-                println!("  {} uv found", "✓".green());
+                println!("  {} uv found", icon_ok().green());
             } else {
-                println!("  {} uv not found — installing", "⚠".yellow());
-                let ok = run_cmd(
-                    "sh",
-                    &["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"],
-                );
+                println!("  {} uv not found — installing", icon_warn().yellow());
+                let ok = if console::is_windows() {
+                    run_cmd(
+                        "powershell",
+                        &["-ExecutionPolicy", "ByPass", "-c", "irm https://astral.sh/uv/install.ps1 | iex"],
+                    )
+                } else {
+                    run_cmd(
+                        "sh",
+                        &["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"],
+                    )
+                };
                 if !ok {
                     eprintln!(
                         "  {} Failed to install uv. Install it manually:\n      curl -LsSf https://astral.sh/uv/install.sh | sh",
-                        "✗".red()
+                        icon_fail().red()
                     );
                     std::process::exit(1);
                 }
@@ -287,21 +319,27 @@ fn check_package_manager(language: &str) {
         }
         "php" => {
             if cmd_exists("composer") {
-                println!("  {} composer found", "✓".green());
+                println!("  {} composer found", icon_ok().green());
             } else {
-                println!("  {} composer not found — attempting install", "⚠".yellow());
-                if cmd_exists("brew") {
+                println!("  {} composer not found — attempting install", icon_warn().yellow());
+                if console::is_windows() {
+                    eprintln!(
+                        "  {} Please install Composer: https://getcomposer.org/Composer-Setup.exe",
+                        icon_fail().red()
+                    );
+                    std::process::exit(1);
+                } else if cmd_exists("brew") {
                     if !run_cmd("brew", &["install", "composer"]) {
                         eprintln!(
                             "  {} Failed to install composer. Install it manually:\n      https://getcomposer.org/download/",
-                            "✗".red()
+                            icon_fail().red()
                         );
                         std::process::exit(1);
                     }
                 } else {
                     eprintln!(
                         "  {} Please install Composer: https://getcomposer.org/download/",
-                        "✗".red()
+                        icon_fail().red()
                     );
                     std::process::exit(1);
                 }
@@ -309,13 +347,13 @@ fn check_package_manager(language: &str) {
         }
         "ruby" => {
             if cmd_exists("bundle") {
-                println!("  {} bundler found", "✓".green());
+                println!("  {} bundler found", icon_ok().green());
             } else {
-                println!("  {} bundler not found — installing via gem", "⚠".yellow());
+                println!("  {} bundler not found — installing via gem", icon_warn().yellow());
                 if !run_cmd("gem", &["install", "bundler"]) {
                     eprintln!(
                         "  {} Failed to install bundler. Install it manually:\n      gem install bundler",
-                        "✗".red()
+                        icon_fail().red()
                     );
                     std::process::exit(1);
                 }
@@ -323,11 +361,11 @@ fn check_package_manager(language: &str) {
         }
         "nodejs" => {
             if cmd_exists("npm") {
-                println!("  {} npm found", "✓".green());
+                println!("  {} npm found", icon_ok().green());
             } else {
                 eprintln!(
                     "  {} npm not found — it should come with Node.js. Reinstall Node.",
-                    "✗".red()
+                    icon_fail().red()
                 );
                 std::process::exit(1);
             }
@@ -343,20 +381,20 @@ fn create_project_dir(path: &str) {
     if p.exists() {
         println!(
             "  {} Directory already exists: {} — using it",
-            "⚠".yellow(),
+            icon_warn().yellow(),
             path
         );
     } else {
         fs::create_dir_all(p).unwrap_or_else(|e| {
             eprintln!(
                 "{} Failed to create directory {}: {}",
-                "✗".red(),
+                icon_fail().red(),
                 path,
                 e
             );
             std::process::exit(1);
         });
-        println!("  {} Created directory {}", "✓".green(), path);
+        println!("  {} Created directory {}", icon_ok().green(), path);
     }
 }
 
@@ -365,7 +403,7 @@ fn create_project_dir(path: &str) {
 fn scaffold_project(language: &str, path: &str) {
     println!(
         "\n{} Scaffolding {} project...",
-        "▶".green(),
+        icon_play().green(),
         language.cyan()
     );
 
@@ -386,10 +424,10 @@ fn scaffold_project(language: &str, path: &str) {
     for dir in &common_dirs {
         let full = Path::new(path).join(dir);
         fs::create_dir_all(&full).unwrap_or_else(|e| {
-            eprintln!("  {} Failed to create {}: {}", "✗".red(), dir, e);
+            eprintln!("  {} Failed to create {}: {}", icon_fail().red(), dir, e);
         });
     }
-    println!("  {} Created directory structure", "✓".green());
+    println!("  {} Created directory structure", icon_ok().green());
 
     // .env
     write_file(path, ".env", "TINA4_DEBUG=true\nTINA4_LOG_LEVEL=ALL\n");
@@ -426,8 +464,15 @@ version = "0.1.0"
 description = "A Tina4 Python project"
 requires-python = ">=3.12"
 dependencies = [
-    "tina4-python>=3.0.0rc1",
+    "tina4-python>=3.1.0",
 ]
+
+# Database drivers are optional — install only what you need:
+#   uv add psycopg2-binary   # PostgreSQL
+#   uv add mysql-connector-python  # MySQL
+#   uv add pymssql            # MSSQL
+#   uv add firebird-driver    # Firebird
+#   uv add pymongo            # MongoDB
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
@@ -449,7 +494,7 @@ async def hello(request, response):
 "#,
     );
 
-    println!("  {} Created Python scaffold", "✓".green());
+    println!("  {} Created Python scaffold", icon_ok().green());
 }
 
 fn scaffold_php(path: &str) {
@@ -498,13 +543,13 @@ $app->run();
         "src/routes/hello.php",
         r#"<?php
 
-\Tina4\Get::add("/hello", function (\Tina4\Response $response) {
+\Tina4\Route::get("/hello", function (\Tina4\Response $response) {
     return $response("Hello from Tina4!", HTTP_OK);
 });
 "#,
     );
 
-    println!("  {} Created PHP scaffold", "✓".green());
+    println!("  {} Created PHP scaffold", icon_ok().green());
 }
 
 fn scaffold_ruby(path: &str) {
@@ -543,7 +588,7 @@ end
 "#,
     );
 
-    println!("  {} Created Ruby scaffold", "✓".green());
+    println!("  {} Created Ruby scaffold", icon_ok().green());
 }
 
 fn scaffold_nodejs(path: &str) {
@@ -623,7 +668,7 @@ get("/hello", async (_request, response) => {
 "#,
     );
 
-    println!("  {} Created Node.js scaffold", "✓".green());
+    println!("  {} Created Node.js scaffold", icon_ok().green());
 }
 
 // -- Step 5: Install dependencies (non-fatal) --------------------------------
@@ -631,7 +676,7 @@ get("/hello", async (_request, response) => {
 fn install_deps(language: &str, path: &str) {
     println!(
         "\n{} Installing dependencies...",
-        "▶".green()
+        icon_play().green()
     );
 
     let ok = match language {
@@ -643,11 +688,11 @@ fn install_deps(language: &str, path: &str) {
     };
 
     if ok {
-        println!("  {} Dependencies installed", "✓".green());
+        println!("  {} Dependencies installed", icon_ok().green());
     } else {
         println!(
             "  {} Dependency install failed — you can run it manually later",
-            "⚠".yellow()
+            icon_warn().yellow()
         );
     }
 }
@@ -659,7 +704,7 @@ fn write_file(base: &str, rel_path: &str, contents: &str) {
     if full.exists() {
         println!(
             "  {} {} already exists, skipping",
-            "⚠".yellow(),
+            icon_warn().yellow(),
             rel_path
         );
         return;
@@ -667,13 +712,13 @@ fn write_file(base: &str, rel_path: &str, contents: &str) {
     // Ensure parent directory exists
     if let Some(parent) = full.parent() {
         fs::create_dir_all(parent).unwrap_or_else(|e| {
-            eprintln!("  {} Failed to create directory for {}: {}", "✗".red(), rel_path, e);
+            eprintln!("  {} Failed to create directory for {}: {}", icon_fail().red(), rel_path, e);
         });
     }
     fs::write(&full, contents).unwrap_or_else(|e| {
-        eprintln!("  {} Failed to write {}: {}", "✗".red(), rel_path, e);
+        eprintln!("  {} Failed to write {}: {}", icon_fail().red(), rel_path, e);
     });
-    println!("  {} Created {}", "✓".green(), rel_path);
+    println!("  {} Created {}", icon_ok().green(), rel_path);
 }
 
 fn project_name_from_path(path: &str) -> String {

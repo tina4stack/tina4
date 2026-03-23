@@ -2,6 +2,8 @@ use colored::Colorize;
 use std::fs;
 use std::path::Path;
 
+use crate::console::{icon_fail, icon_ok};
+
 /// Compile all non-partial SCSS files in `input_dir` to `output_dir`.
 ///
 /// Partials (files starting with `_`) are skipped as top-level targets
@@ -15,14 +17,14 @@ pub fn compile_dir(input_dir: &str, output_dir: &str, minify: bool) {
     // Ensure output directory exists
     let output = Path::new(output_dir);
     if let Err(e) = fs::create_dir_all(output) {
-        eprintln!("{} Cannot create {}: {}", "✗".red(), output_dir, e);
+        eprintln!("{} Cannot create {}: {}", icon_fail().red(), output_dir, e);
         return;
     }
 
     let entries = match fs::read_dir(input) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("{} Cannot read {}: {}", "✗".red(), input_dir, e);
+            eprintln!("{} Cannot read {}: {}", icon_fail().red(), input_dir, e);
             return;
         }
     };
@@ -43,7 +45,7 @@ pub fn compile_dir(input_dir: &str, output_dir: &str, minify: bool) {
                 compiled += 1;
                 println!(
                     "  {} {} → {}",
-                    "✓".green(),
+                    icon_ok().green(),
                     path.display().to_string().dimmed(),
                     out_path.cyan()
                 );
@@ -51,7 +53,7 @@ pub fn compile_dir(input_dir: &str, output_dir: &str, minify: bool) {
             Err(e) => {
                 eprintln!(
                     "  {} {} — {}",
-                    "✗".red(),
+                    icon_fail().red(),
                     path.display(),
                     e
                 );
@@ -62,7 +64,7 @@ pub fn compile_dir(input_dir: &str, output_dir: &str, minify: bool) {
     if compiled > 0 {
         println!(
             "{} Compiled {} SCSS file{}",
-            "✓".green(),
+            icon_ok().green(),
             compiled,
             if compiled == 1 { "" } else { "s" }
         );

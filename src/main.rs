@@ -1,3 +1,4 @@
+pub mod console;
 mod detect;
 mod doctor;
 mod generate;
@@ -9,10 +10,12 @@ mod watcher;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 
+use crate::console::{icon_eye, icon_fail, icon_info, icon_ok, icon_play, icon_warn};
+
 #[derive(Parser)]
 #[command(
     name = "tina4",
-    version = "3.0.0",
+    version = "3.1.8",
     about = "Tina4 — Unified CLI for Python, PHP, Ruby, and Node.js",
     long_about = "The Tina4 CLI detects your project language, manages runtimes,\ncompiles SCSS, watches files for dev-reload, and delegates\nto the language-specific CLI (tina4python, tina4php, tina4ruby, tina4nodejs)."
 )]
@@ -104,6 +107,7 @@ enum Commands {
 }
 
 fn main() {
+    console::enable_ansi();
     let cli = Cli::parse();
 
     match cli.command {
@@ -125,7 +129,7 @@ fn main() {
             if watch {
                 println!(
                     "{} Watching {} for SCSS changes...",
-                    "▶".green(),
+                    icon_play().green(),
                     input.cyan()
                 );
                 watcher::watch_scss(&input, &output, minify);
@@ -160,7 +164,7 @@ fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_production
         None => {
             eprintln!(
                 "{} No Tina4 project detected. Run: tina4 init <language> <path>",
-                "✗".red()
+                icon_fail().red()
             );
             std::process::exit(1);
         }
@@ -171,7 +175,7 @@ fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_production
 
     println!(
         "{} Detected {} project",
-        "✓".green(),
+        icon_ok().green(),
         info.language.cyan()
     );
 
@@ -181,7 +185,7 @@ fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_production
         std::env::set_var("TINA4_DEBUG", "true");
         println!(
             "{} Dev mode forced — production server detection disabled",
-            "ℹ".blue()
+            icon_info().blue()
         );
     }
 
@@ -190,7 +194,7 @@ fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_production
         std::env::set_var("TINA4_DEBUG", "false");
         println!(
             "{} Production mode — installing best server if needed",
-            "▶".green()
+            icon_play().green()
         );
         install_production_server(&info);
     }
@@ -206,7 +210,7 @@ fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_production
     let cli = info.cli_name();
     println!(
         "{} Starting {} on {}:{}",
-        "▶".green(),
+        icon_play().green(),
         cli.cyan(),
         host.yellow(),
         port.to_string().yellow()
@@ -215,7 +219,7 @@ fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_production
     let mut server = match start_language_server(&info, port, host) {
         Some(child) => child,
         None => {
-            eprintln!("{} Failed to start server", "✗".red());
+            eprintln!("{} Failed to start server", icon_fail().red());
             std::process::exit(1);
         }
     };
@@ -223,55 +227,37 @@ fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_production
     // File watcher (blocks)
     println!(
         "{} File watcher active — src/, migrations/, .env",
-        "👁".green()
+        icon_eye().green()
     );
     watcher::watch_and_reload(scss_dir, css_dir, &info, port, host, &mut server);
 }
 
 fn install_production_server(info: &detect::ProjectInfo) {
-    let (check_cmd, install_cmd, name) = match info.language.as_str() {
-        "python" => ("uvicorn --version", "uv add uvicorn", "uvicorn"),
-        "php" => ("php -m", "echo 'OPcache is built-in'", "opcache"),
-        "ruby" => ("gem list puma", "gem install puma --no-doc", "puma"),
-        "nodejs" => ("echo 'cluster is built-in'", "echo 'ok'", "cluster"),
+    let (name, check_fn, install_cmd): (&str, Box<dyn Fn() -> bool>, &str) = match info.language.as_str() {
+        "python" => ("uvicorn", Box::new(|| which::which("uvicorn").is_ok()), "uv add uvicorn"),
+        "php" => ("opcache", Box::new(|| true), ""), // built-in
+        "ruby" => ("puma", Box::new(|| {
+            console::shell_output("gem list puma")
+                .map(|o| !o.stdout.is_empty() && String::from_utf8_lossy(&o.stdout).contains("puma"))
+                .unwrap_or(false)
+        }), "gem install puma --no-doc"),
+        "nodejs" => ("cluster", Box::new(|| true), ""), // built-in
         _ => return,
     };
 
-    // Check if already installed
-    let check = std::process::Command::new("sh")
-        .args(["-c", check_cmd])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    if check_fn() {
+        println!("  {} {} already installed", icon_ok().green(), name.cyan());
+        return;
+    }
 
-    let needs_install = match info.language.as_str() {
-        "python" => check.map(|s| !s.success()).unwrap_or(true),
-        "ruby" => {
-            let out = std::process::Command::new("sh")
-                .args(["-c", "gem list puma | grep puma"])
-                .output();
-            out.map(|o| o.stdout.is_empty()).unwrap_or(true)
-        }
-        _ => false, // PHP opcache and Node cluster are built-in
-    };
-
-    if needs_install {
-        println!(
-            "  {} Installing {}...",
-            "▶".green(),
-            name.cyan()
-        );
-        let result = std::process::Command::new("sh")
-            .args(["-c", install_cmd])
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status();
-        match result {
-            Ok(s) if s.success() => println!("  {} {} installed", "✓".green(), name.cyan()),
-            _ => println!("  {} Failed to install {} — using dev server", "⚠".yellow(), name),
-        }
-    } else {
-        println!("  {} {} already installed", "✓".green(), name.cyan());
+    println!(
+        "  {} Installing {}...",
+        icon_play().green(),
+        name.cyan()
+    );
+    match console::shell_exec(install_cmd) {
+        Ok(s) if s.success() => println!("  {} {} installed", icon_ok().green(), name.cyan()),
+        _ => println!("  {} Failed to install {} — using dev server", icon_warn().yellow(), name),
     }
 }
 
@@ -294,7 +280,7 @@ fn start_language_server(
                     .stderr(std::process::Stdio::inherit())
                     .spawn()
             } else {
-                std::process::Command::new("python3")
+                std::process::Command::new(console::python_cmd())
                     .args(["app.py"])
                     .env("PORT", &port_s)
                     .env("HOST", host)
@@ -305,15 +291,16 @@ fn start_language_server(
         }
         "php" => {
             let addr = format!("{}:{}", host, port);
-            let tina4php = if std::path::Path::new("vendor/bin/tina4php").exists() {
-                "vendor/bin/tina4php"
+            let vendor_path = console::php_vendor_bin("tina4php");
+            let tina4php = if std::path::Path::new(&vendor_path).exists() {
+                vendor_path.as_str().to_string()
             } else if std::path::Path::new("bin/tina4php").exists() {
-                "bin/tina4php"
+                "bin/tina4php".to_string()
             } else {
-                "tina4php"
+                "tina4php".to_string()
             };
             std::process::Command::new("php")
-                .args([tina4php, "serve", &addr])
+                .args([tina4php.as_str(), "serve", addr.as_str()])
                 .stdout(std::process::Stdio::inherit())
                 .stderr(std::process::Stdio::inherit())
                 .spawn()
@@ -364,7 +351,7 @@ fn delegate_command(args: Vec<String>) {
             match std::process::Command::new(cli).args(&args).status() {
                 Ok(s) if !s.success() => std::process::exit(s.code().unwrap_or(1)),
                 Err(e) => {
-                    eprintln!("{} Failed to run {}: {}", "✗".red(), cli, e);
+                    eprintln!("{} Failed to run {}: {}", icon_fail().red(), cli, e);
                     std::process::exit(1);
                 }
                 _ => {}
@@ -373,7 +360,7 @@ fn delegate_command(args: Vec<String>) {
         None => {
             eprintln!(
                 "{} No Tina4 project detected in current directory",
-                "✗".red()
+                icon_fail().red()
             );
             std::process::exit(1);
         }
@@ -383,9 +370,9 @@ fn delegate_command(args: Vec<String>) {
 // ── Update ───────────────────────────────────────────────────────
 
 fn handle_update() {
-    println!("{} Checking for updates...", "▶".green());
+    println!("{} Checking for updates...", icon_play().green());
     println!(
         "{} Self-update not yet configured. Download from: https://github.com/tina4stack/tina4/releases",
-        "ℹ".blue()
+        icon_info().blue()
     );
 }

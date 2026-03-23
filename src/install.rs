@@ -1,6 +1,8 @@
 use colored::Colorize;
 use std::process::Command;
 
+use crate::console::{self, icon_fail, icon_info, icon_ok, icon_play, icon_warn};
+
 pub fn run(lang: &str) {
     let lang_norm = lang.to_lowercase();
 
@@ -18,7 +20,7 @@ pub fn run(lang: &str) {
         _ => {
             eprintln!(
                 "{} Unknown language: {}. Use: python, php, ruby, nodejs, all",
-                "✗".red(),
+                icon_fail().red(),
                 lang
             );
             std::process::exit(1);
@@ -27,10 +29,10 @@ pub fn run(lang: &str) {
 }
 
 fn install_python() {
-    println!("\n{} Installing Python...", "▶".green());
+    println!("\n{} Installing Python...", icon_play().green());
 
     if check_exists("python3") || check_exists("python") {
-        println!("  {} Python already installed", "✓".green());
+        println!("  {} Python already installed", icon_ok().green());
     } else {
         run_install_commands(&[
             // macOS
@@ -42,12 +44,14 @@ fn install_python() {
 
     // Install uv (Python package manager)
     if check_exists("uv") {
-        println!("  {} uv already installed", "✓".green());
+        println!("  {} uv already installed", icon_ok().green());
     } else {
-        println!("  {} Installing uv...", "▶".green());
-        let _ = Command::new("sh")
-            .args(["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"])
-            .status();
+        println!("  {} Installing uv...", icon_play().green());
+        if console::is_windows() {
+            let _ = console::shell_exec("powershell -ExecutionPolicy ByPass -c \"irm https://astral.sh/uv/install.ps1 | iex\"");
+        } else {
+            let _ = console::shell_exec("curl -LsSf https://astral.sh/uv/install.sh | sh");
+        }
     }
 
     // Install tina4python
@@ -55,10 +59,10 @@ fn install_python() {
 }
 
 fn install_php() {
-    println!("\n{} Installing PHP...", "▶".green());
+    println!("\n{} Installing PHP...", icon_play().green());
 
     if check_exists("php") {
-        println!("  {} PHP already installed", "✓".green());
+        println!("  {} PHP already installed", icon_ok().green());
     } else {
         run_install_commands(&[
             ("brew", &["install", "php@8.3"]),
@@ -68,25 +72,29 @@ fn install_php() {
 
     // Install composer
     if check_exists("composer") {
-        println!("  {} Composer already installed", "✓".green());
+        println!("  {} Composer already installed", icon_ok().green());
     } else {
-        println!("  {} Installing Composer...", "▶".green());
-        let script = r#"
-            php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
-            php composer-setup.php --install-dir=/usr/local/bin --filename=composer
-            php -r "unlink('composer-setup.php');"
-        "#;
-        let _ = Command::new("sh").args(["-c", script]).status();
+        println!("  {} Installing Composer...", icon_play().green());
+        if console::is_windows() {
+            // On Windows, direct users to download the installer
+            println!(
+                "  {} Download Composer installer from: https://getcomposer.org/Composer-Setup.exe",
+                icon_info().blue()
+            );
+        } else {
+            let script = r#"php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');" && php composer-setup.php --install-dir=/usr/local/bin --filename=composer && php -r "unlink('composer-setup.php');" "#;
+            let _ = console::shell_exec(script);
+        }
     }
 
     println!(
         "  {} Install tina4php: composer global require tina4stack/tina4-php",
-        "ℹ".blue()
+        icon_info().blue()
     );
 }
 
 fn install_ruby() {
-    println!("\n{} Installing Ruby...", "▶".green());
+    println!("\n{} Installing Ruby...", icon_play().green());
 
     if check_exists("ruby") {
         let version = get_version("ruby", "--version");
@@ -94,14 +102,14 @@ fn install_ruby() {
         if version.starts_with("ruby 2") {
             println!(
                 "  {} System Ruby {} detected — installing modern Ruby...",
-                "⚠".yellow(),
+                icon_warn().yellow(),
                 version.trim()
             );
             let _ = Command::new("brew")
                 .args(["install", "ruby"])
                 .status();
         } else {
-            println!("  {} Ruby already installed ({})", "✓".green(), version.trim());
+            println!("  {} Ruby already installed ({})", icon_ok().green(), version.trim());
         }
     } else {
         run_install_commands(&[
@@ -112,9 +120,9 @@ fn install_ruby() {
 
     // Install bundler
     if check_exists("bundle") {
-        println!("  {} Bundler already installed", "✓".green());
+        println!("  {} Bundler already installed", icon_ok().green());
     } else {
-        println!("  {} Installing Bundler...", "▶".green());
+        println!("  {} Installing Bundler...", icon_play().green());
         let _ = Command::new("gem")
             .args(["install", "bundler"])
             .status();
@@ -125,10 +133,15 @@ fn install_ruby() {
 }
 
 fn install_nodejs() {
-    println!("\n{} Installing Node.js...", "▶".green());
+    println!("\n{} Installing Node.js...", icon_play().green());
 
     if check_exists("node") {
-        println!("  {} Node.js already installed", "✓".green());
+        println!("  {} Node.js already installed", icon_ok().green());
+    } else if console::is_windows() {
+        println!(
+            "  {} Install Node.js from: https://nodejs.org/",
+            icon_info().blue()
+        );
     } else {
         run_install_commands(&[
             ("brew", &["install", "node@22"]),
@@ -139,7 +152,7 @@ fn install_nodejs() {
 
     // npm comes with node, check it
     if check_exists("npm") {
-        println!("  {} npm already installed", "✓".green());
+        println!("  {} npm already installed", icon_ok().green());
     }
 
     // Install tina4nodejs
@@ -164,11 +177,11 @@ fn get_version(cmd: &str, flag: &str) -> String {
 fn run_install_commands(attempts: &[(&str, &[&str])]) {
     for (cmd, args) in attempts {
         if check_exists(cmd) {
-            println!("  {} Running: {} {}", "▶".green(), cmd, args.join(" "));
+            println!("  {} Running: {} {}", icon_play().green(), cmd, args.join(" "));
             let status = Command::new(cmd).args(*args).status();
             match status {
                 Ok(s) if s.success() => {
-                    println!("  {} Installed successfully", "✓".green());
+                    println!("  {} Installed successfully", icon_ok().green());
                     return;
                 }
                 _ => continue,
@@ -177,20 +190,20 @@ fn run_install_commands(attempts: &[(&str, &[&str])]) {
     }
     eprintln!(
         "  {} Could not install automatically. Please install manually.",
-        "✗".red()
+        icon_fail().red()
     );
 }
 
 fn install_tina4_cli(cli_name: &str, pkg_cmd: &str, args: &[&str]) {
     if check_exists(cli_name) {
-        println!("  {} {} already installed", "✓".green(), cli_name);
+        println!("  {} {} already installed", icon_ok().green(), cli_name);
     } else if check_exists(pkg_cmd) {
-        println!("  {} Installing {}...", "▶".green(), cli_name);
+        println!("  {} Installing {}...", icon_play().green(), cli_name);
         let _ = Command::new(pkg_cmd).args(args).status();
     } else {
         println!(
             "  {} Cannot install {} — {} not found",
-            "⚠".yellow(),
+            icon_warn().yellow(),
             cli_name,
             pkg_cmd
         );

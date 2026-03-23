@@ -1,3 +1,4 @@
+use crate::console::{icon_fail, icon_ok};
 use crate::detect;
 use colored::Colorize;
 use std::fs;
@@ -10,7 +11,7 @@ pub fn run(what: &str, name: &str) {
         None => {
             eprintln!(
                 "{} No Tina4 project detected. Run: tina4 init <language> <path>",
-                "✗".red()
+                icon_fail().red()
             );
             std::process::exit(1);
         }
@@ -24,7 +25,7 @@ pub fn run(what: &str, name: &str) {
         _ => {
             eprintln!(
                 "{} Unknown generator: {}",
-                "✗".red(),
+                icon_fail().red(),
                 what.yellow()
             );
             eprintln!("  Available generators: model, route, migration, middleware");
@@ -38,7 +39,7 @@ pub fn run(what: &str, name: &str) {
 fn ensure_dir(dir: &str) {
     if !Path::new(dir).exists() {
         fs::create_dir_all(dir).unwrap_or_else(|e| {
-            eprintln!("{} Failed to create directory {}: {}", "✗".red(), dir, e);
+            eprintln!("{} Failed to create directory {}: {}", icon_fail().red(), dir, e);
             std::process::exit(1);
         });
     }
@@ -48,16 +49,16 @@ fn write_file(path: &str, content: &str) {
     if Path::new(path).exists() {
         eprintln!(
             "{} File already exists: {}",
-            "✗".red(),
+            icon_fail().red(),
             path.yellow()
         );
         std::process::exit(1);
     }
     fs::write(path, content).unwrap_or_else(|e| {
-        eprintln!("{} Failed to write {}: {}", "✗".red(), path, e);
+        eprintln!("{} Failed to write {}: {}", icon_fail().red(), path, e);
         std::process::exit(1);
     });
-    println!("{} Created {}", "✓".green(), path.cyan());
+    println!("{} Created {}", icon_ok().green(), path.cyan());
 }
 
 fn to_snake(name: &str) -> String {
@@ -541,7 +542,7 @@ fn to_camel(name: &str) -> String {
 fn unsupported(lang: &str) {
     eprintln!(
         "{} Unsupported language: {}",
-        "✗".red(),
+        icon_fail().red(),
         lang.yellow()
     );
     std::process::exit(1);

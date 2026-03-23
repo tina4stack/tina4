@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use crate::console::{icon_fail, icon_ok, icon_play};
 use crate::detect::ProjectInfo;
 
 /// Watch SCSS directory and recompile on changes. Blocks forever.
@@ -39,7 +40,7 @@ pub fn watch_scss(input_dir: &str, output_dir: &str, minify: bool) {
                 crate::scss::compile_dir(input_dir, output_dir, minify);
             }
             Err(e) => {
-                eprintln!("{} Watcher error: {}", "✗".red(), e);
+                eprintln!("{} Watcher error: {}", icon_fail().red(), e);
                 break;
             }
         }
@@ -124,13 +125,13 @@ pub fn watch_and_reload(
                     match crate::start_language_server(info, port, host) {
                         Some(child) => *server = child,
                         None => {
-                            eprintln!("{} Failed to restart server", "✗".red());
+                            eprintln!("{} Failed to restart server", icon_fail().red());
                         }
                     }
                 }
             }
             Ok(Err(e)) => {
-                eprintln!("{} Watch error: {:?}", "✗".red(), e);
+                eprintln!("{} Watch error: {:?}", icon_fail().red(), e);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -138,10 +139,10 @@ pub fn watch_and_reload(
     }
 
     // Cleanup
-    println!("\n{} Shutting down...", "▶".yellow());
+    println!("\n{} Shutting down...", icon_play().yellow());
     let _ = server.kill();
     let _ = server.wait();
-    println!("{} Server stopped", "✓".green());
+    println!("{} Server stopped", icon_ok().green());
 }
 
 fn ctrlc_handler(running: std::sync::Arc<std::sync::atomic::AtomicBool>) {

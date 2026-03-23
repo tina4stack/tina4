@@ -1,3 +1,4 @@
+use crate::console::{icon_ok, icon_fail, icon_play, icon_info};
 use colored::Colorize;
 use std::process::Command;
 
@@ -84,16 +85,16 @@ pub fn run() {
         };
 
         let status_icon = if status {
-            "✓".green().to_string()
+            icon_ok().green().to_string()
         } else {
-            "✗".red().to_string()
+            icon_fail().red().to_string()
         };
         let pkg_icon = if pkg_status {
-            "✓".green().to_string()
+            icon_ok().green().to_string()
         } else if tool.pkg_manager.is_some() {
-            "✗".red().to_string()
+            icon_fail().red().to_string()
         } else {
-            "—".dimmed().to_string()
+            "-".dimmed().to_string()
         };
 
         let ver = if status {
@@ -130,9 +131,9 @@ pub fn run() {
     for (cli, lang) in &clis {
         let found = which::which(cli).is_ok();
         let icon = if found {
-            "✓".green().to_string()
+            icon_ok().green().to_string()
         } else {
-            "✗".red().to_string()
+            icon_fail().red().to_string()
         };
         let status_text = if found {
             "installed".cyan().to_string()
@@ -148,14 +149,14 @@ pub fn run() {
         Some(info) => {
             println!(
                 "  {} Current directory: {} project",
-                "▶".green(),
+                icon_play().green(),
                 info.language.cyan()
             );
         }
         None => {
             println!(
                 "  {} No Tina4 project detected in current directory",
-                "ℹ".blue()
+                icon_info().blue()
             );
         }
     }

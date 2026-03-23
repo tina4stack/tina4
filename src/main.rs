@@ -199,7 +199,18 @@ fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_production
     };
 
     // Use framework-specific default port if not overridden
-    let port = port.unwrap_or_else(|| info.default_port());
+    let requested_port = port.unwrap_or_else(|| info.default_port());
+
+    // Find an available port (auto-increment if in use)
+    let port = console::find_available_port(requested_port, 10);
+    if port != requested_port {
+        println!(
+            "{} Port {} in use — using {} instead",
+            icon_warn().yellow(),
+            requested_port.to_string().dimmed(),
+            port.to_string().cyan()
+        );
+    }
 
     println!(
         "{} Detected {} project",
@@ -251,6 +262,12 @@ fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_production
             std::process::exit(1);
         }
     };
+
+    // Give the server a moment to bind, then open browser
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let url = format!("http://localhost:{}", port);
+    console::open_browser(&url);
+    println!("{} Browser opened: {}", icon_ok().green(), url.cyan());
 
     // File watcher (blocks)
     println!(

@@ -97,6 +97,41 @@ pub fn python_cmd() -> &'static str {
     }
 }
 
+/// Find an available port starting from `start`, trying up to `max_tries` ports.
+/// Returns the first available port, or the original if all are taken.
+pub fn find_available_port(start: u16, max_tries: u16) -> u16 {
+    for offset in 0..max_tries {
+        let port = start + offset;
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+    start
+}
+
+/// Open the default browser to the given URL. Cross-platform.
+pub fn open_browser(url: &str) {
+    let _ = if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+            .arg(url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    } else if cfg!(target_os = "windows") {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    } else {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+    };
+}
+
 /// Get the PHP vendor binary path.
 /// Always returns the PHP script path (not the .bat wrapper),
 /// since we invoke it via `php <path>`.

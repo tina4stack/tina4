@@ -579,18 +579,7 @@ packages = ["src"]
     );
     write_file(path, "pyproject.toml", &pyproject);
 
-    // Sample route
-    write_file(
-        path,
-        "src/routes/hello.py",
-        r#"from tina4_python.core.router import get
-
-@get("/hello")
-async def hello(request, response):
-    """A sample route that returns a greeting."""
-    return response({"message": "Hello from Tina4!", "status": "ok"})
-"#,
-    );
+    // src/routes/ is created empty — users add routes via gallery or manually
 
     println!("  {} Created Python scaffold", icon_ok().green());
 }
@@ -635,17 +624,7 @@ $app->run();
     );
     write_file(path, "composer.json", &composer);
 
-    // Sample route
-    write_file(
-        path,
-        "src/routes/hello.php",
-        r#"<?php
-
-\Tina4\Route::get("/hello", function (\Tina4\Response $response) {
-    return $response("Hello from Tina4!", HTTP_OK);
-});
-"#,
-    );
+    // src/routes/ is created empty — users add routes via gallery or manually
 
     println!("  {} Created PHP scaffold", icon_ok().green());
 }
@@ -676,15 +655,7 @@ gem "tina4-ruby", "~> 3.0"
 "#,
     );
 
-    // Sample route
-    write_file(
-        path,
-        "src/routes/hello.rb",
-        r#"Tina4.get "/hello" do |_request, response|
-  response.text "Hello from Tina4!", 200
-end
-"#,
-    );
+    // src/routes/ is created empty — users add routes via gallery or manually
 
     println!("  {} Created Ruby scaffold", icon_ok().green());
 }
@@ -754,17 +725,7 @@ startServer();
 "#,
     );
 
-    // Sample route
-    write_file(
-        path,
-        "src/routes/hello.ts",
-        r#"import { get } from "tina4-nodejs";
-
-get("/hello", async (_request, response) => {
-    return response("Hello from Tina4!", 200);
-});
-"#,
-    );
+    // src/routes/ is created empty — users add routes via gallery or manually
 
     println!("  {} Created Node.js scaffold", icon_ok().green());
 }

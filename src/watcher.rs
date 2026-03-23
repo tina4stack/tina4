@@ -118,9 +118,8 @@ pub fn watch_and_reload(
                         changed.dimmed()
                     );
 
-                    // Kill old server, start new one
-                    let _ = server.kill();
-                    let _ = server.wait();
+                    // Kill old server and its entire process group
+                    kill_server(server);
 
                     // Wait for the port to be released before restarting
                     wait_for_port(port, host);
@@ -143,9 +142,35 @@ pub fn watch_and_reload(
 
     // Cleanup
     println!("\n{} Shutting down...", icon_play().yellow());
-    let _ = server.kill();
-    let _ = server.wait();
+    kill_server(server);
     println!("{} Server stopped", icon_ok().green());
+}
+
+/// Kill the server process and all its children.
+/// On Unix, kills the entire process group to prevent orphaned workers
+/// from holding the port (EADDRINUSE / errno 98).
+fn kill_server(server: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // Kill the entire process group: negative PID = process group
+        let pid = server.id() as i32;
+        unsafe {
+            libc::kill(-pid, libc::SIGTERM);
+        }
+        // Give processes a moment to exit gracefully
+        std::thread::sleep(Duration::from_millis(300));
+        // Force kill if still alive
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = server.kill();
+    }
+
+    let _ = server.wait();
 }
 
 /// Wait until nothing is listening on the given port, up to 5 seconds.

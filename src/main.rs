@@ -16,7 +16,7 @@ use crate::console::{icon_eye, icon_fail, icon_info, icon_ok, icon_play, icon_wa
 #[derive(Parser)]
 #[command(
     name = "tina4",
-    version = "3.3.0",
+    version = "3.3.1",
     about = "Tina4 — Unified CLI for Python, PHP, Ruby, and Node.js",
     long_about = "The Tina4 CLI detects your project language, manages runtimes,\ncompiles SCSS, watches files for dev-reload, and delegates\nto the language-specific CLI (tina4python, tina4php, tina4ruby, tina4nodejs)."
 )]
@@ -289,6 +289,25 @@ fn install_production_server(info: &detect::ProjectInfo) {
     }
 }
 
+/// Apply pre_exec to put the child in its own process group on Unix,
+/// so we can kill the entire group on restart (prevents EADDRINUSE).
+#[cfg(unix)]
+fn set_process_group(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setpgid(0, 0);
+            Ok(())
+        });
+    }
+    cmd
+}
+
+#[cfg(not(unix))]
+fn set_process_group(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    cmd
+}
+
 fn start_language_server(
     info: &detect::ProjectInfo,
     port: u16,
@@ -300,21 +319,21 @@ fn start_language_server(
         "python" => {
             // Use uv run if .venv exists, otherwise python directly
             if std::path::Path::new(".venv").exists() {
-                std::process::Command::new("uv")
-                    .args(["run", "python", "app.py"])
+                let mut cmd = std::process::Command::new("uv");
+                cmd.args(["run", "python", "app.py"])
                     .env("PORT", &port_s)
                     .env("HOST", host)
                     .stdout(std::process::Stdio::inherit())
-                    .stderr(std::process::Stdio::inherit())
-                    .spawn()
+                    .stderr(std::process::Stdio::inherit());
+                set_process_group(&mut cmd).spawn()
             } else {
-                std::process::Command::new(console::python_cmd())
-                    .args(["app.py"])
+                let mut cmd = std::process::Command::new(console::python_cmd());
+                cmd.args(["app.py"])
                     .env("PORT", &port_s)
                     .env("HOST", host)
                     .stdout(std::process::Stdio::inherit())
-                    .stderr(std::process::Stdio::inherit())
-                    .spawn()
+                    .stderr(std::process::Stdio::inherit());
+                set_process_group(&mut cmd).spawn()
             }
         }
         "php" => {
@@ -328,44 +347,44 @@ fn start_language_server(
                 return None;
             }
             let addr = format!("{}:{}", host, port);
-            let (cmd, mut cmd_args) = resolve_cli(info);
+            let (cmd_name, mut cmd_args) = resolve_cli(info);
             cmd_args.extend(["serve".into(), addr]);
-            std::process::Command::new(&cmd)
-                .args(&cmd_args)
+            let mut cmd = std::process::Command::new(&cmd_name);
+            cmd.args(&cmd_args)
                 .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit())
-                .spawn()
+                .stderr(std::process::Stdio::inherit());
+            set_process_group(&mut cmd).spawn()
         }
         "ruby" => {
             // Use bundle exec if Gemfile exists
             if std::path::Path::new("Gemfile").exists() {
-                std::process::Command::new("bundle")
-                    .args(["exec", "ruby", "app.rb"])
+                let mut cmd = std::process::Command::new("bundle");
+                cmd.args(["exec", "ruby", "app.rb"])
                     .env("PORT", &port_s)
                     .env("HOST", host)
                     .stdout(std::process::Stdio::inherit())
-                    .stderr(std::process::Stdio::inherit())
-                    .spawn()
+                    .stderr(std::process::Stdio::inherit());
+                set_process_group(&mut cmd).spawn()
             } else {
-                std::process::Command::new("ruby")
-                    .args(["app.rb"])
+                let mut cmd = std::process::Command::new("ruby");
+                cmd.args(["app.rb"])
                     .env("PORT", &port_s)
                     .env("HOST", host)
                     .stdout(std::process::Stdio::inherit())
-                    .stderr(std::process::Stdio::inherit())
-                    .spawn()
+                    .stderr(std::process::Stdio::inherit());
+                set_process_group(&mut cmd).spawn()
             }
         }
         "nodejs" => {
             // Use npx tsx for TypeScript
             let entry = if std::path::Path::new("app.ts").exists() { "app.ts" } else { "app.js" };
-            std::process::Command::new("npx")
-                .args(["tsx", entry])
+            let mut cmd = std::process::Command::new("npx");
+            cmd.args(["tsx", entry])
                 .env("PORT", &port_s)
                 .env("HOST", host)
                 .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit())
-                .spawn()
+                .stderr(std::process::Stdio::inherit());
+            set_process_group(&mut cmd).spawn()
         }
         _ => return None,
     };

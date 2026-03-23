@@ -122,6 +122,9 @@ pub fn watch_and_reload(
                     let _ = server.kill();
                     let _ = server.wait();
 
+                    // Wait for the port to be released before restarting
+                    wait_for_port(port, host);
+
                     match crate::start_language_server(info, port, host) {
                         Some(child) => *server = child,
                         None => {
@@ -143,6 +146,41 @@ pub fn watch_and_reload(
     let _ = server.kill();
     let _ = server.wait();
     println!("{} Server stopped", icon_ok().green());
+}
+
+/// Wait until nothing is listening on the given port, up to 5 seconds.
+fn wait_for_port(port: u16, _host: &str) {
+    use std::net::TcpStream;
+
+    // Connect to localhost — if connection is refused, port is free.
+    let addr = format!("127.0.0.1:{}", port);
+    for i in 0..10 {
+        match TcpStream::connect_timeout(
+            &addr.parse().unwrap(),
+            Duration::from_millis(200),
+        ) {
+            Ok(_) => {
+                // Something is still listening — wait and retry
+                if i == 0 {
+                    println!(
+                        "  {} Waiting for port {} to be released...",
+                        icon_play().yellow(),
+                        port.to_string().cyan()
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(_) => {
+                // Connection refused — port is free
+                return;
+            }
+        }
+    }
+    eprintln!(
+        "  {} Port {} still in use — restarting anyway",
+        icon_fail().yellow(),
+        port
+    );
 }
 
 fn ctrlc_handler(running: std::sync::Arc<std::sync::atomic::AtomicBool>) {

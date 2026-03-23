@@ -90,11 +90,9 @@ fn detect_v2_project() -> Option<String> {
     }
 
     // Detect language
-    if Path::new("composer.json").exists() {
-        if let Ok(content) = fs::read_to_string("composer.json") {
-            if content.contains("tina4") {
-                return Some("php".into());
-            }
+    if let Ok(content) = fs::read_to_string("composer.json") {
+        if content.contains("tina4") {
+            return Some("php".into());
         }
     }
     if Path::new("pyproject.toml").exists() || Path::new("requirements.txt").exists() {
@@ -193,30 +191,22 @@ fn upgrade_manifest(lang: &str) -> usize {
 
 fn upgrade_composer_json() -> usize {
     let path = "composer.json";
-    if let Ok(content) = fs::read_to_string(path) {
-        // Update tina4php dependency from v2 to v3
-        let updated = content
-            .replace("\"tina4stack/tina4php\": \"^2", "\"tina4stack/tina4php\": \"^3")
-            .replace("\"tina4stack/tina4php\": \"~2", "\"tina4stack/tina4php\": \"^3")
-            // Remove old split packages (v2 had separate packages)
-            .replace("\"tina4stack/tina4php-core\"", "\"_removed_tina4php-core\"")
-            .replace("\"tina4stack/tina4php-database\"", "\"_removed_tina4php-database\"")
-            .replace("\"tina4stack/tina4php-orm\"", "\"_removed_tina4php-orm\"");
-        if updated != content {
-            if fs::write(path, &updated).is_ok() {
-                println!(
-                    "  {} Updated composer.json — tina4php ^3.0",
-                    icon_ok().green()
-                );
-                if updated.contains("_removed_") {
-                    println!(
-                        "  {} Removed old split packages (tina4php-core, -database, -orm) — v3 is unified",
-                        icon_info().blue()
-                    );
-                }
-                return 1;
-            }
+    let Ok(content) = fs::read_to_string(path) else { return 0 };
+    let updated = content
+        .replace("\"tina4stack/tina4php\": \"^2", "\"tina4stack/tina4php\": \"^3")
+        .replace("\"tina4stack/tina4php\": \"~2", "\"tina4stack/tina4php\": \"^3")
+        .replace("\"tina4stack/tina4php-core\"", "\"_removed_tina4php-core\"")
+        .replace("\"tina4stack/tina4php-database\"", "\"_removed_tina4php-database\"")
+        .replace("\"tina4stack/tina4php-orm\"", "\"_removed_tina4php-orm\"");
+    if updated != content && fs::write(path, &updated).is_ok() {
+        println!("  {} Updated composer.json — tina4php ^3.0", icon_ok().green());
+        if updated.contains("_removed_") {
+            println!(
+                "  {} Removed old split packages (tina4php-core, -database, -orm) — v3 is unified",
+                icon_info().blue()
+            );
         }
+        return 1;
     }
     0
 }
@@ -228,31 +218,20 @@ fn upgrade_pyproject_toml() -> usize {
             .replace("tina4-python>=2", "tina4-python>=3")
             .replace("tina4-python~=2", "tina4-python>=3")
             .replace("tina4-python==2", "tina4-python>=3");
-        if updated != content {
-            if fs::write(path, &updated).is_ok() {
-                println!(
-                    "  {} Updated pyproject.toml — tina4-python >=3",
-                    icon_ok().green()
-                );
-                return 1;
-            }
+        if updated != content && fs::write(path, &updated).is_ok() {
+            println!("  {} Updated pyproject.toml — tina4-python >=3", icon_ok().green());
+            return 1;
         }
     }
-    // Also check requirements.txt
     let req_path = "requirements.txt";
     if let Ok(content) = fs::read_to_string(req_path) {
         let updated = content
             .replace("tina4-python>=2", "tina4-python>=3")
             .replace("tina4-python~=2", "tina4-python>=3")
             .replace("tina4-python==2", "tina4-python>=3");
-        if updated != content {
-            if fs::write(req_path, &updated).is_ok() {
-                println!(
-                    "  {} Updated requirements.txt — tina4-python >=3",
-                    icon_ok().green()
-                );
-                return 1;
-            }
+        if updated != content && fs::write(req_path, &updated).is_ok() {
+            println!("  {} Updated requirements.txt — tina4-python >=3", icon_ok().green());
+            return 1;
         }
     }
     0
@@ -260,40 +239,28 @@ fn upgrade_pyproject_toml() -> usize {
 
 fn upgrade_gemfile() -> usize {
     let path = "Gemfile";
-    if let Ok(content) = fs::read_to_string(path) {
-        let updated = content
-            .replace("'tina4', '~> 2", "'tina4', '~> 3")
-            .replace("\"tina4\", \"~> 2", "\"tina4\", \"~> 3");
-        if updated != content {
-            if fs::write(path, &updated).is_ok() {
-                println!(
-                    "  {} Updated Gemfile — tina4 ~> 3.0",
-                    icon_ok().green()
-                );
-                return 1;
-            }
-        }
+    let Ok(content) = fs::read_to_string(path) else { return 0 };
+    let updated = content
+        .replace("'tina4', '~> 2", "'tina4', '~> 3")
+        .replace("\"tina4\", \"~> 2", "\"tina4\", \"~> 3");
+    if updated != content && fs::write(path, &updated).is_ok() {
+        println!("  {} Updated Gemfile — tina4 ~> 3.0", icon_ok().green());
+        return 1;
     }
     0
 }
 
 fn upgrade_package_json() -> usize {
     let path = "package.json";
-    if let Ok(content) = fs::read_to_string(path) {
-        let updated = content
-            .replace("\"@tina4/core\": \"^2", "\"@tina4/core\": \"^3")
-            .replace("\"@tina4/core\": \"~2", "\"@tina4/core\": \"^3")
-            .replace("\"@tina4/orm\": \"^2", "\"@tina4/orm\": \"^3")
-            .replace("\"@tina4/orm\": \"~2", "\"@tina4/orm\": \"^3");
-        if updated != content {
-            if fs::write(path, &updated).is_ok() {
-                println!(
-                    "  {} Updated package.json — @tina4/* ^3.0",
-                    icon_ok().green()
-                );
-                return 1;
-            }
-        }
+    let Ok(content) = fs::read_to_string(path) else { return 0 };
+    let updated = content
+        .replace("\"@tina4/core\": \"^2", "\"@tina4/core\": \"^3")
+        .replace("\"@tina4/core\": \"~2", "\"@tina4/core\": \"^3")
+        .replace("\"@tina4/orm\": \"^2", "\"@tina4/orm\": \"^3")
+        .replace("\"@tina4/orm\": \"~2", "\"@tina4/orm\": \"^3");
+    if updated != content && fs::write(path, &updated).is_ok() {
+        println!("  {} Updated package.json — @tina4/* ^3.0", icon_ok().green());
+        return 1;
     }
     0
 }

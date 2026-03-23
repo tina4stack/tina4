@@ -7,18 +7,40 @@ use crate::console::{self, icon_fail, icon_ok, icon_play, icon_warn};
 
 /// Run the full init flow: check runtime, check package manager, scaffold, install deps.
 pub fn run(lang: Option<&str>, path: Option<&str>) {
+    let lang_str: String;
+
     let lang = match lang {
-        Some(l) => l,
+        Some(l) => {
+            // Validate it's actually a language, not a path passed as first arg
+            let norm = l.to_lowercase();
+            if matches!(norm.as_str(), "python" | "py" | "php" | "ruby" | "rb" | "nodejs" | "node" | "js" | "typescript" | "ts") {
+                l
+            } else {
+                // First arg looks like a path, not a language — prompt for language
+                eprintln!(
+                    "{} No language specified. Please choose one:\n",
+                    icon_warn().yellow()
+                );
+                lang_str = prompt_language();
+                // Treat original 'lang' as the path
+                return run(Some(&lang_str), Some(l));
+            }
+        }
         None => {
-            print_usage();
-            std::process::exit(1);
+            lang_str = prompt_language();
+            &lang_str
         }
     };
 
     let path = match path {
         Some(p) => p,
         None => {
-            print_usage();
+            println!();
+            eprintln!(
+                "{} Missing project path.\n\nUsage: tina4 init <language> <path>\nExample: tina4 init {} ./my-app",
+                icon_fail().red(),
+                lang
+            );
             std::process::exit(1);
         }
     };
@@ -40,6 +62,82 @@ pub fn run(lang: Option<&str>, path: Option<&str>) {
             print_usage();
             std::process::exit(1);
         }
+    }
+}
+
+/// Detect installed runtimes and prompt the user to pick one.
+fn prompt_language() -> String {
+    use std::io::Write;
+
+    let runtimes = [
+        ("python", console::python_cmd()),
+        ("php", "php"),
+        ("ruby", "ruby"),
+        ("nodejs", "node"),
+    ];
+
+    let available: Vec<(&str, &str)> = runtimes
+        .iter()
+        .filter(|(_, cmd)| which::which(cmd).is_ok())
+        .copied()
+        .collect();
+
+    if available.is_empty() {
+        eprintln!(
+            "{} No supported language runtimes found. Install one of: Python, PHP, Ruby, Node.js",
+            icon_fail().red()
+        );
+        std::process::exit(1);
+    }
+
+    if available.len() == 1 {
+        let lang = available[0].0;
+        println!(
+            "{} Only {} detected — using it",
+            icon_ok().green(),
+            lang.cyan()
+        );
+        return lang.to_string();
+    }
+
+    println!("  Available languages:\n");
+    for (i, (lang, _)) in available.iter().enumerate() {
+        println!("    {}. {}", i + 1, lang.cyan());
+    }
+    println!();
+
+    loop {
+        print!("  Select language [1-{}]: ", available.len());
+        std::io::stdout().flush().ok();
+
+        let mut input = String::new();
+        match std::io::stdin().read_line(&mut input) {
+            Ok(0) | Err(_) => {
+                // EOF or error — non-interactive, exit
+                eprintln!("\n{} No language selected (non-interactive mode). Use: tina4 init <language> <path>", icon_fail().red());
+                std::process::exit(1);
+            }
+            _ => {}
+        }
+
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if let Ok(num) = trimmed.parse::<usize>() {
+            if num >= 1 && num <= available.len() {
+                return available[num - 1].0.to_string();
+            }
+        }
+
+        // Also accept language name directly
+        let lower = trimmed.to_lowercase();
+        if let Some((lang, _)) = available.iter().find(|(l, _)| *l == lower) {
+            return lang.to_string();
+        }
+
+        println!("  Invalid choice. Try again.");
     }
 }
 

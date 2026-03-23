@@ -118,6 +118,9 @@ enum Commands {
 
     /// Self-update the tina4 binary
     Update,
+
+    /// Download the Tina4 book into the current directory
+    Books,
 }
 
 fn main() {
@@ -174,6 +177,8 @@ fn main() {
         Commands::Upgrade => upgrade::run(),
 
         Commands::Update => handle_update(),
+
+        Commands::Books => handle_books(),
     }
 }
 
@@ -429,6 +434,88 @@ fn delegate_command(args: Vec<String>) {
 
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const REPO: &str = "tina4stack/tina4";
+const BOOK_REPO: &str = "tina4stack/tina4-book";
+
+fn handle_books() {
+    let dest = std::path::Path::new("tina4-book");
+
+    if dest.exists() {
+        eprintln!(
+            "{} A {} directory already exists. Remove it first if you want a fresh copy.",
+            icon_warn().yellow(),
+            "tina4-book/".cyan()
+        );
+        return;
+    }
+
+    let zip_url = format!(
+        "https://github.com/{}/archive/refs/heads/main.zip",
+        BOOK_REPO
+    );
+    let zip_path = std::path::PathBuf::from("tina4-book.zip");
+
+    println!(
+        "{} Downloading Tina4 book...",
+        icon_play().green()
+    );
+
+    if !download_file(&zip_url, &zip_path) {
+        eprintln!(
+            "{} Download failed. Check your connection or visit:\n  https://github.com/{}",
+            icon_fail().red(),
+            BOOK_REPO
+        );
+        return;
+    }
+
+    // Extract the zip
+    println!("{} Extracting...", icon_play().green());
+
+    let extracted = if console::is_windows() {
+        std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "Expand-Archive -Path '{}' -DestinationPath '.' -Force",
+                    zip_path.display()
+                ),
+            ])
+            .status()
+    } else {
+        std::process::Command::new("unzip")
+            .args(["-qo", &zip_path.to_string_lossy(), "-d", "."])
+            .status()
+    };
+
+    if !matches!(extracted, Ok(s) if s.success()) {
+        eprintln!("{} Failed to extract archive", icon_fail().red());
+        std::fs::remove_file(&zip_path).ok();
+        return;
+    }
+
+    // Rename extracted folder to tina4-book/
+    let extracted_dir = std::path::Path::new("tina4-book-main");
+    if extracted_dir.exists() {
+        if std::fs::rename(extracted_dir, dest).is_err() {
+            eprintln!(
+                "{} Could not rename {} to {}",
+                icon_fail().red(),
+                "tina4-book-main".dimmed(),
+                "tina4-book/".cyan()
+            );
+        }
+    }
+
+    // Clean up zip
+    std::fs::remove_file(&zip_path).ok();
+
+    println!(
+        "{} Tina4 book downloaded to {}",
+        icon_ok().green(),
+        "tina4-book/".cyan()
+    );
+}
 
 fn handle_update() {
     println!("{} Checking for updates...", icon_play().green());

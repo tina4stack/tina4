@@ -100,6 +100,35 @@ pub fn watch_and_reload(
                     .map(|p| p.display().to_string())
                     .collect();
 
+                // Ignore generated/cache files that shouldn't trigger a restart
+                let dominated_by_noise = paths.iter().all(|p| {
+                    let lower = p.to_lowercase();
+                    lower.contains("__pycache__")
+                        || lower.ends_with(".pyc")
+                        || lower.ends_with(".pyo")
+                        || lower.ends_with(".db")
+                        || lower.ends_with(".db-journal")
+                        || lower.ends_with(".db-wal")
+                        || lower.ends_with(".db-shm")
+                        || lower.ends_with(".log")
+                        || lower.ends_with(".pid")
+                        || lower.ends_with(".tmp")
+                        || lower.ends_with(".swp")
+                        || lower.ends_with("~")
+                        || lower.contains("/data/")
+                        || lower.contains("\\data\\")
+                        || lower.contains("/logs/")
+                        || lower.contains("\\logs\\")
+                        || lower.contains("/secrets/")
+                        || lower.contains("\\secrets\\")
+                        || lower.contains("/.git/")
+                        || lower.contains("\\.git\\")
+                });
+
+                if dominated_by_noise {
+                    continue;
+                }
+
                 let is_scss = paths
                     .iter()
                     .any(|p| p.ends_with(".scss"));

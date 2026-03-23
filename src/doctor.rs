@@ -39,7 +39,7 @@ pub fn run() {
             version_flag: "--version",
             pkg_manager: Some(PkgCheck {
                 name: "composer",
-                commands: &["composer"],
+                commands: &["composer", "composer.bat"],
                 version_flag: "--version",
             }),
         },
@@ -49,7 +49,7 @@ pub fn run() {
             version_flag: "--version",
             pkg_manager: Some(PkgCheck {
                 name: "bundler",
-                commands: &["bundle"],
+                commands: &["bundle", "bundle.bat"],
                 version_flag: "--version",
             }),
         },
@@ -59,7 +59,7 @@ pub fn run() {
             version_flag: "--version",
             pkg_manager: Some(PkgCheck {
                 name: "npm",
-                commands: &["npm"],
+                commands: &["npm", "npm.cmd"],
                 version_flag: "--version",
             }),
         },
@@ -180,9 +180,32 @@ fn check_tool(commands: &[&str], version_flag: &str) -> (bool, String) {
     (false, String::new())
 }
 
+fn strip_ansi(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip ESC [ ... m sequences
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                while let Some(&nc) = chars.peek() {
+                    chars.next();
+                    if nc.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
 fn extract_version_number(raw: &str) -> String {
+    let clean = strip_ansi(raw);
     // Find the first thing that looks like a version number (digits.digits...)
-    let first_line = raw.lines().next().unwrap_or("");
+    let first_line = clean.lines().next().unwrap_or("");
     for word in first_line.split_whitespace() {
         let trimmed = word.trim_start_matches('v');
         if trimmed.contains('.') && trimmed.chars().next().is_some_and(|c| c.is_ascii_digit()) {

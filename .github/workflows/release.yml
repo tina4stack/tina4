@@ -58,6 +58,29 @@ jobs:
         if: runner.os == 'Windows'
         run: cp target/${{ matrix.target }}/release/tina4.exe ${{ matrix.name }}
 
+      - name: Install SimplySign Desktop (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          Write-Host "Downloading SimplySign Desktop..."
+          $installerUrl = "https://simplysign.certum.eu/downloads/SimplySignDesktop-latest.msi"
+          $installerPath = "$env:RUNNER_TEMP\SimplySignDesktop.msi"
+          Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing
+          Write-Host "Installing SimplySign Desktop..."
+          Start-Process msiexec.exe -ArgumentList "/i", $installerPath, "/quiet", "/norestart" -Wait
+          Write-Host "SimplySign Desktop installed"
+
+      - name: Sign Windows binary
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          SIMPLYSIGN_OTP_URI: ${{ secrets.SIMPLYSIGN_OTP_URI }}
+          CERT_THUMBPRINT: ${{ secrets.CERT_THUMBPRINT }}
+          SIMPLYSIGN_EXE_PATH: "C:\\Program Files\\Certum\\SimplySign Desktop\\SimplySignDesktop.exe"
+          SIGN_TARGET: ${{ matrix.name }}
+        run: |
+          .\scripts\sign-windows.ps1
+
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:

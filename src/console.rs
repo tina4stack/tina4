@@ -1,4 +1,4 @@
-/// Cross-platform console helpers — Unicode icons with ASCII fallbacks for old Windows terminals.
+//! Cross-platform console helpers — Unicode icons with ASCII fallbacks for old Windows terminals.
 
 /// Enable ANSI escape codes on Windows (virtual terminal processing).
 /// Call once at startup. No-op on non-Windows platforms.
@@ -97,10 +97,12 @@ pub fn python_cmd() -> &'static str {
     }
 }
 
-/// Get the correct PHP vendor binary path for the platform.
+/// Get the PHP vendor binary path.
+/// Always returns the PHP script path (not the .bat wrapper),
+/// since we invoke it via `php <path>`.
 pub fn php_vendor_bin(name: &str) -> String {
     if is_windows() {
-        format!("vendor\\bin\\{}.bat", name)
+        format!("vendor\\bin\\{}", name)
     } else {
         format!("vendor/bin/{}", name)
     }

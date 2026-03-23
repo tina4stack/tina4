@@ -5,6 +5,7 @@ mod generate;
 mod init;
 mod install;
 mod scss;
+mod upgrade;
 mod watcher;
 
 use clap::{Parser, Subcommand};
@@ -15,7 +16,7 @@ use crate::console::{icon_eye, icon_fail, icon_info, icon_ok, icon_play, icon_wa
 #[derive(Parser)]
 #[command(
     name = "tina4",
-    version = "3.1.9",
+    version = "3.2.0",
     about = "Tina4 — Unified CLI for Python, PHP, Ruby, and Node.js",
     long_about = "The Tina4 CLI detects your project language, manages runtimes,\ncompiles SCSS, watches files for dev-reload, and delegates\nto the language-specific CLI (tina4python, tina4php, tina4ruby, tina4nodejs)."
 )]
@@ -102,6 +103,19 @@ enum Commands {
         name: String,
     },
 
+    /// Detect AI coding tools and install framework context/skills
+    Ai {
+        /// Install context for ALL known AI tools (not just detected ones)
+        #[arg(long)]
+        all: bool,
+        /// Overwrite existing context files
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Upgrade a v2 Tina4 project to v3 structure
+    Upgrade,
+
     /// Self-update the tina4 binary
     Update,
 }
@@ -149,6 +163,15 @@ fn main() {
         Commands::Routes => delegate_command(vec!["routes".into()]),
 
         Commands::Generate { what, name } => generate::run(&what, &name),
+
+        Commands::Ai { all, force } => {
+            let mut args = vec!["ai".to_string()];
+            if all { args.push("--all".into()); }
+            if force { args.push("--force".into()); }
+            delegate_command(args);
+        }
+
+        Commands::Upgrade => upgrade::run(),
 
         Commands::Update => handle_update(),
     }
@@ -290,17 +313,20 @@ fn start_language_server(
             }
         }
         "php" => {
+            // Check vendor/ exists before trying to serve
+            if !std::path::Path::new("vendor").exists() {
+                eprintln!(
+                    "{} Dependencies not installed. Run: {}",
+                    icon_fail().red(),
+                    "composer install".cyan()
+                );
+                return None;
+            }
             let addr = format!("{}:{}", host, port);
-            let vendor_path = console::php_vendor_bin("tina4php");
-            let tina4php = if std::path::Path::new(&vendor_path).exists() {
-                vendor_path.as_str().to_string()
-            } else if std::path::Path::new("bin/tina4php").exists() {
-                "bin/tina4php".to_string()
-            } else {
-                "tina4php".to_string()
-            };
-            std::process::Command::new("php")
-                .args([tina4php.as_str(), "serve", addr.as_str()])
+            let (cmd, mut cmd_args) = resolve_cli(info);
+            cmd_args.extend(["serve".into(), addr]);
+            std::process::Command::new(&cmd)
+                .args(&cmd_args)
                 .stdout(std::process::Stdio::inherit())
                 .stderr(std::process::Stdio::inherit())
                 .spawn()
@@ -344,14 +370,46 @@ fn start_language_server(
 
 // ── Delegate ─────────────────────────────────────────────────────
 
+/// Resolve the language CLI command and arguments for the detected project.
+/// PHP needs special handling: `php vendor/bin/tina4php` instead of bare `tina4php`.
+fn resolve_cli(info: &detect::ProjectInfo) -> (String, Vec<String>) {
+    match info.language.as_str() {
+        "php" => {
+            let vendor_path = console::php_vendor_bin("tina4php");
+            let cli_path = if std::path::Path::new(&vendor_path).exists() {
+                vendor_path
+            } else if std::path::Path::new("bin/tina4php").exists() {
+                "bin/tina4php".to_string()
+            } else {
+                // Fallback: try global tina4php
+                return ("tina4php".into(), vec![]);
+            };
+            ("php".into(), vec![cli_path])
+        }
+        _ => (info.cli_name().into(), vec![]),
+    }
+}
+
 fn delegate_command(args: Vec<String>) {
     match detect::detect_language() {
         Some(info) => {
-            let cli = info.cli_name();
-            match std::process::Command::new(cli).args(&args).status() {
+            // For PHP, check vendor/ exists
+            if info.language == "php" && !std::path::Path::new("vendor").exists() {
+                eprintln!(
+                    "{} Dependencies not installed. Run: {}",
+                    icon_fail().red(),
+                    "composer install".cyan()
+                );
+                std::process::exit(1);
+            }
+
+            let (cmd, mut cmd_args) = resolve_cli(&info);
+            cmd_args.extend(args);
+
+            match std::process::Command::new(&cmd).args(&cmd_args).status() {
                 Ok(s) if !s.success() => std::process::exit(s.code().unwrap_or(1)),
                 Err(e) => {
-                    eprintln!("{} Failed to run {}: {}", icon_fail().red(), cli, e);
+                    eprintln!("{} Failed to run {} {}: {}", icon_fail().red(), cmd, cmd_args.join(" "), e);
                     std::process::exit(1);
                 }
                 _ => {}

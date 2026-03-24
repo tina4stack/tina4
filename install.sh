@@ -24,12 +24,6 @@ case "$ARCH" in
   *) echo "Error: Unsupported architecture: $ARCH" >&2; exit 1 ;;
 esac
 
-if [ "$PLATFORM" = "windows" ]; then
-  BINARY="tina4-windows-amd64.exe"
-else
-  BINARY="tina4-${PLATFORM}-${ARCH_NAME}"
-fi
-
 # Helper: download a URL to stdout
 fetch() {
   if command -v curl >/dev/null 2>&1; then
@@ -51,11 +45,39 @@ fetch_to() {
   fi
 }
 
-# Get latest release tag
-LATEST=$(fetch "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
+# Get latest release metadata (tag + asset list)
+RELEASE_JSON=$(fetch "https://api.github.com/repos/${REPO}/releases/latest")
+
+LATEST=$(echo "$RELEASE_JSON" | grep '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
 
 if [ -z "$LATEST" ]; then
   echo "Error: Could not determine latest release" >&2
+  exit 1
+fi
+
+# Match the correct binary from release assets.
+# Releases may use varying names (e.g. amd64 vs x86_64, darwin vs macos).
+if [ "$PLATFORM" = "windows" ]; then
+  BINARY=$(echo "$RELEASE_JSON" | grep -oE '"name": *"tina4-windows-[^"]+\.exe"' | head -1 | sed -E 's/"name": *"([^"]+)"/\1/')
+else
+  # Try the canonical name first (tina4-linux-amd64), then common alternatives
+  for CANDIDATE in \
+    "tina4-${PLATFORM}-${ARCH_NAME}" \
+    "tina4-${PLATFORM}-$([ "$ARCH_NAME" = "amd64" ] && echo x86_64 || echo "$ARCH_NAME")" \
+    "tina4-$([ "$PLATFORM" = "darwin" ] && echo macos || echo "$PLATFORM")-${ARCH_NAME}" \
+    "tina4-$([ "$PLATFORM" = "darwin" ] && echo macos || echo "$PLATFORM")-$([ "$ARCH_NAME" = "amd64" ] && echo x86_64 || echo "$ARCH_NAME")"
+  do
+    if echo "$RELEASE_JSON" | grep -q "\"name\": *\"${CANDIDATE}\""; then
+      BINARY="$CANDIDATE"
+      break
+    fi
+  done
+fi
+
+if [ -z "$BINARY" ]; then
+  echo "Error: No matching binary found for ${PLATFORM}/${ARCH_NAME} in release ${LATEST}" >&2
+  echo "Available assets:" >&2
+  echo "$RELEASE_JSON" | grep '"name"' | sed -E 's/.*"name": *"([^"]+)".*/  \1/' >&2
   exit 1
 fi
 

@@ -11,6 +11,7 @@ pub fn run(lang: &str) {
         "php" => install_php(),
         "ruby" | "rb" => install_ruby(),
         "nodejs" | "node" | "js" => install_nodejs(),
+        "tina4-js" | "tina4js" | "js-frontend" => install_tina4_js(),
         "all" => {
             install_python();
             install_php();
@@ -19,7 +20,7 @@ pub fn run(lang: &str) {
         }
         _ => {
             eprintln!(
-                "{} Unknown language: {}. Use: python, php, ruby, nodejs, all",
+                "{} Unknown target: {}. Use: python, php, ruby, nodejs, tina4-js, all",
                 icon_fail().red(),
                 lang
             );
@@ -157,6 +158,66 @@ fn install_nodejs() {
 
     // Install tina4nodejs
     install_tina4_cli("tina4nodejs", "npm", &["install", "-g", "tina4nodejs"]);
+}
+
+fn install_tina4_js() {
+    println!("\n{} Installing tina4-js...", icon_play().green());
+
+    let dest = std::path::Path::new("src/public/js");
+    if !dest.exists() {
+        std::fs::create_dir_all(dest).unwrap_or_else(|e| {
+            eprintln!("  {} Failed to create {}: {}", icon_fail().red(), dest.display(), e);
+        });
+    }
+
+    let target = dest.join("tina4js.min.js");
+
+    // Try downloading latest from GitHub releases
+    let url = "https://raw.githubusercontent.com/tina4stack/tina4-js/master/dist/tina4js.min.js";
+    println!("  {} Downloading from {}", icon_play().green(), "tina4stack/tina4-js".cyan());
+
+    let download_cmd = if console::is_windows() {
+        format!("powershell -c \"Invoke-WebRequest -Uri '{}' -OutFile '{}'\"", url, target.display())
+    } else {
+        format!("curl -fsSL '{}' -o '{}'", url, target.display())
+    };
+
+    match console::shell_exec(&download_cmd) {
+        Ok(s) if s.success() => {
+            println!("  {} tina4js.min.js installed at {}", icon_ok().green(), target.display());
+        }
+        _ => {
+            // Fallback: check if the framework already bundles it
+            let framework_paths = [
+                "tina4_python/public/js/tina4js.min.js",
+                "src/public/js/tina4js.min.js",
+                "lib/tina4/public/js/tina4js.min.js",
+                "packages/core/public/js/tina4js.min.js",
+            ];
+            let mut found = false;
+            for path in &framework_paths {
+                let p = std::path::Path::new(path);
+                if p.exists() {
+                    if let Ok(_) = std::fs::copy(p, &target) {
+                        println!("  {} Copied from framework bundle", icon_ok().green());
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if !found {
+                eprintln!(
+                    "  {} Download failed. tina4js.min.js is bundled with the framework at /js/tina4js.min.js",
+                    icon_warn().yellow()
+                );
+            }
+        }
+    }
+
+    println!();
+    println!("  Usage in your template:");
+    println!("    {}", "<script src=\"/js/tina4js.min.js\"></script>".cyan());
+    println!();
 }
 
 // ── Helpers ──────────────────────────────────────────────────────

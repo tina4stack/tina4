@@ -198,8 +198,31 @@ fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_production
         }
     };
 
-    // Use framework-specific default port if not overridden
-    let requested_port = port.unwrap_or_else(|| info.default_port());
+    // Port priority: CLI flag > TINA4_PORT env/dotenv > PORT env/dotenv > framework default
+    let requested_port = port.unwrap_or_else(|| {
+        // Read .env file if it exists (don't override existing env vars)
+        if let Ok(contents) = std::fs::read_to_string(".env") {
+            for line in contents.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Some((key, value)) = line.split_once('=') {
+                    let key = key.trim();
+                    let value = value.trim().trim_matches('"').trim_matches('\'');
+                    if std::env::var(key).is_err() {
+                        std::env::set_var(key, value);
+                    }
+                }
+            }
+        }
+        // Check TINA4_PORT first, then PORT, then framework default
+        std::env::var("TINA4_PORT")
+            .or_else(|_| std::env::var("PORT"))
+            .ok()
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or_else(|| info.default_port())
+    });
 
     // Find an available port (auto-increment if in use)
     let port = console::find_available_port(requested_port, 10);

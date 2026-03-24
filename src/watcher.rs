@@ -1,5 +1,5 @@
 use colored::Colorize;
-use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher, EventKind};
 use std::path::Path;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -10,7 +10,7 @@ use crate::detect::ProjectInfo;
 /// Watch SCSS directory and recompile on changes. Blocks forever.
 pub fn watch_scss(input_dir: &str, output_dir: &str, minify: bool) {
     let (tx, rx) = mpsc::channel();
-    let config = Config::default().with_poll_interval(Duration::from_secs(1));
+    let config = Config::default().with_poll_interval(Duration::from_secs(2));
 
     let mut watcher: RecommendedWatcher =
         Watcher::new(tx, config).expect("Failed to create watcher");
@@ -58,7 +58,7 @@ pub fn watch_and_reload(
     server: &mut std::process::Child,
 ) {
     let (tx, rx) = mpsc::channel();
-    let config = Config::default().with_poll_interval(Duration::from_secs(1));
+    let config = Config::default().with_poll_interval(Duration::from_secs(2));
 
     let mut watcher: RecommendedWatcher =
         Watcher::new(tx, config).expect("Failed to create watcher");
@@ -88,6 +88,13 @@ pub fn watch_and_reload(
     while running.load(std::sync::atomic::Ordering::Relaxed) {
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(Ok(event)) => {
+                // Only react to actual content changes, not access/metadata events.
+                // PollWatcher on Linux can fire spurious events for unchanged files.
+                match event.kind {
+                    EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {}
+                    _ => continue,
+                }
+
                 // Debounce
                 if last_event.elapsed() < Duration::from_millis(500) {
                     continue;

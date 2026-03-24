@@ -584,18 +584,8 @@ fn handle_update() {
         return;
     }
 
-    // Step 3: Download and replace binary
-    let binary_name = get_binary_name();
-    let download_url = format!(
-        "https://github.com/{}/releases/download/{}/{}",
-        REPO, latest_tag, binary_name
-    );
-
-    println!(
-        "{} Downloading {} ...",
-        icon_play().green(),
-        binary_name.cyan()
-    );
+    // Step 3: Download and replace binary — try multiple name variants
+    let candidates = get_binary_name_candidates();
 
     let current_exe = match std::env::current_exe() {
         Ok(p) => p,
@@ -606,11 +596,28 @@ fn handle_update() {
     };
 
     let tmp_path = current_exe.with_extension("tmp");
+    let mut downloaded = false;
 
-    if !download_file(&download_url, &tmp_path) {
+    for name in &candidates {
+        let url = format!(
+            "https://github.com/{}/releases/download/{}/{}",
+            REPO, latest_tag, name
+        );
+        println!(
+            "{} Trying {} ...",
+            icon_play().green(),
+            name.cyan()
+        );
+        if download_file(&url, &tmp_path) {
+            downloaded = true;
+            break;
+        }
+    }
+
+    if !downloaded {
         eprintln!(
-            "{} Download failed. Download manually from:\n  https://github.com/{}/releases",
-            icon_fail().red(), REPO
+            "{} Download failed (tried: {}). Download manually from:\n  https://github.com/{}/releases",
+            icon_fail().red(), candidates.join(", "), REPO
         );
         return;
     }
@@ -768,24 +775,42 @@ fn get_latest_version() -> Option<String> {
             .ok()?
     } else {
         std::process::Command::new("curl")
-            .args(["-fsSL", "-H", "User-Agent: tina4-cli", &api_url])
+            .args(["-fsSL", "-H", "User-Agent: tina4-cli", "-H", "Accept: application/vnd.github+json", &api_url])
             .output()
             .ok()?
     };
 
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
+    if text.is_empty() {
+        return None;
+    }
+
     if console::is_windows() {
         // PowerShell returns the tag directly
         if text.starts_with('v') {
             return Some(text);
         }
-    } else {
-        // curl returns JSON, extract tag_name
-        for line in text.lines() {
-            if line.contains("\"tag_name\"") {
-                let tag = line.split('"').nth(3)?;
-                return Some(tag.to_string());
+    }
+
+    // Parse JSON — find "tag_name": "vX.Y.Z" anywhere in the response
+    // Handle both pretty-printed and minified JSON
+    if let Some(pos) = text.find("\"tag_name\"") {
+        let after = &text[pos..];
+        // Find the value after the colon: "tag_name": "v3.3.3"
+        let mut in_value = false;
+        let mut start = 0;
+        for (i, ch) in after.char_indices() {
+            if ch == ':' && !in_value {
+                in_value = true;
+                continue;
+            }
+            if in_value && ch == '"' && start == 0 {
+                start = i + 1;
+                continue;
+            }
+            if in_value && ch == '"' && start > 0 {
+                return Some(after[start..i].to_string());
             }
         }
     }
@@ -793,26 +818,32 @@ fn get_latest_version() -> Option<String> {
     None
 }
 
-fn get_binary_name() -> String {
-    let os = if cfg!(target_os = "macos") {
-        "darwin"
+/// Return a list of possible binary names to try, handling naming
+/// variations across releases (amd64 vs x86_64, darwin vs macos).
+fn get_binary_name_candidates() -> Vec<String> {
+    let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+
+    let os_variants: Vec<&str> = if cfg!(target_os = "macos") {
+        vec!["darwin", "macos"]
     } else if cfg!(target_os = "windows") {
-        "windows"
+        vec!["windows"]
     } else {
-        "linux"
+        vec!["linux"]
     };
 
-    let arch = if cfg!(target_arch = "aarch64") {
-        "arm64"
+    let arch_variants: Vec<&str> = if cfg!(target_arch = "aarch64") {
+        vec!["arm64", "aarch64"]
     } else {
-        "amd64"
+        vec!["amd64", "x86_64"]
     };
 
-    if cfg!(target_os = "windows") {
-        format!("tina4-{}-{}.exe", os, arch)
-    } else {
-        format!("tina4-{}-{}", os, arch)
+    let mut names = Vec::new();
+    for os in &os_variants {
+        for arch in &arch_variants {
+            names.push(format!("tina4-{}-{}{}", os, arch, ext));
+        }
     }
+    names
 }
 
 fn download_file(url: &str, dest: &std::path::Path) -> bool {

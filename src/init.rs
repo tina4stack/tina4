@@ -174,14 +174,38 @@ fn init_project(language: &str, path: &str) {
     // Step 5 -- Run package manager install (non-fatal)
     install_deps(language, abs);
 
-    // Step 6 -- Summary
+    // Step 6 -- Offer to serve immediately
     println!();
     println!("{} Project created at {}", icon_ok().green(), abs);
     println!();
-    println!("Next steps:");
-    println!("  cd {}", abs);
-    println!("  tina4 serve");
-    println!();
+
+    // Ask user if they want to start serving
+    use std::io::Write;
+    print!("  Start the server now? [Y/n]: ");
+    std::io::stdout().flush().ok();
+
+    let mut input = String::new();
+    let should_serve = match std::io::stdin().read_line(&mut input) {
+        Ok(0) | Err(_) => false, // EOF / non-interactive
+        _ => {
+            let trimmed = input.trim().to_lowercase();
+            trimmed.is_empty() || trimmed == "y" || trimmed == "yes"
+        }
+    };
+
+    if should_serve {
+        println!();
+        // Change into project dir and run serve
+        std::env::set_current_dir(abs).unwrap_or_else(|e| {
+            eprintln!("{} Failed to cd into {}: {}", icon_fail().red(), abs, e);
+        });
+        crate::handle_serve(None, "0.0.0.0", false, false, false);
+    } else {
+        println!("  To start later:");
+        println!("    cd {}", abs);
+        println!("    tina4 serve");
+        println!();
+    }
 }
 
 // -- Helpers -----------------------------------------------------------------

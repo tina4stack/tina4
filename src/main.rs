@@ -188,7 +188,7 @@ fn main() {
 
 // ── Serve ────────────────────────────────────────────────────────
 
-fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_production: bool, no_browser: bool) {
+pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_production: bool, no_browser: bool) {
     let lang = detect::detect_language();
 
     let info = match lang {

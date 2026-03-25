@@ -1,5 +1,10 @@
 # tina4
 
+<p align="center">
+  <a href="https://crates.io/crates/tina4"><img src="https://img.shields.io/crates/v/tina4?color=7b1fa2&label=crates.io" alt="crates.io"></a>
+  <a href="https://tina4.com"><img src="https://img.shields.io/badge/docs-tina4.com-7b1fa2" alt="Docs"></a>
+</p>
+
 Unified CLI for the [Tina4](https://tina4.com) framework — Python, PHP, Ruby, and Node.js.
 
 A single Rust binary that auto-detects your project language, compiles SCSS, watches files for hot-reload, and delegates to the language-specific CLI.

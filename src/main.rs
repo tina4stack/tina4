@@ -189,6 +189,21 @@ fn main() {
 // ── Serve ────────────────────────────────────────────────────────
 
 pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_production: bool, no_browser: bool) {
+    // Background version check — warns if CLI is outdated
+    std::thread::spawn(|| {
+        if let Some(latest_tag) = get_latest_version() {
+            let latest = latest_tag.trim_start_matches('v');
+            if latest != CURRENT_VERSION {
+                eprintln!(
+                    "\n{} Tina4 CLI {} available (you have {}). Run: tina4 update\n",
+                    icon_warn().yellow(),
+                    latest.cyan(),
+                    CURRENT_VERSION.dimmed()
+                );
+            }
+        }
+    });
+
     let lang = detect::detect_language();
 
     let info = match lang {
@@ -689,11 +704,84 @@ fn handle_update() {
     std::fs::remove_file(&backup_path).ok();
 
     println!(
-        "{} Updated tina4 {} → {}",
+        "{} Updated tina4 CLI {} → {}",
         icon_ok().green(),
         CURRENT_VERSION.dimmed(),
         latest_ver.cyan()
     );
+
+    // Also update the framework package in the current project
+    update_framework_package();
+}
+
+/// Ask the user if they want to update the framework package too.
+fn update_framework_package() {
+    use std::io::Write;
+
+    let info = match detect::detect_language() {
+        Some(i) => i,
+        None => return, // Not in a project directory — skip
+    };
+
+    let (cmd, args, pkg): (&str, &[&str], &str) = match info.language.as_str() {
+        "python" => ("uv", &["sync"], "tina4-python"),
+        "php" => ("composer", &["update", "tina4stack/tina4php"], "tina4stack/tina4php"),
+        "ruby" => ("bundle", &["update", "tina4"], "tina4"),
+        "nodejs" => ("npm", &["update", "tina4-nodejs"], "tina4-nodejs"),
+        _ => return,
+    };
+
+    println!();
+    print!(
+        "  Also update {} framework package? [Y/n]: ",
+        pkg.cyan()
+    );
+    std::io::stdout().flush().ok();
+
+    let mut input = String::new();
+    let should_update = match std::io::stdin().read_line(&mut input) {
+        Ok(0) | Err(_) => false,
+        _ => {
+            let trimmed = input.trim().to_lowercase();
+            trimmed.is_empty() || trimmed == "y" || trimmed == "yes"
+        }
+    };
+
+    if !should_update {
+        println!(
+            "  Skipped. To update later: {} {}",
+            cmd, args.join(" ")
+        );
+        return;
+    }
+
+    println!(
+        "{} Updating {}...",
+        icon_play().green(),
+        pkg.cyan()
+    );
+
+    match std::process::Command::new(cmd).args(args).status() {
+        Ok(s) if s.success() => {
+            println!("{} {} updated", icon_ok().green(), pkg.cyan());
+        }
+        Ok(_) => {
+            eprintln!(
+                "{} Framework update failed. Run manually: {} {}",
+                icon_warn().yellow(),
+                cmd,
+                args.join(" ")
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "{} Could not run {}: {}",
+                icon_warn().yellow(),
+                cmd,
+                e
+            );
+        }
+    }
 }
 
 /// Detect and remove old v2 CLI binaries that may shadow the v3 CLI.

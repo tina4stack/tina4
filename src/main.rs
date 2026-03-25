@@ -62,6 +62,10 @@ enum Commands {
         /// Install and use the best production server for the detected framework
         #[arg(long)]
         production: bool,
+
+        /// Do not open the browser on startup
+        #[arg(long)]
+        no_browser: bool,
     },
 
     /// Compile SCSS files from src/scss/ to src/public/css/
@@ -134,7 +138,7 @@ fn main() {
 
         Commands::Init { lang, path } => init::run(lang.as_deref(), path.as_deref()),
 
-        Commands::Serve { port, host, dev, production } => handle_serve(port, &host, dev, production),
+        Commands::Serve { port, host, dev, production, no_browser } => handle_serve(port, &host, dev, production, no_browser),
 
         Commands::Scss {
             input,
@@ -184,7 +188,7 @@ fn main() {
 
 // ── Serve ────────────────────────────────────────────────────────
 
-fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_production: bool) {
+fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_production: bool, no_browser: bool) {
     let lang = detect::detect_language();
 
     let info = match lang {
@@ -286,11 +290,15 @@ fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_production
         }
     };
 
-    // Give the server a moment to bind, then open browser
+    // Give the server a moment to bind, then open browser (unless --no-browser)
     std::thread::sleep(std::time::Duration::from_secs(2));
     let url = format!("http://localhost:{}", port);
-    console::open_browser(&url);
-    println!("{} Browser opened: {}", icon_ok().green(), url.cyan());
+    if no_browser {
+        println!("{} Server ready: {}", icon_ok().green(), url.cyan());
+    } else {
+        console::open_browser(&url);
+        println!("{} Browser opened: {}", icon_ok().green(), url.cyan());
+    }
 
     // File watcher (blocks)
     println!(

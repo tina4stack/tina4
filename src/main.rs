@@ -440,7 +440,16 @@ fn start_language_server(
             }
         }
         "nodejs" => {
-            // Use npx tsx for TypeScript
+            // Check node_modules/ exists before trying to serve
+            if !std::path::Path::new("node_modules").exists() {
+                eprintln!(
+                    "{} Dependencies not installed. Run: {}",
+                    icon_fail().red(),
+                    "npm install".cyan()
+                );
+                return None;
+            }
+            // Use npx tsx for TypeScript (tsx also handles plain .js)
             let entry = if std::path::Path::new("app.ts").exists() { "app.ts" } else { "app.js" };
             let mut cmd = std::process::Command::new("npx");
             cmd.args(["tsx", entry])

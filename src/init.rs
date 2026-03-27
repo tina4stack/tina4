@@ -706,10 +706,11 @@ startServer();
         r#"{{
   "name": "{name}",
   "version": "0.1.0",
+  "type": "module",
   "description": "A Tina4 Node.js project",
   "main": "app.ts",
   "scripts": {{
-    "start": "ts-node app.ts",
+    "start": "npx tsx app.ts",
     "build": "tsc"
   }},
   "dependencies": {{
@@ -717,7 +718,7 @@ startServer();
   }},
   "devDependencies": {{
     "typescript": "^5.0.0",
-    "ts-node": "^10.0.0",
+    "tsx": "^4.19.0",
     "@types/node": "^20.0.0"
   }}
 }}
@@ -731,9 +732,10 @@ startServer();
         "tsconfig.json",
         r#"{
   "compilerOptions": {
-    "target": "ES2020",
-    "module": "commonjs",
-    "lib": ["ES2020"],
+    "target": "ES2022",
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "lib": ["ES2022"],
     "outDir": "./dist",
     "rootDir": ".",
     "strict": true,

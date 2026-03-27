@@ -659,8 +659,7 @@ fn scaffold_ruby(path: &str) {
         "app.rb",
         r#"require "tina4ruby"
 
-Tina4.initialize!(__dir__)
-Tina4::App.new.run!
+Tina4.run!(__dir__)
 "#,
     );
 

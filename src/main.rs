@@ -16,7 +16,7 @@ use crate::console::{icon_eye, icon_fail, icon_info, icon_ok, icon_play, icon_wa
 #[derive(Parser)]
 #[command(
     name = "tina4",
-    version = "3.5.5",
+    version = "3.5.6",
     about = "Tina4 — Unified CLI for Python, PHP, Ruby, and Node.js",
     long_about = "The Tina4 CLI detects your project language, manages runtimes,\ncompiles SCSS, watches files for dev-reload, and delegates\nto the language-specific CLI (tina4python, tina4php, tina4ruby, tina4nodejs)."
 )]

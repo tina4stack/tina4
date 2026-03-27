@@ -101,13 +101,36 @@ pub fn detect_language() -> Option<ProjectInfo> {
     // Node.js: package.json
     if Path::new("package.json").exists() {
         if let Ok(content) = std::fs::read_to_string("package.json") {
-            if content.contains("@tina4") || content.contains("tina4nodejs") {
+            if content.contains("@tina4") || content.contains("tina4-nodejs") || content.contains("tina4nodejs") {
                 return Some(ProjectInfo {
                     language: "nodejs".into(),
                     version: extract_version_json(&content, "version"),
                 });
             }
         }
+    }
+    // Also detect app.ts as a Node.js project
+    if Path::new("app.ts").exists() {
+        return Some(ProjectInfo {
+            language: "nodejs".into(),
+            version: None,
+        });
+    }
+
+    // Also detect app.rb as a Ruby project
+    if Path::new("app.rb").exists() {
+        return Some(ProjectInfo {
+            language: "ruby".into(),
+            version: None,
+        });
+    }
+
+    // Also detect index.php as a PHP project
+    if Path::new("index.php").exists() {
+        return Some(ProjectInfo {
+            language: "php".into(),
+            version: None,
+        });
     }
 
     None

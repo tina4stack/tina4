@@ -117,8 +117,9 @@ enum Commands {
         force: bool,
     },
 
-    /// Upgrade a v2 Tina4 project to v3 structure
-    Upgrade,
+    /// Stop using v2 and switch your Tina4 project to v3 structure
+    #[command(name = "i-want-to-stop-using-v2-and-switch-to-v3")]
+    IWantToStopUsingV2AndSwitchToV3,
 
     /// Self-update the tina4 binary
     Update,
@@ -178,7 +179,7 @@ fn main() {
             delegate_command(args);
         }
 
-        Commands::Upgrade => upgrade::run(),
+        Commands::IWantToStopUsingV2AndSwitchToV3 => upgrade::run(),
 
         Commands::Update => handle_update(),
 

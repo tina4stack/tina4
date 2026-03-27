@@ -657,7 +657,7 @@ fn scaffold_ruby(path: &str) {
     write_file(
         path,
         "app.rb",
-        r#"require "tina4"
+        r#"require "tina4ruby"
 
 Tina4.initialize!(__dir__)
 Tina4::App.new.run!
@@ -675,7 +675,7 @@ Tina4::App.new.run!
         "Gemfile",
         r#"source "https://rubygems.org"
 
-gem "tina4-ruby", "~> 3.0"
+gem "tina4ruby", "~> 3.0"
 "#,
     );
 

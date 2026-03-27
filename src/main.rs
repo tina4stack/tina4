@@ -422,6 +422,15 @@ fn start_language_server(
         "ruby" => {
             // Use bundle exec if Gemfile exists
             if std::path::Path::new("Gemfile").exists() {
+                // Check that bundle has been installed
+                if !std::path::Path::new("Gemfile.lock").exists() {
+                    eprintln!(
+                        "{} Dependencies not installed. Run: {}",
+                        icon_fail().red(),
+                        "bundle install".cyan()
+                    );
+                    return None;
+                }
                 let mut cmd = std::process::Command::new("bundle");
                 cmd.args(["exec", "ruby", "app.rb"])
                     .env("PORT", &port_s)
@@ -736,7 +745,7 @@ fn update_framework_package() {
     let (cmd, args, pkg): (&str, &[&str], &str) = match info.language.as_str() {
         "python" => ("uv", &["sync"], "tina4-python"),
         "php" => ("composer", &["update", "tina4stack/tina4php"], "tina4stack/tina4php"),
-        "ruby" => ("bundle", &["update", "tina4"], "tina4"),
+        "ruby" => ("bundle", &["update", "tina4ruby"], "tina4ruby"),
         "nodejs" => ("npm", &["update", "tina4-nodejs"], "tina4-nodejs"),
         _ => return,
     };

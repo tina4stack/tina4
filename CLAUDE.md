@@ -13,7 +13,7 @@ Version 3.5.2 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 framework
 ## Commands
 
 ```
-tina4 init <language> <path>     Scaffold a new project (python, php, ruby, nodejs)
+tina4 init <language> <path>     Scaffold a new project (python, php, ruby, nodejs, tina4js)
 tina4 serve                      Start dev server with file watcher + SCSS + browser open
 tina4 serve --production         Auto-install and use production server
 tina4 serve --no-browser         Don't open browser on startup

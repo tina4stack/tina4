@@ -13,7 +13,7 @@ pub fn run(lang: Option<&str>, path: Option<&str>) {
         Some(l) => {
             // Validate it's actually a language, not a path passed as first arg
             let norm = l.to_lowercase();
-            if matches!(norm.as_str(), "python" | "py" | "php" | "ruby" | "rb" | "nodejs" | "node" | "js" | "typescript" | "ts") {
+            if matches!(norm.as_str(), "python" | "py" | "php" | "ruby" | "rb" | "nodejs" | "node" | "js" | "typescript" | "ts" | "tina4js" | "tina4-js" | "frontend") {
                 l
             } else {
                 // First arg looks like a path, not a language — prompt for language
@@ -52,9 +52,10 @@ pub fn run(lang: Option<&str>, path: Option<&str>) {
         "php" => init_project("php", path),
         "ruby" | "rb" => init_project("ruby", path),
         "nodejs" | "node" | "js" | "typescript" | "ts" => init_project("nodejs", path),
+        "tina4js" | "tina4-js" | "frontend" => init_project("tina4js", path),
         _ => {
             eprintln!(
-                "{} Unknown language: {}. Use: python, php, ruby, nodejs",
+                "{} Unknown language: {}. Use: python, php, ruby, nodejs, tina4js",
                 icon_fail().red(),
                 lang
             );
@@ -74,6 +75,7 @@ fn prompt_language() -> String {
         ("php", "php"),
         ("ruby", "ruby"),
         ("nodejs", "node"),
+        ("tina4js", "npm"),
     ];
 
     let available: Vec<(&str, &str)> = runtimes
@@ -144,8 +146,9 @@ fn prompt_language() -> String {
 fn print_usage() {
     println!("Usage: tina4 init <language> <path>");
     println!();
-    println!("Languages: python, php, ruby, nodejs");
+    println!("Languages: python, php, ruby, nodejs, tina4js");
     println!("Example:   tina4 init python ./my-app");
+    println!("           tina4 init tina4js ./my-frontend");
 }
 
 fn init_project(language: &str, path: &str) {
@@ -376,7 +379,7 @@ fn check_runtime(language: &str) {
                 }
             }
         }
-        "nodejs" => {
+        "nodejs" | "tina4js" => {
             if cmd_exists("node") {
                 println!("  {} node found", icon_ok().green());
             } else {
@@ -481,7 +484,7 @@ fn check_package_manager(language: &str) {
                 }
             }
         }
-        "nodejs" => {
+        "nodejs" | "tina4js" => {
             if cmd_exists("npm") {
                 println!("  {} npm found", icon_ok().green());
             } else {
@@ -529,19 +532,28 @@ fn scaffold_project(language: &str, path: &str) {
         language.cyan()
     );
 
-    // Common directories shared by all languages
-    let common_dirs = [
-        "src/routes",
-        "src/orm",
-        "src/templates",
-        "src/public/css",
-        "src/public/js",
-        "src/public/images",
-        "src/scss",
-        "migrations",
-        "data",
-        "logs",
-    ];
+    // Directories to create
+    let common_dirs: Vec<&str> = if language == "tina4js" {
+        vec![
+            "src/components",
+            "src/routes",
+            "src/pages",
+            "src/public/css",
+        ]
+    } else {
+        vec![
+            "src/routes",
+            "src/orm",
+            "src/templates",
+            "src/public/css",
+            "src/public/js",
+            "src/public/images",
+            "src/scss",
+            "migrations",
+            "data",
+            "logs",
+        ]
+    };
 
     for dir in &common_dirs {
         let full = Path::new(path).join(dir);
@@ -551,8 +563,10 @@ fn scaffold_project(language: &str, path: &str) {
     }
     println!("  {} Created directory structure", icon_ok().green());
 
-    // .env
-    write_file(path, ".env", "TINA4_DEBUG=true\nTINA4_LOG_LEVEL=ALL\n");
+    // .env (backend projects only)
+    if language != "tina4js" {
+        write_file(path, ".env", "TINA4_DEBUG=true\nTINA4_LOG_LEVEL=ALL\n");
+    }
 
     // Language-specific files
     match language {
@@ -560,6 +574,7 @@ fn scaffold_project(language: &str, path: &str) {
         "php" => scaffold_php(path),
         "ruby" => scaffold_ruby(path),
         "nodejs" => scaffold_nodejs(path),
+        "tina4js" => scaffold_tina4js(path),
         _ => {}
     }
 }
@@ -755,6 +770,269 @@ startServer();
     println!("  {} Created Node.js scaffold", icon_ok().green());
 }
 
+fn scaffold_tina4js(path: &str) {
+    let project_name = project_name_from_path(path);
+
+    // package.json
+    let package_json = format!(
+        r#"{{
+  "name": "{name}",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {{
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run"
+  }},
+  "dependencies": {{
+    "tina4js": "^1.0.7"
+  }},
+  "devDependencies": {{
+    "vite": "^5.4.0",
+    "typescript": "^5.4.0"
+  }}
+}}
+"#,
+        name = project_name
+    );
+    write_file(path, "package.json", &package_json);
+
+    // tsconfig.json
+    write_file(
+        path,
+        "tsconfig.json",
+        r#"{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"]
+  },
+  "include": ["src/**/*.ts"]
+}
+"#,
+    );
+
+    // vite.config.ts
+    write_file(
+        path,
+        "vite.config.ts",
+        r#"import { defineConfig } from 'vite';
+
+export default defineConfig({
+  server: {
+    port: 3000,
+    // Proxy API calls to tina4-php/python backend in dev
+    // proxy: { '/api': 'http://localhost:7145' },
+  },
+});
+"#,
+    );
+
+    // index.html
+    let index_html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{name}</title>
+  <link rel="stylesheet" href="/src/public/css/default.css">
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
+"#,
+        name = project_name
+    );
+    write_file(path, "index.html", &index_html);
+
+    // src/main.ts
+    write_file(
+        path,
+        "src/main.ts",
+        r#"import { signal, computed, html, route, router, navigate, api } from 'tina4js';
+import './routes/index';
+
+// Debug overlay in dev mode (Ctrl+Shift+D to toggle, tree-shaken from production builds)
+if (import.meta.env.DEV) import('tina4js/debug');
+
+// Configure API (uncomment to connect to tina4-php/python backend)
+// api.configure({ baseUrl: '/api', auth: true });
+
+// Start router
+router.start({ target: '#root', mode: 'hash' });
+"#,
+    );
+
+    // src/routes/index.ts
+    write_file(
+        path,
+        "src/routes/index.ts",
+        r#"import { route, navigate, html, signal, computed } from 'tina4js';
+import { homePage } from '../pages/home';
+
+// Home
+route('/', homePage);
+
+// About
+route('/about', () => html`
+  <div class="page">
+    <h1>About</h1>
+    <p>Built with <a href="https://github.com/tina4stack/tina4-js">tina4-js</a> — a sub-3KB reactive framework.</p>
+    <a href="/">Back home</a>
+  </div>
+`);
+
+// 404
+route('*', () => html`
+  <div class="page">
+    <h1>404</h1>
+    <p>Page not found.</p>
+    <a href="/">Go home</a>
+  </div>
+`);
+"#,
+    );
+
+    // src/pages/home.ts
+    write_file(
+        path,
+        "src/pages/home.ts",
+        r#"import { signal, computed, html } from 'tina4js';
+
+export function homePage() {
+  const count = signal(0);
+  const doubled = computed(() => count.value * 2);
+
+  return html`
+    <div class="page">
+      <h1>Welcome to ${document.title}</h1>
+      <p>Edit <code>src/pages/home.ts</code> to get started.</p>
+
+      <div class="counter">
+        <button @click=${() => count.value--}>-</button>
+        <span>${count}</span>
+        <button @click=${() => count.value++}>+</button>
+      </div>
+      <p class="muted">Doubled: ${doubled}</p>
+
+      <nav>
+        <a href="/about">About</a>
+      </nav>
+    </div>
+  `;
+}
+"#,
+    );
+
+    // src/components/app-header.ts
+    write_file(
+        path,
+        "src/components/app-header.ts",
+        r#"import { Tina4Element, html } from 'tina4js';
+
+class AppHeader extends Tina4Element {
+  static props = { title: String };
+  static styles = `
+    :host { display: block; padding: 1rem 0; border-bottom: 1px solid #e5e7eb; margin-bottom: 2rem; }
+    h1 { margin: 0; font-size: 1.5rem; }
+    nav { display: flex; gap: 1rem; margin-top: 0.5rem; }
+    a { color: #2563eb; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  `;
+
+  render() {
+    return html`
+      <h1>${this.prop('title')}</h1>
+      <nav>
+        <a href="/">Home</a>
+        <a href="/about">About</a>
+      </nav>
+    `;
+  }
+}
+
+customElements.define('app-header', AppHeader);
+"#,
+    );
+
+    // src/public/css/default.css
+    write_file(
+        path,
+        "src/public/css/default.css",
+        r#"/* Tina4 default styles */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  line-height: 1.6;
+  color: #1f2937;
+  background: #ffffff;
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+h1 { font-size: 2rem; margin-bottom: 0.5rem; }
+p { margin-bottom: 1rem; }
+a { color: #2563eb; }
+code { background: #f3f4f6; padding: 0.2em 0.4em; border-radius: 4px; font-size: 0.9em; }
+
+.page { padding: 2rem 0; }
+.muted { color: #6b7280; font-size: 0.875rem; }
+
+.counter {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+
+.counter button {
+  width: 40px;
+  height: 40px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: #f9fafb;
+  font-size: 1.25rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.counter button:hover { background: #e5e7eb; }
+
+.counter span {
+  font-size: 2rem;
+  font-weight: bold;
+  min-width: 3rem;
+  text-align: center;
+}
+
+nav { margin: 1.5rem 0; display: flex; gap: 1rem; }
+"#,
+    );
+
+    // .gitignore
+    write_file(
+        path,
+        ".gitignore",
+        "node_modules/\ndist/\n*.tsbuildinfo\n",
+    );
+
+    // .env (not needed for tina4js but keep consistent — skip the common one)
+
+    println!("  {} Created tina4-js scaffold", icon_ok().green());
+}
+
 // -- Step 5: Install dependencies (non-fatal) --------------------------------
 
 fn install_deps(language: &str, path: &str) {
@@ -767,7 +1045,7 @@ fn install_deps(language: &str, path: &str) {
         "python" => run_cmd_in(path, "uv", &["sync"]),
         "php" => run_cmd_in(path, "composer", &["install"]),
         "ruby" => run_cmd_in(path, "bundle", &["install"]),
-        "nodejs" => run_cmd_in(path, "npm", &["install"]),
+        "nodejs" | "tina4js" => run_cmd_in(path, "npm", &["install"]),
         _ => true,
     };
 

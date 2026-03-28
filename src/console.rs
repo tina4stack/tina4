@@ -109,6 +109,58 @@ pub fn find_available_port(start: u16, max_tries: u16) -> u16 {
     start
 }
 
+/// Kill whatever process is listening on the given port.
+/// Uses `lsof` on macOS/Linux. Returns true if a process was killed.
+pub fn kill_port(port: u16) -> bool {
+    // Check if port is actually in use
+    if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+        return false; // Port is free, nothing to kill
+    }
+
+    #[cfg(unix)]
+    {
+        // Find PID using lsof
+        let output = std::process::Command::new("lsof")
+            .args(["-ti", &format!("tcp:{}", port)])
+            .output();
+
+        if let Ok(output) = output {
+            let pids = String::from_utf8_lossy(&output.stdout);
+            for pid_str in pids.trim().lines() {
+                if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                    // Don't kill our own process
+                    let our_pid = std::process::id() as i32;
+                    if pid != our_pid {
+                        unsafe {
+                            libc::kill(pid, libc::SIGTERM);
+                        }
+                    }
+                }
+            }
+            // Wait briefly for processes to exit
+            std::thread::sleep(std::time::Duration::from_millis(500));
+
+            // Verify port is now free
+            return std::net::TcpListener::bind(("127.0.0.1", port)).is_ok();
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        // Windows: use netstat + taskkill
+        let output = std::process::Command::new("cmd")
+            .args(["/C", &format!("for /f \"tokens=5\" %a in ('netstat -aon ^| find \":{} \" ^| find \"LISTENING\"') do taskkill /F /PID %a", port)])
+            .output();
+
+        if output.is_ok() {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            return std::net::TcpListener::bind(("127.0.0.1", port)).is_ok();
+        }
+    }
+
+    false
+}
+
 /// Open the default browser to the given URL. Cross-platform.
 pub fn open_browser(url: &str) {
     let _ = if cfg!(target_os = "macos") {

@@ -244,16 +244,44 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
             .unwrap_or_else(|| info.default_port())
     });
 
-    // Find an available port (auto-increment if in use)
-    let port = console::find_available_port(requested_port, 10);
-    if port != requested_port {
-        println!(
-            "{} Port {} in use — using {} instead",
-            icon_warn().yellow(),
-            requested_port.to_string().dimmed(),
-            port.to_string().cyan()
-        );
-    }
+    // If --port was explicitly provided, kill whatever is on that port.
+    // Otherwise, auto-increment to find a free port.
+    let explicit_port = port.is_some();
+    let port = if explicit_port {
+        if !std::net::TcpListener::bind(("127.0.0.1", requested_port)).is_ok() {
+            println!(
+                "{} Port {} in use — killing existing process...",
+                icon_warn().yellow(),
+                requested_port.to_string().cyan()
+            );
+            if console::kill_port(requested_port) {
+                println!(
+                    "{} Port {} freed",
+                    icon_ok().green(),
+                    requested_port.to_string().cyan()
+                );
+            } else {
+                eprintln!(
+                    "{} Could not free port {} — process may require manual termination",
+                    icon_fail().red(),
+                    requested_port
+                );
+                std::process::exit(1);
+            }
+        }
+        requested_port
+    } else {
+        let p = console::find_available_port(requested_port, 10);
+        if p != requested_port {
+            println!(
+                "{} Port {} in use — using {} instead",
+                icon_warn().yellow(),
+                requested_port.to_string().dimmed(),
+                p.to_string().cyan()
+            );
+        }
+        p
+    };
 
     println!(
         "{} Detected {} project",

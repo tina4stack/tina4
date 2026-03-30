@@ -198,7 +198,7 @@ fn install_tina4_js() {
             for path in &framework_paths {
                 let p = std::path::Path::new(path);
                 if p.exists() {
-                    if let Ok(_) = std::fs::copy(p, &target) {
+                    if std::fs::copy(p, &target).is_ok() {
                         println!("  {} Copied from framework bundle", icon_ok().green());
                         found = true;
                         break;
@@ -227,7 +227,7 @@ fn check_exists(cmd: &str) -> bool {
 }
 
 fn get_version(cmd: &str, flag: &str) -> String {
-    Command::new(&crate::console::resolve_cmd(cmd))
+    Command::new(crate::console::resolve_cmd(cmd))
         .arg(flag)
         .output()
         .ok()
@@ -239,7 +239,7 @@ fn run_install_commands(attempts: &[(&str, &[&str])]) {
     for (cmd, args) in attempts {
         if check_exists(cmd) {
             println!("  {} Running: {} {}", icon_play().green(), cmd, args.join(" "));
-            let status = Command::new(&crate::console::resolve_cmd(cmd)).args(*args).status();
+            let status = Command::new(crate::console::resolve_cmd(cmd)).args(*args).status();
             match status {
                 Ok(s) if s.success() => {
                     println!("  {} Installed successfully", icon_ok().green());
@@ -260,7 +260,7 @@ fn install_tina4_cli(cli_name: &str, pkg_cmd: &str, args: &[&str]) {
         println!("  {} {} already installed", icon_ok().green(), cli_name);
     } else if check_exists(pkg_cmd) {
         println!("  {} Installing {}...", icon_play().green(), cli_name);
-        let _ = Command::new(&crate::console::resolve_cmd(pkg_cmd)).args(args).status();
+        let _ = Command::new(crate::console::resolve_cmd(pkg_cmd)).args(args).status();
     } else {
         println!(
             "  {} Cannot install {} — {} not found",

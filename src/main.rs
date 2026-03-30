@@ -625,15 +625,13 @@ fn handle_books() {
 
     // Rename extracted folder to tina4-book/
     let extracted_dir = std::path::Path::new("tina4-book-main");
-    if extracted_dir.exists() {
-        if std::fs::rename(extracted_dir, dest).is_err() {
-            eprintln!(
-                "{} Could not rename {} to {}",
-                icon_fail().red(),
-                "tina4-book-main".dimmed(),
-                "tina4-book/".cyan()
-            );
-        }
+    if extracted_dir.exists() && std::fs::rename(extracted_dir, dest).is_err() {
+        eprintln!(
+            "{} Could not rename {} to {}",
+            icon_fail().red(),
+            "tina4-book-main".dimmed(),
+            "tina4-book/".cyan()
+        );
     }
 
     // Clean up zip

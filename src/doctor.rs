@@ -244,7 +244,7 @@ fn check_windows_path() {
 
 fn check_tool(commands: &[&str], version_flag: &str) -> (bool, String) {
     for cmd in commands {
-        if let Ok(output) = Command::new(&crate::console::resolve_cmd(cmd))
+        if let Ok(output) = Command::new(crate::console::resolve_cmd(cmd))
             .arg(version_flag)
             .output()
         {

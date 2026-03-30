@@ -197,12 +197,10 @@ fn install_tina4_js() {
             let mut found = false;
             for path in &framework_paths {
                 let p = std::path::Path::new(path);
-                if p.exists() {
-                    if std::fs::copy(p, &target).is_ok() {
-                        println!("  {} Copied from framework bundle", icon_ok().green());
-                        found = true;
-                        break;
-                    }
+                if p.exists() && std::fs::copy(p, &target).is_ok() {
+                    println!("  {} Copied from framework bundle", icon_ok().green());
+                    found = true;
+                    break;
                 }
             }
             if !found {

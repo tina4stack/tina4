@@ -248,7 +248,7 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
     // Otherwise, auto-increment to find a free port.
     let explicit_port = port.is_some();
     let port = if explicit_port {
-        if !std::net::TcpListener::bind(("127.0.0.1", requested_port)).is_ok() {
+        if std::net::TcpListener::bind(("127.0.0.1", requested_port)).is_err() {
             println!(
                 "{} Port {} in use — killing existing process...",
                 icon_warn().yellow(),
@@ -459,7 +459,7 @@ fn start_language_server(
                     );
                     return None;
                 }
-                let mut cmd = std::process::Command::new(&console::resolve_cmd("bundle"));
+                let mut cmd = std::process::Command::new(console::resolve_cmd("bundle"));
                 cmd.args(["exec", "ruby", "app.rb"])
                     .env("PORT", &port_s)
                     .env("HOST", host)
@@ -488,7 +488,7 @@ fn start_language_server(
             }
             // Use npx tsx for TypeScript (tsx also handles plain .js)
             let entry = if std::path::Path::new("app.ts").exists() { "app.ts" } else { "app.js" };
-            let mut cmd = std::process::Command::new(&console::resolve_cmd("npx"));
+            let mut cmd = std::process::Command::new(console::resolve_cmd("npx"));
             cmd.args(["tsx", entry])
                 .env("PORT", &port_s)
                 .env("HOST", host)

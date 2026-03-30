@@ -184,6 +184,16 @@ pub fn open_browser(url: &str) {
     };
 }
 
+/// Resolve a command name to its full path.
+/// On Windows this is critical: `which` finds `composer.bat` but
+/// `Command::new("composer")` does NOT — it only searches for `.exe`.
+/// By resolving the full path first, `.bat` and `.cmd` wrappers work correctly.
+pub fn resolve_cmd(cmd: &str) -> String {
+    which::which(cmd)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| cmd.to_string())
+}
+
 /// Get the PHP vendor binary path.
 /// Always returns the PHP script path (not the .bat wrapper),
 /// since we invoke it via `php <path>`.

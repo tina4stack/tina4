@@ -229,13 +229,14 @@ fn cmd_exists(cmd: &str) -> bool {
 }
 
 fn run_cmd(cmd: &str, args: &[&str]) -> bool {
+    let resolved = console::resolve_cmd(cmd);
     println!(
         "  {} Running: {} {}",
         icon_play().green(),
         cmd,
         args.join(" ")
     );
-    match Command::new(cmd).args(args).status() {
+    match Command::new(&resolved).args(args).status() {
         Ok(s) if s.success() => true,
         Ok(s) => {
             eprintln!(
@@ -253,6 +254,7 @@ fn run_cmd(cmd: &str, args: &[&str]) -> bool {
 }
 
 fn run_cmd_in(dir: &str, cmd: &str, args: &[&str]) -> bool {
+    let resolved = console::resolve_cmd(cmd);
     println!(
         "  {} Running: {} {} (in {})",
         icon_play().green(),
@@ -260,7 +262,7 @@ fn run_cmd_in(dir: &str, cmd: &str, args: &[&str]) -> bool {
         args.join(" "),
         dir
     );
-    match Command::new(cmd).args(args).current_dir(dir).status() {
+    match Command::new(&resolved).args(args).current_dir(dir).status() {
         Ok(s) if s.success() => true,
         Ok(s) => {
             eprintln!(

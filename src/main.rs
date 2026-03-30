@@ -459,7 +459,7 @@ fn start_language_server(
                     );
                     return None;
                 }
-                let mut cmd = std::process::Command::new("bundle");
+                let mut cmd = std::process::Command::new(&console::resolve_cmd("bundle"));
                 cmd.args(["exec", "ruby", "app.rb"])
                     .env("PORT", &port_s)
                     .env("HOST", host)
@@ -488,7 +488,7 @@ fn start_language_server(
             }
             // Use npx tsx for TypeScript (tsx also handles plain .js)
             let entry = if std::path::Path::new("app.ts").exists() { "app.ts" } else { "app.js" };
-            let mut cmd = std::process::Command::new("npx");
+            let mut cmd = std::process::Command::new(&console::resolve_cmd("npx"));
             cmd.args(["tsx", entry])
                 .env("PORT", &port_s)
                 .env("HOST", host)

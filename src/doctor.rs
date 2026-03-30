@@ -1,4 +1,4 @@
-use crate::console::{icon_ok, icon_fail, icon_play, icon_info};
+use crate::console::{icon_ok, icon_fail, icon_play, icon_info, icon_warn};
 use colored::Colorize;
 use std::process::Command;
 
@@ -13,6 +13,12 @@ struct PkgCheck {
     name: &'static str,
     commands: &'static [&'static str],
     version_flag: &'static str,
+}
+
+struct CliCheck {
+    name: &'static str,
+    lang: &'static str,
+    install_cmd: &'static str,
 }
 
 pub fn run() {
@@ -116,20 +122,20 @@ pub fn run() {
         );
     }
 
-    // Check for tina4 language CLIs
+    // --- Tina4 CLIs ---
     println!();
     println!("  {}", "Tina4 CLIs".bold());
     println!("  {}", "─".repeat(70));
 
     let clis = [
-        ("tina4python", "Python"),
-        ("tina4php", "PHP"),
-        ("tina4ruby", "Ruby"),
-        ("tina4nodejs", "Node.js"),
+        CliCheck { name: "tina4python", lang: "Python",  install_cmd: "pip install tina4-python" },
+        CliCheck { name: "tina4php",    lang: "PHP",     install_cmd: "composer global require tina4/tina4php" },
+        CliCheck { name: "tina4ruby",   lang: "Ruby",    install_cmd: "gem install tina4ruby" },
+        CliCheck { name: "tina4nodejs", lang: "Node.js", install_cmd: "npm install -g tina4nodejs" },
     ];
 
-    for (cli, lang) in &clis {
-        let found = which::which(cli).is_ok();
+    for cli in &clis {
+        let found = which::which(cli.name).is_ok();
         let icon = if found {
             icon_ok().green().to_string()
         } else {
@@ -138,12 +144,56 @@ pub fn run() {
         let status_text = if found {
             "installed".cyan().to_string()
         } else {
-            "not found".dimmed().to_string()
+            format!(
+                "{}  {}  {}",
+                "not found".dimmed(),
+                "→".dimmed(),
+                format!("run: {}", cli.install_cmd).yellow()
+            )
         };
-        println!("  {} {:<16} {:<12} {}", icon, cli, lang, status_text);
+        println!("  {} {:<16} {:<12} {}", icon, cli.name, cli.lang, status_text);
     }
 
-    // Current project detection
+    // --- Port availability ---
+    println!();
+    println!("  {}", "Ports".bold());
+    println!("  {}", "─".repeat(70));
+
+    let ports = [
+        (7145u16, "Python"),
+        (7146u16, "PHP"),
+        (7147u16, "Ruby"),
+        (7148u16, "Node.js"),
+    ];
+
+    for (port, lang) in &ports {
+        let free = std::net::TcpListener::bind(("127.0.0.1", *port)).is_ok();
+        let icon = if free {
+            icon_ok().green().to_string()
+        } else {
+            icon_warn().yellow().to_string()
+        };
+        let status = if free {
+            "free".green().to_string()
+        } else {
+            format!("{}", "in use".yellow())
+        };
+        println!(
+            "  {} {:<6} ({:<8}) {}",
+            icon, port, lang, status
+        );
+    }
+
+    // --- Windows PATH sanity check ---
+    #[cfg(windows)]
+    {
+        println!();
+        println!("  {}", "Windows PATH".bold());
+        println!("  {}", "─".repeat(70));
+        check_windows_path();
+    }
+
+    // --- Current project detection ---
     println!();
     match crate::detect::detect_language() {
         Some(info) => {
@@ -164,9 +214,37 @@ pub fn run() {
     println!();
 }
 
+#[cfg(windows)]
+fn check_windows_path() {
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    let path_lower = path_var.to_lowercase();
+
+    let checks = [
+        ("pip/Python Scripts", &["scripts", "python\\scripts", "python3\\scripts"][..]),
+        ("npm global",         &["npm\\node_modules\\.bin", "roaming\\npm"][..]),
+        ("gem executables",    &["ruby\\bin", "gems\\bin"][..]),
+        ("composer global",    &["composer\\vendor\\bin"][..]),
+    ];
+
+    for (label, needles) in &checks {
+        let found = needles.iter().any(|n| path_lower.contains(n));
+        let icon = if found {
+            icon_ok().green().to_string()
+        } else {
+            icon_warn().yellow().to_string()
+        };
+        let status = if found {
+            "in PATH".green().to_string()
+        } else {
+            "may not be in PATH".yellow().to_string()
+        };
+        println!("  {} {:<25} {}", icon, label, status);
+    }
+}
+
 fn check_tool(commands: &[&str], version_flag: &str) -> (bool, String) {
     for cmd in commands {
-        if let Ok(output) = Command::new(cmd)
+        if let Ok(output) = Command::new(&crate::console::resolve_cmd(cmd))
             .arg(version_flag)
             .output()
         {
@@ -185,7 +263,6 @@ fn strip_ansi(s: &str) -> String {
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
-            // Skip ESC [ ... m sequences
             if chars.peek() == Some(&'[') {
                 chars.next();
                 while let Some(&nc) = chars.peek() {
@@ -204,7 +281,6 @@ fn strip_ansi(s: &str) -> String {
 
 fn extract_version_number(raw: &str) -> String {
     let clean = strip_ansi(raw);
-    // Find the first thing that looks like a version number (digits.digits...)
     let first_line = clean.lines().next().unwrap_or("");
     for word in first_line.split_whitespace() {
         let trimmed = word.trim_start_matches('v');

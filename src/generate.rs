@@ -219,23 +219,23 @@ async def remove(request, response):
             let content = format!(
                 r#"<?php
 
-\Tina4\Get::add("/{route}", function (\Tina4\Request $request, \Tina4\Response $response) {{
+\Tina4\Router::get("/{route}", function (\Tina4\Request $request, \Tina4\Response $response) {{
     return $response->json(["data" => []]);
 }});
 
-\Tina4\Get::add("/{route}/{{id}}", function (\Tina4\Request $request, \Tina4\Response $response) {{
+\Tina4\Router::get("/{route}/{{id}}", function (\Tina4\Request $request, \Tina4\Response $response) {{
     return $response->json(["data" => []]);
 }});
 
-\Tina4\Post::add("/{route}", function (\Tina4\Request $request, \Tina4\Response $response) {{
+\Tina4\Router::post("/{route}", function (\Tina4\Request $request, \Tina4\Response $response) {{
     return $response->json(["message" => "created"], 201);
 }});
 
-\Tina4\Put::add("/{route}/{{id}}", function (\Tina4\Request $request, \Tina4\Response $response) {{
+\Tina4\Router::put("/{route}/{{id}}", function (\Tina4\Request $request, \Tina4\Response $response) {{
     return $response->json(["message" => "updated"]);
 }});
 
-\Tina4\Delete::add("/{route}/{{id}}", function (\Tina4\Request $request, \Tina4\Response $response) {{
+\Tina4\Router::delete("/{route}/{{id}}", function (\Tina4\Request $request, \Tina4\Response $response) {{
     return $response->json(["message" => "deleted"]);
 }});
 "#,
@@ -459,9 +459,9 @@ class {name}(Middleware):
             let content = format!(
                 r#"<?php
 
-class {name} extends \Tina4\Middleware {{
-    public function process(\Tina4\Request $request, \Tina4\Response $response): ?\Tina4\Response {{
-        $auth = $request->getHeader("Authorization");
+class {name} {{
+    public function __invoke(\Tina4\Request $request, \Tina4\Response $response): ?\Tina4\Response {{
+        $auth = $request->header("Authorization");
         if (empty($auth)) {{
             return $response->json(["error" => "Unauthorized"], 401);
         }}

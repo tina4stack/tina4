@@ -16,7 +16,7 @@ use crate::console::{icon_eye, icon_fail, icon_info, icon_ok, icon_play, icon_wa
 #[derive(Parser)]
 #[command(
     name = "tina4",
-    version = "3.5.7",
+    version = env!("CARGO_PKG_VERSION"),
     about = "Tina4 — Unified CLI for Python, PHP, Ruby, and Node.js",
     long_about = "The Tina4 CLI detects your project language, manages runtimes,\ncompiles SCSS, watches files for dev-reload, and delegates\nto the language-specific CLI (tina4python, tina4php, tina4ruby, tina4nodejs)."
 )]
@@ -671,7 +671,9 @@ fn handle_update() {
     );
 
     if latest_ver == CURRENT_VERSION {
-        println!("{} Already up to date", icon_ok().green());
+        println!("{} CLI already up to date", icon_ok().green());
+        // Still check for framework package updates even if CLI is current
+        update_framework_package();
         return;
     }
 
@@ -768,11 +770,13 @@ fn update_framework_package() {
         None => return, // Not in a project directory — skip
     };
 
-    let (cmd, args, pkg): (&str, &[&str], &str) = match info.language.as_str() {
-        "python" => ("uv", &["sync"], "tina4-python"),
-        "php" => ("composer", &["update", "tina4stack/tina4php"], "tina4stack/tina4php"),
-        "ruby" => ("bundle", &["update", "tina4ruby"], "tina4ruby"),
-        "nodejs" => ("npm", &["update", "tina4-nodejs"], "tina4-nodejs"),
+    let lang = info.language.as_str();
+
+    let pkg: &str = match lang {
+        "python" => "tina4-python",
+        "php" => "tina4stack/tina4php",
+        "ruby" => "tina4ruby",
+        "nodejs" => "tina4-nodejs",
         _ => return,
     };
 
@@ -793,10 +797,14 @@ fn update_framework_package() {
     };
 
     if !should_update {
-        println!(
-            "  Skipped. To update later: {} {}",
-            cmd, args.join(" ")
-        );
+        let hint = match lang {
+            "python" => "uv lock --upgrade-package tina4-python && uv sync".to_string(),
+            "php" => "composer update tina4stack/tina4php".to_string(),
+            "ruby" => "bundle update tina4ruby".to_string(),
+            "nodejs" => "npm update tina4-nodejs".to_string(),
+            _ => return,
+        };
+        println!("  Skipped. To update later: {}", hint);
         return;
     }
 
@@ -806,26 +814,49 @@ fn update_framework_package() {
         pkg.cyan()
     );
 
-    match std::process::Command::new(cmd).args(args).status() {
-        Ok(s) if s.success() => {
-            println!("{} {} updated", icon_ok().green(), pkg.cyan());
+    let success = match lang {
+        "python" => {
+            // Python needs two steps: update lockfile then sync
+            let lock_ok = std::process::Command::new("uv")
+                .args(["lock", "--upgrade-package", "tina4-python"])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if lock_ok {
+                std::process::Command::new("uv")
+                    .args(["sync"])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            } else {
+                false
+            }
         }
-        Ok(_) => {
-            eprintln!(
-                "{} Framework update failed. Run manually: {} {}",
-                icon_warn().yellow(),
-                cmd,
-                args.join(" ")
-            );
-        }
-        Err(e) => {
-            eprintln!(
-                "{} Could not run {}: {}",
-                icon_warn().yellow(),
-                cmd,
-                e
-            );
-        }
+        "php" => std::process::Command::new("composer")
+            .args(["update", "tina4stack/tina4php"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false),
+        "ruby" => std::process::Command::new("bundle")
+            .args(["update", "tina4ruby"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false),
+        "nodejs" => std::process::Command::new("npm")
+            .args(["update", "tina4-nodejs"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false),
+        _ => false,
+    };
+
+    if success {
+        println!("{} {} updated", icon_ok().green(), pkg.cyan());
+    } else {
+        eprintln!(
+            "{} Framework update failed. Check the output above for details.",
+            icon_warn().yellow(),
+        );
     }
 }
 

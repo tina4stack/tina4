@@ -520,6 +520,39 @@ fn resolve_cli(info: &detect::ProjectInfo) -> (String, Vec<String>) {
             };
             ("php".into(), vec![cli_path])
         }
+        "python" => {
+            // uv projects: run via 'uv run tina4python' so the venv CLI is found
+            if std::path::Path::new("uv.lock").exists() || std::path::Path::new("pyproject.toml").exists() {
+                if which::which("uv").is_ok() {
+                    return ("uv".into(), vec!["run".into(), "tina4python".into()]);
+                }
+            }
+            // Fallback: try global tina4python or .venv/Scripts
+            let venv_cli = if cfg!(windows) { ".venv/Scripts/tina4python.exe" } else { ".venv/bin/tina4python" };
+            if std::path::Path::new(venv_cli).exists() {
+                (venv_cli.into(), vec![])
+            } else {
+                ("tina4python".into(), vec![])
+            }
+        }
+        "ruby" => {
+            // bundler projects: run via 'bundle exec tina4ruby'
+            if std::path::Path::new("Gemfile.lock").exists() {
+                if which::which("bundle").is_ok() {
+                    return ("bundle".into(), vec!["exec".into(), "tina4ruby".into()]);
+                }
+            }
+            ("tina4ruby".into(), vec![])
+        }
+        "nodejs" => {
+            // npm projects: run via 'npx tina4nodejs'
+            if std::path::Path::new("node_modules").exists() {
+                if which::which("npx").is_ok() {
+                    return ("npx".into(), vec!["tina4nodejs".into()]);
+                }
+            }
+            ("tina4nodejs".into(), vec![])
+        }
         _ => (info.cli_name().into(), vec![]),
     }
 }

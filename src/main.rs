@@ -1078,10 +1078,20 @@ fn download_file(url: &str, dest: &std::path::Path) -> bool {
     let dest_str = dest.to_string_lossy();
 
     let status = if console::is_windows() {
-        std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command",
-                &format!("Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing", url, dest_str)])
-            .status()
+        // Use curl.exe (ships with Windows 10+) for reliable GitHub downloads.
+        // PowerShell's Invoke-WebRequest struggles with GitHub's TLS/redirect chain.
+        let curl_path = "C:\\Windows\\System32\\curl.exe";
+        if std::path::Path::new(curl_path).exists() {
+            std::process::Command::new(curl_path)
+                .args(["-fsSL", "-o", &dest_str, url])
+                .status()
+        } else {
+            // Fallback to PowerShell with TLS 1.2 forced
+            std::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command",
+                    &format!("[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing", url, dest_str)])
+                .status()
+        }
     } else {
         std::process::Command::new("curl")
             .args(["-fsSL", "-o", &dest_str, url])

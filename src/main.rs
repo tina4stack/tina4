@@ -126,6 +126,9 @@ enum Commands {
 
     /// Download the Tina4 book into the current directory
     Books,
+
+    /// Download framework-specific documentation into .tina4-docs/
+    Docs,
 }
 
 fn main() {
@@ -184,6 +187,7 @@ fn main() {
         Commands::Update => handle_update(),
 
         Commands::Books => handle_books(),
+        Commands::Docs => handle_docs(),
     }
 }
 
@@ -623,6 +627,119 @@ fn delegate_command(args: Vec<String>) {
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const REPO: &str = "tina4stack/tina4";
 const BOOK_REPO: &str = "tina4stack/tina4-book";
+
+fn handle_docs() {
+    let info = match detect::detect_language() {
+        Some(i) => i,
+        None => {
+            eprintln!(
+                "{} No Tina4 project detected. Run {} in a Tina4 project directory.",
+                icon_fail().red(),
+                "tina4 docs".cyan()
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let book_dir = match info.language.as_str() {
+        "python" => "book-1-python",
+        "php" => "book-2-php",
+        "ruby" => "book-3-ruby",
+        "nodejs" => "book-4-nodejs",
+        "tina4js" => "book-5-javascript",
+        _ => {
+            eprintln!("{} Unsupported language: {}", icon_fail().red(), info.language);
+            return;
+        }
+    };
+
+    let dest = std::path::Path::new(".tina4-docs");
+    if dest.exists() {
+        // Remove old docs and re-download
+        std::fs::remove_dir_all(dest).ok();
+    }
+
+    let zip_url = format!(
+        "https://github.com/{}/archive/refs/heads/main.zip",
+        BOOK_REPO
+    );
+    let zip_path = std::path::PathBuf::from(".tina4-docs.zip");
+
+    println!(
+        "{} Downloading {} documentation...",
+        icon_play().green(),
+        info.language.cyan()
+    );
+
+    if !download_file(&zip_url, &zip_path) {
+        eprintln!("{} Download failed.", icon_fail().red());
+        return;
+    }
+
+    // Extract to temp dir
+    let tmp_dir = std::path::Path::new(".tina4-docs-tmp");
+    if tmp_dir.exists() {
+        std::fs::remove_dir_all(tmp_dir).ok();
+    }
+
+    let extracted = if console::is_windows() {
+        std::process::Command::new("powershell")
+            .args([
+                "-NoProfile", "-Command",
+                &format!("Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
+                    zip_path.display(), tmp_dir.display()),
+            ])
+            .status()
+    } else {
+        std::process::Command::new("unzip")
+            .args(["-qo", &zip_path.to_string_lossy(), "-d", &tmp_dir.to_string_lossy()])
+            .status()
+    };
+
+    if !matches!(extracted, Ok(s) if s.success()) {
+        eprintln!("{} Failed to extract archive", icon_fail().red());
+        std::fs::remove_file(&zip_path).ok();
+        std::fs::remove_dir_all(tmp_dir).ok();
+        return;
+    }
+
+    // Copy just the relevant book's chapters to .tina4-docs/
+    let chapters_src = tmp_dir.join("tina4-book-main").join(book_dir).join("chapters");
+    if chapters_src.exists() {
+        std::fs::create_dir_all(dest).ok();
+        if let Ok(entries) = std::fs::read_dir(&chapters_src) {
+            for entry in entries.flatten() {
+                let src_path = entry.path();
+                let dest_path = dest.join(entry.file_name());
+                std::fs::copy(&src_path, &dest_path).ok();
+            }
+        }
+    } else {
+        eprintln!("{} Book chapters not found for {}", icon_warn().yellow(), info.language);
+    }
+
+    // Clean up
+    std::fs::remove_file(&zip_path).ok();
+    std::fs::remove_dir_all(tmp_dir).ok();
+
+    // Count files
+    let count = std::fs::read_dir(dest)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+
+    println!(
+        "{} {} docs downloaded to {} ({} chapters)",
+        icon_ok().green(),
+        info.language.cyan(),
+        ".tina4-docs/".cyan(),
+        count.to_string().cyan()
+    );
+    println!(
+        "  {} Available in dev overlay at {}",
+        icon_info().blue(),
+        "/__dev → Docs".cyan()
+    );
+}
 
 fn handle_books() {
     let dest = std::path::Path::new("tina4-book");

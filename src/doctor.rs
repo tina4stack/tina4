@@ -1,5 +1,6 @@
 use crate::console::{icon_ok, icon_fail, icon_play, icon_info, icon_warn};
 use colored::Colorize;
+use std::path::Path;
 use std::process::Command;
 
 struct ToolCheck {
@@ -135,14 +136,26 @@ pub fn run() {
     ];
 
     for cli in &clis {
-        let found = which::which(cli.name).is_ok();
+        // Check global PATH first, then project-local paths
+        let local_paths: &[&str] = match cli.name {
+            "tina4php" => &["vendor/bin/tina4php", "bin/tina4php"],
+            "tina4python" => &[".venv/bin/tina4python"],
+            "tina4ruby" => &["bin/tina4ruby"],
+            "tina4nodejs" => &["node_modules/.bin/tina4nodejs"],
+            _ => &[],
+        };
+        let found_global = which::which(cli.name).is_ok();
+        let found_local = local_paths.iter().any(|p| Path::new(p).exists());
+        let found = found_global || found_local;
         let icon = if found {
             icon_ok().green().to_string()
         } else {
             icon_fail().red().to_string()
         };
-        let status_text = if found {
-            "installed".cyan().to_string()
+        let status_text = if found_global {
+            "installed (global)".cyan().to_string()
+        } else if found_local {
+            "installed (project)".cyan().to_string()
         } else {
             format!(
                 "{}  {}  {}",

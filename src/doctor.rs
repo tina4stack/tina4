@@ -139,9 +139,9 @@ pub fn run() {
         // Check global PATH first, then project-local paths
         let local_paths: &[&str] = match cli.name {
             "tina4php" => &["vendor/bin/tina4php", "bin/tina4php"],
-            "tina4python" => &[".venv/bin/tina4python"],
-            "tina4ruby" => &["bin/tina4ruby"],
-            "tina4nodejs" => &["node_modules/.bin/tina4nodejs"],
+            "tina4python" => &[".venv/bin/tina4python", "venv/bin/tina4python"],
+            "tina4ruby" => &["bin/tina4ruby", "exe/tina4ruby"],
+            "tina4nodejs" => &["node_modules/.bin/tina4nodejs", "packages/cli/src/bin.ts"],
             _ => &[],
         };
         let found_global = which::which(cli.name).is_ok();

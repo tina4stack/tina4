@@ -275,16 +275,29 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
         }
         requested_port
     } else {
-        let p = console::find_available_port(requested_port, 10);
-        if p != requested_port {
+        // Default port: kill whatever is on it and take it over
+        if !std::net::TcpListener::bind(("127.0.0.1", requested_port)).is_ok() {
             println!(
-                "{} Port {} in use — using {} instead",
+                "{} Port {} in use — killing existing process...",
                 icon_warn().yellow(),
-                requested_port.to_string().dimmed(),
-                p.to_string().cyan()
+                requested_port.to_string().cyan()
             );
+            if console::kill_port(requested_port) {
+                println!(
+                    "{} Port {} freed",
+                    icon_ok().green(),
+                    requested_port.to_string().cyan()
+                );
+            } else {
+                eprintln!(
+                    "{} Could not free port {} — process may require manual termination",
+                    icon_fail().red(),
+                    requested_port
+                );
+                std::process::exit(1);
+            }
         }
-        p
+        requested_port
     };
 
     println!(

@@ -133,6 +133,7 @@ pub fn run() {
         CliCheck { name: "tina4php",    lang: "PHP",     install_cmd: "composer global require tina4/tina4php" },
         CliCheck { name: "tina4ruby",   lang: "Ruby",    install_cmd: "gem install tina4ruby" },
         CliCheck { name: "tina4nodejs", lang: "Node.js", install_cmd: "npm install -g tina4nodejs" },
+        CliCheck { name: "vite",       lang: "tina4js",  install_cmd: "npm install vite" },
     ];
 
     for cli in &clis {
@@ -142,6 +143,7 @@ pub fn run() {
             "tina4python" => &[".venv/bin/tina4python", "venv/bin/tina4python"],
             "tina4ruby" => &["bin/tina4ruby", "exe/tina4ruby"],
             "tina4nodejs" => &["node_modules/.bin/tina4nodejs", "packages/cli/src/bin.ts"],
+            "vite" => &["node_modules/.bin/vite"],
             _ => &[],
         };
         let found_global = which::which(cli.name).is_ok();
@@ -177,6 +179,7 @@ pub fn run() {
         (7146u16, "PHP"),
         (7147u16, "Ruby"),
         (7148u16, "Node.js"),
+        (5173u16, "tina4js"),
     ];
 
     for (port, lang) in &ports {

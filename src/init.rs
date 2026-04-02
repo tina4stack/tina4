@@ -829,7 +829,7 @@ fn scaffold_tina4js(path: &str) {
 
 export default defineConfig({
   server: {
-    port: 3000,
+    port: 5173,
     // Proxy API calls to tina4-php/python backend in dev
     // proxy: { '/api': 'http://localhost:7145' },
   },
@@ -915,10 +915,44 @@ export function homePage() {
   const count = signal(0);
   const doubled = computed(() => count.value * 2);
 
+  // Star wiggle animation (matches backend frameworks)
+  setTimeout(() => {
+    const star = document.querySelector('.star');
+    if (star) {
+      const wiggle = () => {
+        star.classList.add('wiggle');
+        setTimeout(() => star.classList.remove('wiggle'), 600);
+        setTimeout(wiggle, 3000 + Math.random() * 15000);
+      };
+      wiggle();
+    }
+  }, 3000);
+
   return html`
-    <div class="page">
-      <h1>Welcome to ${document.title}</h1>
-      <p>Edit <code>src/pages/home.ts</code> to get started.</p>
+    <div class="welcome">
+      <div class="star">&#9733;</div>
+      <h1>Tina4<span class="js">js</span></h1>
+      <p class="tagline">This is not a framework</p>
+      <p class="version">v${(window as any).TINA4JS_VERSION || '1.0'} &mdash; Sub-3KB Reactive Frontend</p>
+
+      <div class="features">
+        <div class="feature">
+          <strong>Signals</strong>
+          <span>Reactive state</span>
+        </div>
+        <div class="feature">
+          <strong>Components</strong>
+          <span>Web Components</span>
+        </div>
+        <div class="feature">
+          <strong>Router</strong>
+          <span>SPA navigation</span>
+        </div>
+        <div class="feature">
+          <strong>API</strong>
+          <span>HTTP client</span>
+        </div>
+      </div>
 
       <div class="counter">
         <button @click=${() => count.value--}>-</button>
@@ -927,9 +961,13 @@ export function homePage() {
       </div>
       <p class="muted">Doubled: ${doubled}</p>
 
-      <nav>
+      <div class="links">
+        <a href="https://tina4.com/js" target="_blank">Documentation</a>
+        <a href="https://github.com/tina4stack/tina4-js" target="_blank">GitHub</a>
         <a href="/about">About</a>
-      </nav>
+      </div>
+
+      <p class="hint">Edit <code>src/pages/home.ts</code> to get started. Press <kbd>Ctrl+Shift+D</kbd> for debug overlay.</p>
     </div>
   `;
 }
@@ -971,55 +1009,156 @@ customElements.define('app-header', AppHeader);
     write_file(
         path,
         "src/public/css/default.css",
-        r#"/* Tina4 default styles */
+        r#"/* Tina4js — default dark theme (matches backend frameworks) */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
   font-family: system-ui, -apple-system, sans-serif;
   line-height: 1.6;
-  color: #1f2937;
-  background: #ffffff;
-  max-width: 800px;
-  margin: 0 auto;
-  padding: 2rem;
+  color: #cdd6f4;
+  background: #1e1e2e;
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: center;
 }
 
-h1 { font-size: 2rem; margin-bottom: 0.5rem; }
-p { margin-bottom: 1rem; }
-a { color: #2563eb; }
-code { background: #f3f4f6; padding: 0.2em 0.4em; border-radius: 4px; font-size: 0.9em; }
+a { color: #89b4fa; text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { background: #313244; padding: 0.2em 0.5em; border-radius: 4px; font-size: 0.85em; color: #a6e3a1; }
+kbd { background: #313244; padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.8em; border: 1px solid #45475a; }
 
-.page { padding: 2rem 0; }
-.muted { color: #6b7280; font-size: 0.875rem; }
+.welcome {
+  text-align: center;
+  padding: 3rem 2rem;
+}
+
+.welcome h1 {
+  font-size: 3.5rem;
+  font-weight: 800;
+  color: #cdd6f4;
+  margin-bottom: 0.25rem;
+}
+
+.welcome .js {
+  color: #f9e2af;
+  font-weight: 400;
+  font-size: 2rem;
+}
+
+.welcome .tagline {
+  color: #6c7086;
+  font-style: italic;
+  margin-bottom: 0.5rem;
+}
+
+.welcome .version {
+  color: #a6adc8;
+  font-size: 0.85rem;
+  margin-bottom: 2rem;
+}
+
+.star {
+  font-size: 4rem;
+  color: #f9e2af;
+  margin-bottom: 1rem;
+  display: inline-block;
+  transition: transform 0.3s;
+}
+
+.star.wiggle {
+  animation: wiggle 0.6s ease-in-out;
+}
+
+@keyframes wiggle {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-15deg); }
+  50% { transform: rotate(15deg); }
+  75% { transform: rotate(-10deg); }
+}
+
+.features {
+  display: flex;
+  gap: 1.5rem;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-bottom: 2rem;
+}
+
+.feature {
+  background: #313244;
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  min-width: 120px;
+}
+
+.feature strong {
+  display: block;
+  color: #cba6f7;
+  font-size: 0.9rem;
+}
+
+.feature span {
+  color: #6c7086;
+  font-size: 0.8rem;
+}
 
 .counter {
   display: flex;
   align-items: center;
   gap: 1rem;
+  justify-content: center;
   margin: 1.5rem 0;
 }
 
 .counter button {
-  width: 40px;
-  height: 40px;
-  border: 1px solid #d1d5db;
+  width: 44px;
+  height: 44px;
+  border: 1px solid #45475a;
   border-radius: 8px;
-  background: #f9fafb;
+  background: #313244;
+  color: #cdd6f4;
   font-size: 1.25rem;
   cursor: pointer;
   transition: background 0.15s;
 }
 
-.counter button:hover { background: #e5e7eb; }
+.counter button:hover { background: #45475a; }
 
 .counter span {
-  font-size: 2rem;
+  font-size: 2.5rem;
   font-weight: bold;
   min-width: 3rem;
-  text-align: center;
+  color: #a6e3a1;
 }
 
-nav { margin: 1.5rem 0; display: flex; gap: 1rem; }
+.muted { color: #6c7086; font-size: 0.875rem; margin-bottom: 2rem; }
+
+.links {
+  display: flex;
+  gap: 1.5rem;
+  justify-content: center;
+  margin-bottom: 2rem;
+}
+
+.links a {
+  background: #313244;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  color: #89b4fa;
+  font-size: 0.9rem;
+  transition: background 0.15s;
+}
+
+.links a:hover { background: #45475a; text-decoration: none; }
+
+.hint {
+  color: #585b70;
+  font-size: 0.8rem;
+}
+
+.page { padding: 2rem; max-width: 800px; margin: 0 auto; }
+nav { margin: 1.5rem 0; display: flex; gap: 1rem; justify-content: center; }
 "#,
     );
 

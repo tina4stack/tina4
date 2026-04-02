@@ -344,12 +344,21 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
         println!("{} Browser opened: {}", icon_ok().green(), url.cyan());
     }
 
-    // File watcher (blocks)
-    println!(
-        "{} File watcher active — src/, migrations/, .env",
-        icon_eye().green()
-    );
-    watcher::watch_and_reload(scss_dir, css_dir, &info, port, host, &mut server);
+    // File watcher (blocks) — skip for tina4js since Vite has its own HMR
+    if info.language == "tina4js" {
+        println!(
+            "{} Vite HMR active — press Ctrl+C to stop",
+            icon_eye().green()
+        );
+        // Block until server exits
+        let _ = server.wait();
+    } else {
+        println!(
+            "{} File watcher active — src/, migrations/, .env",
+            icon_eye().green()
+        );
+        watcher::watch_and_reload(scss_dir, css_dir, &info, port, host, &mut server);
+    }
 }
 
 fn install_production_server(info: &detect::ProjectInfo) {
@@ -362,6 +371,7 @@ fn install_production_server(info: &detect::ProjectInfo) {
                 .unwrap_or(false)
         }), "gem install puma --no-doc"),
         "nodejs" => ("cluster", Box::new(|| true), ""), // built-in
+        "tina4js" => ("vite", Box::new(|| true), ""), // uses vite build + preview
         _ => return,
     };
 
@@ -492,6 +502,22 @@ fn start_language_server(
             cmd.args(["tsx", entry])
                 .env("PORT", &port_s)
                 .env("HOST", host)
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit());
+            set_process_group(&mut cmd).spawn()
+        }
+        "tina4js" => {
+            // tina4js uses Vite dev server
+            if !std::path::Path::new("node_modules").exists() {
+                eprintln!(
+                    "{} Dependencies not installed. Run: {}",
+                    icon_fail().red(),
+                    "npm install".cyan()
+                );
+                return None;
+            }
+            let mut cmd = std::process::Command::new("npx");
+            cmd.args(["vite", "--port", &port_s, "--host", host])
                 .stdout(std::process::Stdio::inherit())
                 .stderr(std::process::Stdio::inherit());
             set_process_group(&mut cmd).spawn()

@@ -15,6 +15,7 @@ impl ProjectInfo {
             "php" => "tina4php",
             "ruby" => "tina4ruby",
             "nodejs" => "tina4nodejs",
+            "tina4js" => "vite",
             _ => "tina4",
         }
     }
@@ -26,6 +27,7 @@ impl ProjectInfo {
             "php" => 7146,
             "ruby" => 7147,
             "nodejs" => 7148,
+            "tina4js" => 5173,
             _ => 7145,
         }
     }
@@ -98,9 +100,16 @@ pub fn detect_language() -> Option<ProjectInfo> {
         });
     }
 
-    // Node.js: package.json
+    // Node.js / tina4js: package.json
     if Path::new("package.json").exists() {
         if let Ok(content) = std::fs::read_to_string("package.json") {
+            // tina4js (frontend) — has "tina4js" dep but NOT "tina4-nodejs"
+            if content.contains("\"tina4js\"") && !content.contains("tina4-nodejs") && !content.contains("tina4nodejs") {
+                return Some(ProjectInfo {
+                    language: "tina4js".into(),
+                    version: extract_version_json(&content, "version"),
+                });
+            }
             if content.contains("@tina4") || content.contains("tina4-nodejs") || content.contains("tina4nodejs") {
                 return Some(ProjectInfo {
                     language: "nodejs".into(),

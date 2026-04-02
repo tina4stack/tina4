@@ -521,7 +521,7 @@ fn start_language_server(
                 return None;
             }
             let mut cmd = std::process::Command::new("npx");
-            cmd.args(["vite", "--port", &port_s, "--host", host])
+            cmd.args(["vite", "--port", &port_s, "--host", host, "--strictPort"])
                 .stdout(std::process::Stdio::inherit())
                 .stderr(std::process::Stdio::inherit());
             set_process_group(&mut cmd).spawn()

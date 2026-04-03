@@ -1,4 +1,5 @@
 pub mod console;
+mod env_config;
 mod detect;
 mod doctor;
 mod generate;
@@ -129,6 +130,19 @@ enum Commands {
 
     /// Download framework-specific documentation into .tina4-docs/
     Docs,
+
+    /// Configure environment variables interactively
+    Env {
+        /// Just scan and sync — don't prompt interactively
+        #[arg(long)]
+        sync: bool,
+        /// Only generate .env.example
+        #[arg(long)]
+        example: bool,
+        /// List all env vars the project uses
+        #[arg(long)]
+        list: bool,
+    },
 }
 
 fn main() {
@@ -188,6 +202,7 @@ fn main() {
 
         Commands::Books => handle_books(),
         Commands::Docs => handle_docs(),
+        Commands::Env { sync, example, list } => env_config::run(sync, example, list),
     }
 }
 

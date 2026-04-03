@@ -932,7 +932,7 @@ export function homePage() {
     <div class="welcome">
       <div class="star">&#9733;</div>
       <h1>Tina4<span class="js">js</span></h1>
-      <p class="tagline">This is not a framework</p>
+      <p class="tagline">The Intelligent Native Application 4ramework</p>
       <p class="version">v${(window as any).TINA4JS_VERSION || '1.0'} &mdash; Sub-3KB Reactive Frontend</p>
 
       <div class="features">

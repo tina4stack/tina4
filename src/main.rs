@@ -131,6 +131,9 @@ enum Commands {
     /// Download framework-specific documentation into .tina4-docs/
     Docs,
 
+    /// Start an interactive REPL with the framework loaded
+    Console,
+
     /// Configure environment variables interactively
     Env {
         /// Just scan and sync — don't prompt interactively
@@ -200,6 +203,7 @@ fn main() {
 
         Commands::Update => handle_update(),
 
+        Commands::Console => delegate_command(vec!["console".into()]),
         Commands::Books => handle_books(),
         Commands::Docs => handle_docs(),
         Commands::Env { sync, example, list } => env_config::run(sync, example, list),

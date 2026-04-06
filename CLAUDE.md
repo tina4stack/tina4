@@ -35,7 +35,7 @@ tina4 update                     Self-update the binary
 - SCSS compilation via grass crate (zero-dep, no sass/node required)
 - Port auto-increment if default port is in use
 - Cross-platform: macOS, Linux, Windows (ANSI fallbacks for cmd.exe)
-- Default ports: Python 7145, PHP 7146, Ruby 7147, Node.js 7148
+- Default ports: PHP 7145, Python 7146, Ruby 7147, Node.js 7148
 
 ## Dependencies
 

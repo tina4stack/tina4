@@ -49,7 +49,7 @@ enum Commands {
     /// Start the server with file watcher and SCSS compilation.
     /// Production servers are auto-detected; use --dev to force the dev server.
     Serve {
-        /// Port number (default: auto per framework — python:7145, php:7146, ruby:7147, nodejs:7148)
+        /// Port number (default: auto per framework — php:7145, python:7146, ruby:7147, nodejs:7148)
         #[arg(short, long)]
         port: Option<u16>,
 

@@ -1353,8 +1353,8 @@ Always read and follow `.claude/skills/tina4-js/SKILL.md` when working with this
         println!("  {} tina4-js skill already installed", icon_ok());
     } else {
         // Try to copy from the tina4-js repo or create a basic one
-        let skill_source = dirs_next::home_dir()
-            .map(|h| h.join("IdeaProjects/tina4-js/.claude/skills/tina4-js"))
+        let skill_source = std::env::var("HOME").ok()
+            .map(|h| Path::new(&h).join("IdeaProjects/tina4-js/.claude/skills/tina4-js"))
             .filter(|p| p.exists());
 
         if let Some(src) = skill_source {

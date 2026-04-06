@@ -206,10 +206,15 @@ fn main() {
         }
 
         Commands::Ai { all, force } => {
-            let mut args = vec!["ai".to_string()];
-            if all { args.push("--all".into()); }
-            if force { args.push("--force".into()); }
-            delegate_command(args);
+            // Check if this is a tina4-js (frontend) project — handle directly
+            if is_tina4js_project() {
+                handle_tina4js_ai(all, force);
+            } else {
+                let mut args = vec!["ai".to_string()];
+                if all { args.push("--all".into()); }
+                if force { args.push("--force".into()); }
+                delegate_command(args);
+            }
         }
 
         Commands::IWantToStopUsingV2AndSwitchToV3 => upgrade::run(),
@@ -1287,4 +1292,96 @@ fn download_file(url: &str, dest: &std::path::Path) -> bool {
     };
 
     matches!(status, Ok(s) if s.success())
+}
+
+// ── Tina4-js AI context ─────────────────────────────────────────
+
+/// Check if the current directory is a tina4-js (frontend) project.
+fn is_tina4js_project() -> bool {
+    if let Ok(content) = std::fs::read_to_string("package.json") {
+        // Has tina4js dependency but no app.ts (not a Node.js backend project)
+        content.contains("\"tina4js\"") && !std::path::Path::new("app.ts").exists()
+    } else {
+        false
+    }
+}
+
+/// Handle `tina4 ai` for tina4-js projects — install the tina4-js skill directly.
+fn handle_tina4js_ai(_all: bool, force: bool) {
+    use std::fs;
+    use std::path::Path;
+
+    println!("  {} Detected tina4-js (frontend) project", icon_info());
+
+    // Install CLAUDE.md with tina4-js context
+    let claude_path = Path::new("CLAUDE.md");
+    if claude_path.exists() && !force {
+        println!("  {} CLAUDE.md already exists (use --force to overwrite)", icon_warn());
+    } else {
+        let content = r#"# Tina4-js Project
+
+Frontend project using tina4-js — the sub-3KB reactive framework.
+
+## Build & Dev
+
+- Install: `npm install`
+- Dev: `npm run dev`
+- Build: `npm run build`
+
+## Tina4-js Features
+
+- Signals for reactive state
+- HTML tagged templates
+- Tina4Element for web components
+- Built-in routing (hash and history mode)
+- WebSocket client with auto-reconnect
+- API client with auth headers
+- Zero dependencies, ~13KB bundled
+
+## Skills
+
+Always read and follow `.claude/skills/tina4-js/SKILL.md` when working with this project.
+"#;
+        if fs::write(claude_path, content).is_ok() {
+            println!("  {} Created CLAUDE.md", icon_ok());
+        }
+    }
+
+    // Install tina4-js skill
+    let skill_dir = Path::new(".claude/skills/tina4-js");
+    if skill_dir.exists() && !force {
+        println!("  {} tina4-js skill already installed", icon_ok());
+    } else {
+        // Try to copy from the tina4-js repo or create a basic one
+        let skill_source = dirs_next::home_dir()
+            .map(|h| h.join("IdeaProjects/tina4-js/.claude/skills/tina4-js"))
+            .filter(|p| p.exists());
+
+        if let Some(src) = skill_source {
+            // Copy the whole skill directory
+            fn copy_dir(src: &Path, dst: &Path) {
+                let _ = fs::create_dir_all(dst);
+                if let Ok(entries) = fs::read_dir(src) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        let dest = dst.join(entry.file_name());
+                        if path.is_dir() {
+                            copy_dir(&path, &dest);
+                        } else {
+                            let _ = fs::copy(&path, &dest);
+                        }
+                    }
+                }
+            }
+            copy_dir(&src, skill_dir);
+            println!("  {} Installed tina4-js skill from local repo", icon_ok());
+        } else {
+            let _ = fs::create_dir_all(skill_dir);
+            let skill_content = "# tina4-js Skill\n\nUse tina4-js signals, Tina4Element, html tagged templates, and the built-in router.\n\nSee https://tina4.com for documentation.\n";
+            let _ = fs::write(skill_dir.join("SKILL.md"), skill_content);
+            println!("  {} Created basic tina4-js skill", icon_ok());
+        }
+    }
+
+    println!("  {} AI context installed for tina4-js project", icon_ok());
 }

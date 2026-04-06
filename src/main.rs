@@ -1,4 +1,5 @@
 pub mod console;
+mod agent;
 mod env_config;
 mod detect;
 mod doctor;
@@ -134,6 +135,13 @@ enum Commands {
     /// Start an interactive REPL with the framework loaded
     Console,
 
+    /// Start the AI agent server for Code With Me
+    Agent {
+        /// Port number (default: framework port + 2000)
+        #[arg(short, long)]
+        port: Option<u16>,
+    },
+
     /// Configure environment variables interactively
     Env {
         /// Just scan and sync — don't prompt interactively
@@ -191,6 +199,11 @@ fn main() {
         Commands::Routes => delegate_command(vec!["routes".into()]),
 
         Commands::Generate { what, name } => generate::run(&what, &name),
+
+        Commands::Agent { port } => {
+            let default_port = 9145u16; // default agent port
+            agent::run(port.unwrap_or(default_port));
+        }
 
         Commands::Ai { all, force } => {
             let mut args = vec!["ai".to_string()];

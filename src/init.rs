@@ -632,18 +632,34 @@ fn scaffold_php(path: &str) {
         path,
         "index.php",
         r#"<?php
-
 require_once __DIR__ . '/vendor/autoload.php';
 
 $app = new \Tina4\App();
-$app->run();
+
+// Local development (fastest — built-in socket server with WebSocket support):
+//   tina4 serve
+//
+// Production behind Apache/nginx (see .htaccess or nginx.conf.example):
+//   Apache: mod_rewrite routes all requests through this file
+//   nginx:  try_files $uri $uri/ /index.php?$query_string
+//
+// handle() detects the environment automatically:
+//   - CLI (tina4 serve): bootstraps routes, server handles dispatch
+//   - Apache/nginx/php-fpm: dispatches the current request and outputs response
+$app->handle();
 "#,
     );
 
     write_file(
         path,
+        ".env",
+        "TINA4_DEBUG=true\nSECRET=change-me-in-production\n",
+    );
+
+    write_file(
+        path,
         ".gitignore",
-        "vendor/\ndata/\nlogs/\n.env\n",
+        "vendor/\ndata/\nlogs/\ncache/\nsecrets/\n.env\n",
     );
 
     let composer = format!(
@@ -665,7 +681,88 @@ $app->run();
     );
     write_file(path, "composer.json", &composer);
 
-    // src/routes/ is created empty — users add routes via gallery or manually
+    // Apache .htaccess — front controller rewrite
+    write_file(
+        path,
+        ".htaccess",
+        r#"DirectoryIndex index.php
+RewriteEngine On
+
+# Block sensitive files (.env, .htaccess, secrets/)
+<FilesMatch "\.(env|htaccess|htpasswd)$">
+    Require all denied
+</FilesMatch>
+
+# Uncomment below to force HTTPS (production only)
+# RewriteCond %{HTTPS} !=on
+# RewriteCond %{REQUEST_URI} !^/.well-known/ [NC]
+# RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301,NE]
+
+# Serve existing files and directories directly
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# Route everything else through Tina4
+RewriteRule ^(.*)$ index.php [QSA,L]
+
+# Pass Authorization header to PHP (required for Bearer tokens)
+SetEnvIf Authorization .+ HTTP_AUTHORIZATION=$0
+"#,
+    );
+
+    // nginx config example
+    write_file(
+        path,
+        "nginx.conf.example",
+        r#"# Tina4 PHP — nginx configuration
+# Copy to /etc/nginx/sites-available/ and adjust server_name, root, fastcgi_pass.
+
+server {
+    listen 80;
+    server_name example.com;
+    root /var/www/tina4;
+    index index.php;
+
+    # Block sensitive files
+    location ~ /\.(env|htaccess|htpasswd|git) {
+        deny all;
+        return 404;
+    }
+    location ~ ^/(secrets|cache)/ {
+        deny all;
+        return 404;
+    }
+    location ~ ^/src/(routes|orm|services|app|templates|scss)/ {
+        deny all;
+        return 404;
+    }
+
+    # Static files from src/public/
+    location /src/public/ {
+        try_files $uri =404;
+    }
+
+    # Front controller
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    # PHP-FPM
+    location ~ \.php$ {
+        fastcgi_pass unix:/run/php/php-fpm.sock;
+        # TCP alternative: fastcgi_pass 127.0.0.1:9000;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        include fastcgi_params;
+        fastcgi_param HTTP_AUTHORIZATION $http_authorization;
+        fastcgi_read_timeout 300;
+    }
+
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml;
+}
+"#,
+    );
 
     println!("  {} Created PHP scaffold", icon_ok().green());
 }

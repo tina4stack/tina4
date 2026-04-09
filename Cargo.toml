@@ -1,6 +1,6 @@
 [package]
 name = "tina4"
-version = "3.8.8"
+version = "3.8.9"
 edition = "2021"
 description = "Tina4 — Unified CLI for Python, PHP, Ruby, and Node.js frameworks"
 license = "MIT"

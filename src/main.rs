@@ -398,21 +398,38 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
         println!("{} Browser opened: {}", icon_ok().green(), url.cyan());
     }
 
-    // File watcher (blocks) — skip for tina4js since Vite has its own HMR
-    if info.language == "tina4js" {
-        println!(
+    // File watcher — every supported Tina4 framework has built-in hot reload
+    // (PHP via WebSocket /__dev_reload, Python via DevReload, Ruby via listen gem,
+    // Node.js via internal watcher, tina4js via Vite HMR). The outer Rust watcher
+    // used to kill and re-spawn the server process on every change, which:
+    //   1. dropped the /__dev_reload WebSocket so the browser never got a reload
+    //   2. repeated the startup banner on every edit
+    //   3. killed in-flight requests on rapid refresh
+    // Instead, we just spawn a lightweight SCSS recompiler (if an scss/ dir exists)
+    // and let the language server own its own reload loop.
+    match info.language.as_str() {
+        "tina4js" => println!(
             "{} Vite HMR active — press Ctrl+C to stop",
             icon_eye().green()
-        );
-        // Block until server exits
-        let _ = server.wait();
-    } else {
-        println!(
-            "{} File watcher active — src/, migrations/, .env",
+        ),
+        "php" | "python" | "ruby" | "nodejs" => println!(
+            "{} Framework hot reload active — press Ctrl+C to stop",
             icon_eye().green()
-        );
-        watcher::watch_and_reload(scss_dir, css_dir, &info, port, host, &mut server);
+        ),
+        _ => {}
     }
+
+    // Optional SCSS compile-on-save in a background thread (doesn't touch the server).
+    if std::path::Path::new(scss_dir).exists() {
+        let scss_in = scss_dir.to_string();
+        let css_out = css_dir.to_string();
+        std::thread::spawn(move || {
+            watcher::watch_scss(&scss_in, &css_out, false);
+        });
+    }
+
+    // Block until the language server exits (Ctrl+C kills it, which unblocks us).
+    let _ = server.wait();
 }
 
 fn install_production_server(info: &detect::ProjectInfo) {

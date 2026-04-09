@@ -1,3 +1,11 @@
 .claude/settings.local.json
 .claude/worktrees/
 target/
+
+# Built release binaries (produced by CI, never committed)
+tina4-linux-amd64
+tina4-linux-arm64
+tina4-darwin-amd64
+tina4-darwin-arm64
+tina4-windows-amd64.exe
+tina4-windows-amd64.exe.zip

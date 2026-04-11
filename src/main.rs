@@ -370,6 +370,20 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
         scss::compile_dir(scss_dir, css_dir, false);
     }
 
+    // Start the AI agent server in background (for Code With Me)
+    // Agent port = framework port + 2000
+    let agent_port = port + 2000;
+    std::thread::spawn(move || {
+        match std::panic::catch_unwind(|| {
+            agent::run(agent_port);
+        }) {
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("  {} Agent server crashed: {:?}", console::icon_warn(), e);
+            }
+        }
+    });
+
     // Start language server (auto-detects production server internally)
     let cli = info.cli_name();
     println!(
@@ -496,6 +510,7 @@ fn start_language_server(
                 cmd.args(["run", "python", "app.py"])
                     .env("PORT", &port_s)
                     .env("HOST", host)
+                    .env("TINA4_CLI", "true")
                     .stdout(std::process::Stdio::inherit())
                     .stderr(std::process::Stdio::inherit());
                 set_process_group(&mut cmd).spawn()
@@ -504,6 +519,7 @@ fn start_language_server(
                 cmd.args(["app.py"])
                     .env("PORT", &port_s)
                     .env("HOST", host)
+                    .env("TINA4_CLI", "true")
                     .stdout(std::process::Stdio::inherit())
                     .stderr(std::process::Stdio::inherit());
                 set_process_group(&mut cmd).spawn()
@@ -544,6 +560,7 @@ fn start_language_server(
                 cmd.args(["exec", "ruby", "app.rb"])
                     .env("PORT", &port_s)
                     .env("HOST", host)
+                    .env("TINA4_CLI", "true")
                     .stdout(std::process::Stdio::inherit())
                     .stderr(std::process::Stdio::inherit());
                 set_process_group(&mut cmd).spawn()
@@ -552,6 +569,7 @@ fn start_language_server(
                 cmd.args(["app.rb"])
                     .env("PORT", &port_s)
                     .env("HOST", host)
+                    .env("TINA4_CLI", "true")
                     .stdout(std::process::Stdio::inherit())
                     .stderr(std::process::Stdio::inherit());
                 set_process_group(&mut cmd).spawn()

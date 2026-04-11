@@ -151,48 +151,53 @@ const DEFAULT_AGENTS: &[(&str, &str, &str)] = &[
     ("supervisor", r#"{"model":"thinking","temperature":0.3,"max_tokens":2048,"tools":["list_routes","list_tables","project_info","file_list"],"max_iterations":1}"#,
      r#"You are Tina4, the AI coding assistant built into the Tina4 dev admin.
 
-You are the supervisor. The developer chats with you directly. You understand their request, gather requirements, and then coordinate specialist agents to build what they need.
+You are the supervisor. The developer chats with you directly. You understand their request, gather requirements, coordinate specialist agents, and steer the project from start to finish.
 
 ## Your Personality
-You are direct, practical, and efficient. You ask only what matters. You never explain framework internals or list modules — the developer doesn't care how the sausage is made. They want results.
+You are direct, practical, and efficient. You ask only what matters. You never explain framework internals or list modules. You talk like a colleague who just gets things done.
 
 ## Communication Style
-- Ask SHORT questions about what the USER needs, not about technology choices
-- Never say "We can use Tina4's Auth module" — just handle it
-- Never list framework features unless specifically asked
+- Ask SHORT questions about what the USER needs, not technology choices
+- Never list framework features or module names
 - Focus on WHAT the user wants, not HOW you'll build it
-- Talk like a colleague, not a tutorial
+- When executing a plan, give clear progress updates: "Step 2 of 5 done. Moving to the login page..."
+- After completing work, summarize what was built in plain English
 
 ## CRITICAL: Gather Requirements First
 
 When a developer says they want to build something, DO NOT immediately create a plan. Instead:
-
 1. Ask clarifying questions to understand what they need
-2. Suggest Tina4 features that would help
-3. Keep asking until you have enough detail OR the developer says "just build it", "go ahead", "make something up", "you decide", or similar
+2. Keep asking until you have enough detail OR the developer says "just build it", "go ahead", "you decide"
 
 ## When to Stop Asking
 
 Stop asking and act when:
-- The developer says "go ahead", "build it", "just do it", "you decide", "make something up"
-- The developer has answered 2-3 rounds of questions and you have enough detail
+- The developer says "go ahead", "build it", "just do it", "you decide"
+- You have enough detail after 2-3 rounds of questions
 - The request is simple enough (e.g. "add a health check endpoint")
-- The developer seems impatient
+
+## Steering the Project
+
+You keep the big picture in mind:
+- Remember what has been built so far in this conversation
+- When executing a plan, work through it step by step — one task at a time
+- After each task, briefly confirm what was done and what's next
+- If something fails, handle it before moving on
+- At the end of the plan, give a summary of everything that was built
 
 ## Rules
-1. Gather requirements before planning — ask questions first
+1. Gather requirements before planning
 2. Always plan before coding — create plans in .tina4/plans/
-3. Suggest Tina4 built-in features — never reinvent
-4. Follow conventions: routes in src/routes/, models in src/orm/, templates in src/templates/
-5. One route per file, one model per file
-6. Use migrations for schema changes
-7. Keep questions concise — max 3-4 per round
-8. If the developer provides a detailed spec upfront, skip questions and plan directly
+3. Never reinvent what the framework provides
+4. Keep questions concise — max 3-4 per round
+5. If the developer provides a detailed spec upfront, skip questions and plan directly
+6. NEVER show file paths, code, or technical jargon to the user
 
 ## Actions
-Only respond with JSON when ready to delegate (after gathering requirements):
+Only respond with JSON when ready to delegate:
 {"action": "plan", "delegate_to": "planner", "context": "detailed description with all gathered requirements"}
 {"action": "code", "delegate_to": "coder", "context": "what to write", "files": ["path1", "path2"]}
+{"action": "execute_plan", "delegate_to": "coder", "context": "plan file path to execute step by step"}
 {"action": "analyze_image", "delegate_to": "vision"}
 {"action": "generate_image", "delegate_to": "image-gen", "prompt": "what to generate"}
 {"action": "debug", "delegate_to": "debug", "error": "the error message"}
@@ -203,37 +208,114 @@ For questions and conversation, ALWAYS use:
 "#),
 
     ("planner", r#"{"model":"thinking","temperature":0.2,"max_tokens":4096,"tools":["file_read","file_list","list_routes","list_tables"],"max_iterations":3}"#,
-     r#"You are the Planner agent for Tina4 projects.
+     r#"You are the Planner agent. You create simple plans that a non-technical person can understand.
 
-Your job: read the project structure and create a clear, step-by-step implementation plan.
+## How to write a plan
 
-## Output Format
-Write a markdown plan with:
-- Objective (one sentence)
-- Steps (numbered, each with file path and description)
-- Files to create or modify
-- Tina4 features to use
+Write a short numbered list of what will be built. Use plain English. No technical jargon.
 
-## Rules
-- Read existing files before planning changes
-- Follow Tina4 conventions strictly
-- Suggest migrations for any schema changes
-- Suggest Queue for anything that takes > 1 second
-- One route per file, one model per file
+Example:
+1. Set up the database for storing contacts
+2. Create a page where visitors fill in their name, email, and message
+3. Save the submission to the database
+4. Send an email notification to the site owner
+5. Show a thank you message after submission
+
+## RULES — follow these exactly
+
+- NEVER mention file paths, file names, or directories
+- NEVER mention code, classes, functions, methods, or APIs
+- NEVER use tables or technical formatting
+- NEVER say "Create migration", "Create ORM model", "Create route" — say what it DOES, not what it IS
+- NEVER mention the framework by name
+- NEVER say "ORM", "AutoCrud", "middleware", "endpoint", "schema", "migration"
+- Write like you're explaining to someone who doesn't code
+- Maximum 10 steps
+- Each step is ONE simple sentence
+- Start with an objective sentence before the numbered list
 "#),
 
     ("coder", r#"{"model":"thinking","temperature":0.1,"max_tokens":4096,"tools":["file_read","file_write"],"max_iterations":10}"#,
-     r#"You are the Coder agent for Tina4 projects.
+     r#"You are the Coder agent for Tina4 projects. Write code that follows the plan exactly.
 
-Your job: write code that follows the plan exactly. One step at a time.
+## CRITICAL: File Structure
+
+All Tina4 projects use this structure — NEVER use Laravel, Django, Rails, or Express patterns:
+
+```
+project/
+  app.py
+  migrations/        ← SQL migration files (at project ROOT)
+  src/
+    routes/          ← route files (one per file)
+    orm/             ← ORM model files (one per file)
+    templates/       ← Frond HTML templates (.twig)
+    seeds/           ← database seed files
+```
+
+NEVER create: app/, Controllers/, Models/, Views/, Database/, database/ folders.
+
+## Python Route Example (src/routes/contact.py)
+
+```python
+from tina4_python import get, post
+from tina4_python.core import response
+
+@get("/contact")
+async def get_contact(request, response):
+    return response.html(template("contact.twig"))
+
+@post("/contact")
+async def post_contact(request, response):
+    name = request.body.get("name", "")
+    email = request.body.get("email", "")
+    message = request.body.get("message", "")
+    # save to database, send email, etc.
+    return response.redirect("/contact?success=1")
+```
+
+## Python ORM Example (src/orm/Contact.py)
+
+```python
+from tina4_python.orm import fields, model
+
+class Contact(model.Model):
+    __table_name__ = "contacts"
+    id = fields.AutoField(primary_key=True)
+    name = fields.CharField(max_length=255)
+    email = fields.CharField(max_length=255)
+    message = fields.TextField()
+    created_at = fields.DateTimeField(auto_now_add=True)
+```
+
+## Migration Example (migrations/001_create_contacts.sql)  ← at project ROOT
+
+```sql
+CREATE TABLE IF NOT EXISTS contacts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name VARCHAR(255),
+    email VARCHAR(255),
+    message TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+## Template Example (src/templates/contact.twig)
+
+```html
+<form method="post" action="/contact">
+    <input name="name" placeholder="Name" required>
+    <input name="email" type="email" placeholder="Email" required>
+    <textarea name="message" placeholder="Message" required></textarea>
+    <button type="submit">Send</button>
+</form>
+```
 
 ## Rules
-- Follow Tina4 conventions: decorators, response() pattern, ORM fields
-- Write complete, working files — never partial snippets
-- Include imports at the top
-- Add docstrings/comments explaining what the code does
-- Use built-in features: Auth, Queue, ORM, Frond, etc.
-- Return the file path and complete content for each file
+- ALWAYS use the src/ structure shown above
+- NEVER create app/, Controllers/, Models/, Views/, Database/ folders
+- One route per file, one model per file
+- Return each file as: ## FILE: path/to/file
 "#),
 
     ("vision", r#"{"model":"vision","temperature":0.3,"max_tokens":2048,"tools":[],"max_iterations":1}"#,
@@ -352,24 +434,24 @@ pub fn load_chat_settings(project_dir: &Path) -> ChatSettings {
             return settings;
         }
     }
-    // Defaults — Tina4 Cloud
+    // Defaults — Tina4 Cloud (per-model-type endpoints, models fetched at runtime)
     ChatSettings {
         thinking: ModelSettings {
             provider: "tina4".into(),
-            model: "tina4-v1".into(),
-            url: "https://api.tina4.com/v1/chat/completions".into(),
+            model: String::new(),
+            url: "http://41.71.84.173:11437".into(),
             api_key: String::new(),
         },
         vision: ModelSettings {
             provider: "tina4".into(),
-            model: "tina4-v1".into(),
-            url: "https://api.tina4.com/v1/chat/completions".into(),
+            model: String::new(),
+            url: "http://41.71.84.173:11434".into(),
             api_key: String::new(),
         },
         image_gen: ModelSettings {
-            provider: "custom".into(),
+            provider: "tina4".into(),
             model: String::new(),
-            url: String::new(),
+            url: "http://41.71.84.173:11436".into(),
             api_key: String::new(),
         },
     }
@@ -397,6 +479,43 @@ pub fn load_history(project_dir: &Path) -> Vec<ChatMessage> {
     }
 }
 
+/// Fetch the first available model from an Ollama-compatible server.
+async fn fetch_first_model(base_url: &str) -> Option<String> {
+    let client = reqwest::Client::new();
+    // Try Ollama /api/tags first
+    if let Ok(resp) = client.get(format!("{}/api/tags", base_url)).send().await {
+        if let Ok(text) = resp.text().await {
+            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(models) = data["models"].as_array() {
+                    if let Some(first) = models.first() {
+                        let name = first["name"].as_str()
+                            .or_else(|| first["model"].as_str())
+                            .unwrap_or("");
+                        if !name.is_empty() {
+                            return Some(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Try OpenAI /v1/models
+    if let Ok(resp) = client.get(format!("{}/v1/models", base_url)).send().await {
+        if let Ok(text) = resp.text().await {
+            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(models) = data["data"].as_array() {
+                    if let Some(first) = models.first() {
+                        if let Some(id) = first["id"].as_str() {
+                            return Some(id.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Make an LLM call (blocking, non-streaming).
 pub async fn llm_call(
     settings: &ModelSettings,
@@ -406,6 +525,17 @@ pub async fn llm_call(
     temperature: f32,
 ) -> Result<String, String> {
     let client = reqwest::Client::new();
+
+    // If model is empty, auto-detect from the server
+    let model_name = if settings.model.is_empty() {
+        let base = settings.url.trim_end_matches('/');
+        match fetch_first_model(base).await {
+            Some(m) => m,
+            None => return Err("No models available on the server. Check the URL.".into()),
+        }
+    } else {
+        settings.model.clone()
+    };
 
     let mut all_messages = Vec::new();
     if !system_prompt.is_empty() {
@@ -424,7 +554,7 @@ pub async fn llm_call(
     };
 
     let body = LlmRequest {
-        model: settings.model.clone(),
+        model: model_name,
         messages: all_messages,
         max_tokens,
         temperature,
@@ -554,6 +684,123 @@ pub fn save_thought(project_dir: &Path, thought: &Thought) {
         thoughts = thoughts[thoughts.len() - 50..].to_vec();
     }
     let _ = fs::write(&path, serde_json::to_string_pretty(&thoughts).unwrap_or_default());
+}
+
+/// Scan project and build context string for the coder agent.
+pub fn build_project_context(project_dir: &Path) -> String {
+    let mut ctx = String::new();
+
+    // Detect language
+    let lang = if project_dir.join("app.py").exists() { "python" }
+        else if project_dir.join("index.php").exists() || project_dir.join("composer.json").exists() { "php" }
+        else if project_dir.join("app.rb").exists() || project_dir.join("Gemfile").exists() { "ruby" }
+        else if project_dir.join("app.ts").exists() || project_dir.join("package.json").exists() { "nodejs" }
+        else { "python" };
+    ctx.push_str(&format!("Language: {}\n", lang));
+    ctx.push_str(&format!("Project root: {}\n\n", project_dir.display()));
+
+    // List existing route files with their first few lines
+    let routes_dir = project_dir.join("src").join("routes");
+    if routes_dir.exists() {
+        ctx.push_str("## Existing route files:\n");
+        if let Ok(entries) = fs::read_dir(&routes_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    ctx.push_str(&format!("- src/routes/{}", name));
+                    // Read first 5 lines to show the pattern
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        let preview: String = content.lines().take(5).collect::<Vec<_>>().join("\n");
+                        ctx.push_str(&format!("\n```\n{}\n```\n", preview));
+                    } else {
+                        ctx.push('\n');
+                    }
+                }
+            }
+        }
+        ctx.push('\n');
+    }
+
+    // List existing ORM models
+    let orm_dir = project_dir.join("src").join("orm");
+    if orm_dir.exists() {
+        ctx.push_str("## Existing ORM models:\n");
+        if let Ok(entries) = fs::read_dir(&orm_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    ctx.push_str(&format!("- src/orm/{}", name));
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        let preview: String = content.lines().take(10).collect::<Vec<_>>().join("\n");
+                        ctx.push_str(&format!("\n```\n{}\n```\n", preview));
+                    } else {
+                        ctx.push('\n');
+                    }
+                }
+            }
+        }
+        ctx.push('\n');
+    }
+
+    // List existing templates
+    let tmpl_dir = project_dir.join("src").join("templates");
+    if tmpl_dir.exists() {
+        ctx.push_str("## Existing templates:\n");
+        if let Ok(entries) = fs::read_dir(&tmpl_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    ctx.push_str(&format!("- src/templates/{}\n", name));
+                }
+            }
+        }
+        ctx.push('\n');
+    }
+
+    // List existing migrations
+    let mig_dir = project_dir.join("migrations");
+    if mig_dir.exists() {
+        ctx.push_str("## Existing migrations (at project root):\n");
+        if let Ok(entries) = fs::read_dir(&mig_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                ctx.push_str(&format!("- migrations/{}\n", name));
+            }
+        }
+        ctx.push('\n');
+    }
+
+    // Read app.py to understand the entry point
+    let app_file = match lang {
+        "python" => "app.py",
+        "php" => "index.php",
+        "ruby" => "app.rb",
+        _ => "app.ts",
+    };
+    if let Ok(content) = fs::read_to_string(project_dir.join(app_file)) {
+        ctx.push_str(&format!("## {} (entry point):\n```\n{}\n```\n\n", app_file, content));
+    }
+
+    // .env for database config awareness
+    if let Ok(content) = fs::read_to_string(project_dir.join(".env")) {
+        // Only include non-secret lines (keys, not values)
+        let safe: String = content.lines()
+            .map(|line| {
+                if let Some(pos) = line.find('=') {
+                    format!("{}=***", &line[..pos])
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        ctx.push_str(&format!("## .env keys:\n{}\n\n", safe));
+    }
+
+    ctx
 }
 
 /// Scan project for issues (called by background thinking loop).
@@ -942,26 +1189,51 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                     }
                 }
 
-                // Step 1: Call supervisor with conversation history
+                // Step 1: Call supervisor with conversation history + project context
                 let supervisor_prompt = supervisor.map(|s| s.system_prompt.as_str()).unwrap_or("");
 
-                // Build message history — last 16 messages for context
+                // Build message history — last 20 messages for context
                 let history = load_history(&project_dir);
                 let recent: Vec<&ChatMessage> = history.iter()
                     .filter(|m| m.thread_id == chat_req.thread_id)
-                    .rev().take(16).collect::<Vec<_>>().into_iter().rev().collect();
+                    .rev().take(20).collect::<Vec<_>>().into_iter().rev().collect();
 
-                let mut msgs: Vec<LlmMessage> = recent.iter().map(|m| {
+                let mut msgs: Vec<LlmMessage> = Vec::new();
+
+                // Add project context as first system-like message
+                let plans_dir = project_dir.join(".tina4").join("plans");
+                let latest_plan = if plans_dir.exists() {
+                    fs::read_dir(&plans_dir).ok()
+                        .and_then(|entries| entries
+                            .filter_map(|e| e.ok())
+                            .filter(|e| e.path().extension().map_or(false, |ext| ext == "md"))
+                            .max_by_key(|e| e.metadata().ok().and_then(|m| m.modified().ok())))
+                        .and_then(|entry| fs::read_to_string(entry.path()).ok())
+                } else {
+                    None
+                };
+
+                if let Some(ref plan) = latest_plan {
+                    // Give supervisor awareness of the current plan
+                    let plan_summary = if plan.len() > 800 { format!("{}...", &plan[..800]) } else { plan.clone() };
+                    msgs.push(LlmMessage {
+                        role: "system".into(),
+                        content: format!("Current project plan:\n{}", plan_summary),
+                    });
+                }
+
+                // Add conversation history
+                for m in &recent {
                     let mut content = m.content.clone();
                     // Truncate long messages to save tokens
-                    if content.len() > 500 {
-                        content = format!("{}...(truncated)", &content[..500]);
+                    if content.len() > 600 {
+                        content = format!("{}...(truncated)", &content[..600]);
                     }
-                    LlmMessage {
+                    msgs.push(LlmMessage {
                         role: if m.role == "user" { "user".into() } else { "assistant".into() },
                         content,
-                    }
-                }).collect();
+                    });
+                }
                 msgs.push(LlmMessage { role: "user".into(), content: chat_req.message.clone() });
 
                 let supervisor_reply = match llm_call(model_settings, supervisor_prompt, &msgs, 2048, 0.3).await {
@@ -986,10 +1258,10 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                         let planner_prompt = planner.map(|p| p.system_prompt.as_str()).unwrap_or("");
                         let planner_model = resolve_model("planner", &agents, &settings);
 
-                        // Build planner context with project info
+                        // Build planner context — no paths or tech details
                         let planner_msg = format!(
-                            "Create an implementation plan for the following request:\n\n{}\n\nProject directory: {}",
-                            ctx, project_dir.display()
+                            "Create an implementation plan for the following request:\n\n{}",
+                            ctx
                         );
                         let planner_msgs = vec![LlmMessage { role: "user".into(), content: planner_msg }];
 
@@ -1005,18 +1277,12 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                                     "agent": "planner"
                                 }))).await;
 
-                                // Send plan as message
+                                // Send plan content + approval buttons as a single event
                                 let plan_escaped = plan_content.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
-                                sse_event(&mut stream, "message", &format!(
-                                    "{{\"content\":\"{}\",\"agent\":\"planner\",\"plan_file\":\".tina4/plans/{}\"}}",
+                                sse_event(&mut stream, "plan", &format!(
+                                    "{{\"content\":\"{}\",\"agent\":\"planner\",\"file\":\".tina4/plans/{}\",\"approve\":true}}",
                                     plan_escaped, plan_name
                                 )).await;
-
-                                // Send plan approval request
-                                sse_event(&mut stream, "plan", &sse_json(&serde_json::json!({
-                                    "file": format!(".tina4/plans/{}", plan_name),
-                                    "approve": true
-                                }))).await;
 
                                 // Save assistant message
                                 save_message(&project_dir, &ChatMessage {
@@ -1110,6 +1376,152 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                                 let escaped = e.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
                                 sse_event(&mut stream, "error", &format!("{{\"message\":\"Coder failed: {}\"}}", escaped)).await;
                             }
+                        }
+                    }
+
+                    Some(SupervisorAction { action: ref a, .. }) if a == "execute_plan" => {
+                        // Execute plan step by step
+                        let plan_file = action.as_ref().and_then(|a| a.context.clone()).unwrap_or_default();
+                        let plan_path = project_dir.join(&plan_file);
+                        let plan_content = fs::read_to_string(&plan_path).unwrap_or_default();
+
+                        if plan_content.is_empty() {
+                            sse_event(&mut stream, "message", &format!(
+                                "{{\"content\":\"I couldn't find the plan. Let me create a new one.\",\"agent\":\"supervisor\"}}"
+                            )).await;
+                        } else {
+                            // Parse numbered steps from plan
+                            let steps: Vec<String> = plan_content.lines()
+                                .filter(|line| {
+                                    let trimmed = line.trim();
+                                    // Match lines starting with a number followed by . or )
+                                    trimmed.len() > 2 && trimmed.chars().next().map_or(false, |c| c.is_ascii_digit())
+                                        && (trimmed.contains(". ") || trimmed.contains(") "))
+                                })
+                                .map(|line| {
+                                    let trimmed = line.trim();
+                                    // Strip the number prefix
+                                    if let Some(pos) = trimmed.find(". ") {
+                                        trimmed[pos + 2..].to_string()
+                                    } else if let Some(pos) = trimmed.find(") ") {
+                                        trimmed[pos + 2..].to_string()
+                                    } else {
+                                        trimmed.to_string()
+                                    }
+                                })
+                                .collect();
+
+                            let total_steps = steps.len();
+                            sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
+                                "text": format!("Executing plan — {} steps", total_steps),
+                                "agent": "supervisor"
+                            }))).await;
+
+                            let coder = agents.iter().find(|a| a.name == "coder");
+                            let coder_prompt = coder.map(|c| c.system_prompt.as_str()).unwrap_or("");
+                            let coder_model = resolve_model("coder", &agents, &settings);
+
+                            let mut all_files_written: Vec<String> = Vec::new();
+                            let mut step_summaries: Vec<String> = Vec::new();
+
+                            for (i, step) in steps.iter().enumerate() {
+                                let step_num = i + 1;
+
+                                // Tell the user what we're working on
+                                let progress_msg = format!("Step {} of {}: {}", step_num, total_steps, step);
+                                sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
+                                    "text": progress_msg.clone(),
+                                    "agent": "coder"
+                                }))).await;
+                                sse_event(&mut stream, "message", &format!(
+                                    "{{\"content\":\"**Step {} of {}:** {}\\n\\nWorking on this now...\",\"agent\":\"supervisor\"}}",
+                                    step_num, total_steps, step.replace('\\', "\\\\").replace('"', "\\\"")
+                                )).await;
+
+                                // Send step to coder
+                                let coder_msg = format!(
+                                    "Implement this single step from the project plan:\n\n**Step {}:** {}\n\n\
+                                    Full plan context:\n{}\n\n\
+                                    Project directory: {}\n\n\
+                                    Return each file as:\n## FILE: path/to/file\n```\ncontent\n```",
+                                    step_num, step, plan_content, project_dir.display()
+                                );
+                                let coder_msgs = vec![LlmMessage { role: "user".into(), content: coder_msg }];
+
+                                match llm_call(coder_model, coder_prompt, &coder_msgs, 4096, 0.1).await {
+                                    Ok(code_output) => {
+                                        // Parse and write files
+                                        let mut step_files = Vec::new();
+                                        for section in code_output.split("## FILE:") {
+                                            let section = section.trim();
+                                            if section.is_empty() { continue; }
+                                            let mut lines = section.lines();
+                                            if let Some(file_path) = lines.next() {
+                                                let file_path = file_path.trim();
+                                                let remaining: String = lines.collect::<Vec<&str>>().join("\n");
+                                                let content = if let Some(start) = remaining.find("```") {
+                                                    let after = &remaining[start + 3..];
+                                                    let after = if let Some(nl) = after.find('\n') { &after[nl+1..] } else { after };
+                                                    if let Some(end) = after.find("```") { &after[..end] } else { after }
+                                                } else {
+                                                    remaining.as_str()
+                                                };
+
+                                                let full_path = project_dir.join(file_path);
+                                                if let Some(parent) = full_path.parent() {
+                                                    let _ = fs::create_dir_all(parent);
+                                                }
+                                                if fs::write(&full_path, content.trim()).is_ok() {
+                                                    step_files.push(file_path.to_string());
+                                                    all_files_written.push(file_path.to_string());
+                                                }
+                                            }
+                                        }
+
+                                        // Report step completion
+                                        let done_msg = if step_files.is_empty() {
+                                            format!("Step {} complete.", step_num)
+                                        } else {
+                                            format!("Step {} complete — {} files updated.", step_num, step_files.len())
+                                        };
+                                        step_summaries.push(format!("{}. {} ✓", step_num, step));
+
+                                        sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
+                                            "text": done_msg,
+                                            "agent": "coder"
+                                        }))).await;
+                                    }
+                                    Err(e) => {
+                                        step_summaries.push(format!("{}. {} ✗ (failed)", step_num, step));
+                                        let err_escaped = e.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+                                        sse_event(&mut stream, "message", &format!(
+                                            "{{\"content\":\"Step {} had an issue: {}. Moving on...\",\"agent\":\"supervisor\"}}",
+                                            step_num, err_escaped
+                                        )).await;
+                                    }
+                                }
+                            }
+
+                            // Final summary
+                            let summary = format!(
+                                "All done! Here's what I built:\\n\\n{}\\n\\n{} files were created or updated.",
+                                step_summaries.iter().map(|s| format!("- {}", s.replace('\\', "\\\\").replace('"', "\\\""))).collect::<Vec<_>>().join("\\n"),
+                                all_files_written.len()
+                            );
+                            sse_event(&mut stream, "message", &format!(
+                                "{{\"content\":\"{}\",\"agent\":\"supervisor\",\"files_changed\":{}}}",
+                                summary, serde_json::to_string(&all_files_written).unwrap_or_default()
+                            )).await;
+
+                            // Save summary as message
+                            save_message(&project_dir, &ChatMessage {
+                                id: format!("{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()),
+                                role: "assistant".into(),
+                                content: format!("Plan executed: {} steps, {} files written", step_summaries.len(), all_files_written.len()),
+                                timestamp: chrono_now(),
+                                thread_id: chat_req.thread_id.clone(),
+                                agent: Some("supervisor".into()),
+                            });
                         }
                     }
 
@@ -1252,6 +1664,217 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                 // Done
                 sse_event(&mut stream, "status", &sse_json(&serde_json::json!({"text": "Done", "agent": "supervisor"}))).await;
                 sse_event(&mut stream, "done", "{}").await;
+            } else if first_line.starts_with("POST /execute") {
+                // Direct plan execution — bypasses supervisor, goes straight to coder
+                let body_start = request.find("\r\n\r\n").unwrap_or(n) + 4;
+                let body_str = &request[body_start..];
+
+                #[derive(Deserialize)]
+                struct ExecRequest {
+                    plan_file: String,
+                    #[serde(default)]
+                    settings: Option<ChatSettings>,
+                    #[serde(default)]
+                    resume: bool,
+                }
+
+                #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+                struct PlanState {
+                    completed: Vec<usize>,
+                    files: Vec<String>,
+                }
+
+                let exec_req: ExecRequest = match serde_json::from_str(body_str) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let err_body = format!(r#"{{"error":"Invalid request: {}"}}"#, e);
+                        let resp = format!(
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                            err_body.len(), err_body
+                        );
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                        return;
+                    }
+                };
+
+                let settings = exec_req.settings.unwrap_or_else(|| load_chat_settings(&project_dir));
+
+                // SSE headers
+                let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\nX-Accel-Buffering: no\r\n\r\n";
+                let _ = stream.write_all(headers.as_bytes()).await;
+
+                async fn sse_ev(stream: &mut tokio::net::TcpStream, event: &str, data: &str) {
+                    use tokio::io::AsyncWriteExt;
+                    let _ = stream.write_all(format!("event: {}\ndata: {}\n\n", event, data).as_bytes()).await;
+                    let _ = stream.flush().await;
+                }
+
+                fn sse_j(obj: &serde_json::Value) -> String {
+                    serde_json::to_string(obj).unwrap_or_default()
+                }
+
+                // Read the plan
+                let plan_path = project_dir.join(&exec_req.plan_file);
+                let plan_content = fs::read_to_string(&plan_path).unwrap_or_default();
+
+                if plan_content.is_empty() {
+                    sse_ev(&mut stream, "error", &sse_j(&serde_json::json!({"message":"Plan file not found"}))).await;
+                    sse_ev(&mut stream, "done", "{}").await;
+                    return;
+                }
+
+                // Parse numbered steps
+                let steps: Vec<String> = plan_content.lines()
+                    .filter(|line| {
+                        let trimmed = line.trim();
+                        trimmed.len() > 2 && trimmed.chars().next().map_or(false, |c| c.is_ascii_digit())
+                            && (trimmed.contains(". ") || trimmed.contains(") "))
+                    })
+                    .map(|line| {
+                        let trimmed = line.trim();
+                        if let Some(pos) = trimmed.find(". ") {
+                            trimmed[pos + 2..].to_string()
+                        } else if let Some(pos) = trimmed.find(") ") {
+                            trimmed[pos + 2..].to_string()
+                        } else {
+                            trimmed.to_string()
+                        }
+                    })
+                    .collect();
+
+                let total = steps.len();
+
+                // Load existing state for resume
+                let state_path = plan_path.with_extension("state.json");
+                let mut state: PlanState = if exec_req.resume {
+                    fs::read_to_string(&state_path).ok()
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or_default()
+                } else {
+                    PlanState::default()
+                };
+
+                let skip_count = state.completed.len();
+                if skip_count > 0 {
+                    sse_ev(&mut stream, "message", &format!(
+                        "{{\"content\":\"Resuming from step {} — {} steps already done.\",\"agent\":\"supervisor\"}}",
+                        skip_count + 1, skip_count
+                    )).await;
+                }
+
+                sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({"text": format!("Building — {} steps ({} remaining)", total, total - skip_count), "agent": "supervisor"}))).await;
+
+                let coder = agents.iter().find(|a| a.name == "coder");
+                let coder_prompt = coder.map(|c| c.system_prompt.as_str()).unwrap_or("");
+                let coder_model_type = coder.map(|a| a.config.model.as_str()).unwrap_or("thinking");
+                let coder_model = match coder_model_type { "vision" => &settings.vision, "image-gen" => &settings.image_gen, _ => &settings.thinking };
+
+                let mut summaries: Vec<String> = Vec::new();
+                let mut failed = false;
+
+                for (i, step) in steps.iter().enumerate() {
+                    let num = i + 1;
+
+                    // Skip completed steps
+                    if state.completed.contains(&num) {
+                        summaries.push(format!("{}. {} ✓ (done earlier)", num, step));
+                        continue;
+                    }
+
+                    // Progress update
+                    let step_escaped = step.replace('\\', "\\\\").replace('"', "\\\"");
+                    sse_ev(&mut stream, "message", &format!(
+                        "{{\"content\":\"**Step {} of {}:** {}\",\"agent\":\"supervisor\"}}",
+                        num, total, step_escaped
+                    )).await;
+                    sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({"text": format!("Step {}/{}: {}", num, total, step), "agent": "coder"}))).await;
+
+                    // Build real project context by scanning files
+                    let project_ctx = build_project_context(&project_dir);
+
+                    // Call coder with full project context
+                    let coder_msg = format!(
+                        "## Project Context\n{}\n\n\
+                        ## Task\nImplement step {} of {}:\n**{}**\n\n\
+                        ## Full Plan\n{}\n\n\
+                        Return each file as:\n## FILE: path/to/file\n```\ncontent\n```",
+                        project_ctx, num, total, step, plan_content
+                    );
+                    let coder_msgs = vec![LlmMessage { role: "user".into(), content: coder_msg }];
+
+                    match llm_call(coder_model, coder_prompt, &coder_msgs, 4096, 0.1).await {
+                        Ok(code_output) => {
+                            let mut step_files = Vec::new();
+                            for section in code_output.split("## FILE:") {
+                                let section = section.trim();
+                                if section.is_empty() { continue; }
+                                let mut lines = section.lines();
+                                if let Some(file_path) = lines.next() {
+                                    let file_path = file_path.trim();
+                                    let remaining: String = lines.collect::<Vec<&str>>().join("\n");
+                                    let content = if let Some(start) = remaining.find("```") {
+                                        let after = &remaining[start + 3..];
+                                        let after = if let Some(nl) = after.find('\n') { &after[nl+1..] } else { after };
+                                        if let Some(end) = after.find("```") { &after[..end] } else { after }
+                                    } else { remaining.as_str() };
+
+                                    let full_path = project_dir.join(file_path);
+                                    if let Some(parent) = full_path.parent() { let _ = fs::create_dir_all(parent); }
+                                    if fs::write(&full_path, content.trim()).is_ok() {
+                                        step_files.push(file_path.to_string());
+                                        state.files.push(file_path.to_string());
+                                    }
+                                }
+                            }
+
+                            // Mark step complete and save state immediately
+                            state.completed.push(num);
+                            let _ = fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap_or_default());
+
+                            summaries.push(format!("{}. {} ✓", num, step));
+                            sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({"text": format!("Step {} done — {} files", num, step_files.len()), "agent": "coder"}))).await;
+                        }
+                        Err(e) => {
+                            summaries.push(format!("{}. {} ✗", num, step));
+                            failed = true;
+
+                            // Save state so we can resume from here
+                            let _ = fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap_or_default());
+
+                            let err_esc = e.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+                            sse_ev(&mut stream, "message", &format!(
+                                "{{\"content\":\"Step {} failed: {}\\n\\nYou can resume from here.\",\"agent\":\"supervisor\"}}",
+                                num, err_esc
+                            )).await;
+
+                            // Send resume event so frontend can show Resume button
+                            sse_ev(&mut stream, "plan_failed", &format!(
+                                "{{\"file\":\"{}\",\"completed\":{},\"total\":{},\"failed_step\":{}}}",
+                                exec_req.plan_file.replace('\\', "\\\\").replace('"', "\\\""),
+                                state.completed.len(), total, num
+                            )).await;
+                            break; // Stop on first failure
+                        }
+                    }
+                }
+
+                // Final summary
+                let summary_lines = summaries.iter().map(|s| format!("- {}", s.replace('\\', "\\\\").replace('"', "\\\""))).collect::<Vec<_>>().join("\\n");
+                if failed {
+                    sse_ev(&mut stream, "message", &format!(
+                        "{{\"content\":\"Progress so far:\\n\\n{}\\n\\n{} files created. Resume when ready.\",\"agent\":\"supervisor\",\"files_changed\":{}}}",
+                        summary_lines, state.files.len(), serde_json::to_string(&state.files).unwrap_or_default()
+                    )).await;
+                } else {
+                    // All done — clean up state file
+                    let _ = fs::remove_file(&state_path);
+                    sse_ev(&mut stream, "message", &format!(
+                        "{{\"content\":\"All done!\\n\\n{}\\n\\n{} files created or updated.\",\"agent\":\"supervisor\",\"files_changed\":{}}}",
+                        summary_lines, state.files.len(), serde_json::to_string(&state.files).unwrap_or_default()
+                    )).await;
+                }
+                sse_ev(&mut stream, "done", "{}").await;
+
             } else if first_line.starts_with("OPTIONS") {
                 // CORS preflight
                 let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nAccess-Control-Max-Age: 86400\r\n\r\n";

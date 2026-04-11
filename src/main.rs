@@ -507,19 +507,17 @@ fn start_language_server(
             // Use uv run if .venv exists, otherwise python directly
             if std::path::Path::new(".venv").exists() {
                 let mut cmd = std::process::Command::new("uv");
-                cmd.args(["run", "python", "app.py"])
+                cmd.args(["run", "python", "app.py", "--managed"])
                     .env("PORT", &port_s)
                     .env("HOST", host)
-                    .env("TINA4_CLI", "true")
                     .stdout(std::process::Stdio::inherit())
                     .stderr(std::process::Stdio::inherit());
                 set_process_group(&mut cmd).spawn()
             } else {
                 let mut cmd = std::process::Command::new(console::python_cmd());
-                cmd.args(["app.py"])
+                cmd.args(["app.py", "--managed"])
                     .env("PORT", &port_s)
                     .env("HOST", host)
-                    .env("TINA4_CLI", "true")
                     .stdout(std::process::Stdio::inherit())
                     .stderr(std::process::Stdio::inherit());
                 set_process_group(&mut cmd).spawn()
@@ -537,7 +535,7 @@ fn start_language_server(
             }
             let addr = format!("{}:{}", host, port);
             let (cmd_name, mut cmd_args) = resolve_cli(info);
-            cmd_args.extend(["serve".into(), addr]);
+            cmd_args.extend(["serve".into(), "--managed".into(), addr]);
             let mut cmd = std::process::Command::new(&cmd_name);
             cmd.args(&cmd_args)
                 .stdout(std::process::Stdio::inherit())
@@ -557,19 +555,17 @@ fn start_language_server(
                     return None;
                 }
                 let mut cmd = std::process::Command::new(console::resolve_cmd("bundle"));
-                cmd.args(["exec", "ruby", "app.rb"])
+                cmd.args(["exec", "ruby", "app.rb", "--managed"])
                     .env("PORT", &port_s)
                     .env("HOST", host)
-                    .env("TINA4_CLI", "true")
                     .stdout(std::process::Stdio::inherit())
                     .stderr(std::process::Stdio::inherit());
                 set_process_group(&mut cmd).spawn()
             } else {
                 let mut cmd = std::process::Command::new("ruby");
-                cmd.args(["app.rb"])
+                cmd.args(["app.rb", "--managed"])
                     .env("PORT", &port_s)
                     .env("HOST", host)
-                    .env("TINA4_CLI", "true")
                     .stdout(std::process::Stdio::inherit())
                     .stderr(std::process::Stdio::inherit());
                 set_process_group(&mut cmd).spawn()
@@ -588,7 +584,7 @@ fn start_language_server(
             // Use npx tsx for TypeScript (tsx also handles plain .js)
             let entry = if std::path::Path::new("app.ts").exists() { "app.ts" } else { "app.js" };
             let mut cmd = std::process::Command::new(console::resolve_cmd("npx"));
-            cmd.args(["tsx", entry])
+            cmd.args(["tsx", entry, "--managed"])
                 .env("PORT", &port_s)
                 .env("HOST", host)
                 .stdout(std::process::Stdio::inherit())

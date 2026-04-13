@@ -549,9 +549,13 @@ fn start_language_server(
                 );
                 return None;
             }
-            let addr = format!("{}:{}", host, port);
             let (cmd_name, mut cmd_args) = resolve_cli(info);
-            cmd_args.extend(["serve".into(), "--managed".into(), addr]);
+            cmd_args.extend([
+                "serve".into(),
+                "--managed".into(),
+                "--host".into(), host.into(),
+                "--port".into(), port.to_string(),
+            ]);
             let mut cmd = std::process::Command::new(&cmd_name);
             cmd.args(&cmd_args)
                 .stdout(std::process::Stdio::inherit())

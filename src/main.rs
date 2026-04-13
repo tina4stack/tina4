@@ -443,7 +443,23 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
     }
 
     // Block until the language server exits (Ctrl+C kills it, which unblocks us).
-    let _ = server.wait();
+    match server.wait() {
+        Ok(status) => {
+            if !status.success() {
+                let code = status.code().unwrap_or(-1);
+                eprintln!(
+                    "\n{} Server process exited with code {}. Check logs/error.log or your PHP/Python error log for details.",
+                    icon_fail().red(),
+                    code
+                );
+                std::process::exit(code);
+            }
+        }
+        Err(e) => {
+            eprintln!("\n{} Server process error: {}", icon_fail().red(), e);
+            std::process::exit(1);
+        }
+    }
 }
 
 fn install_production_server(info: &detect::ProjectInfo) {

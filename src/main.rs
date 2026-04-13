@@ -1109,17 +1109,17 @@ fn update_framework_package() {
                 false
             }
         }
-        "php" => std::process::Command::new("composer")
+        "php" => std::process::Command::new(console::resolve_cmd("composer"))
             .args(["update", "tina4stack/tina4php"])
             .status()
             .map(|s| s.success())
             .unwrap_or(false),
-        "ruby" => std::process::Command::new("bundle")
+        "ruby" => std::process::Command::new(console::resolve_cmd("bundle"))
             .args(["update", "tina4ruby"])
             .status()
             .map(|s| s.success())
             .unwrap_or(false),
-        "nodejs" => std::process::Command::new("npm")
+        "nodejs" => std::process::Command::new(console::resolve_cmd("npm"))
             .args(["update", "tina4-nodejs"])
             .status()
             .map(|s| s.success())

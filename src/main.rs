@@ -412,33 +412,37 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
         println!("{} Browser opened: {}", icon_ok().green(), url.cyan());
     }
 
-    // File watcher — every supported Tina4 framework has built-in hot reload
-    // (PHP via WebSocket /__dev_reload, Python via DevReload, Ruby via listen gem,
-    // Node.js via internal watcher, tina4js via Vite HMR). The outer Rust watcher
-    // used to kill and re-spawn the server process on every change, which:
-    //   1. dropped the /__dev_reload WebSocket so the browser never got a reload
-    //   2. repeated the startup banner on every edit
-    //   3. killed in-flight requests on rapid refresh
-    // Instead, we just spawn a lightweight SCSS recompiler (if an scss/ dir exists)
-    // and let the language server own its own reload loop.
+    // File watcher — the Rust CLI owns all file watching. On change it:
+    //   1. Compiles SCSS (if src/scss/ exists)
+    //   2. POSTs /__dev/api/reload to the framework server
+    //   3. The framework updates its mtime counter
+    //   4. The browser's polling script detects the change and reloads
+    // No framework-internal watchers — clean separation of concerns.
     match info.language.as_str() {
         "tina4js" => println!(
             "{} Vite HMR active — press Ctrl+C to stop",
             icon_eye().green()
         ),
-        "php" | "python" | "ruby" | "nodejs" => println!(
-            "{} Framework hot reload active — press Ctrl+C to stop",
+        _ => println!(
+            "{} File watcher active — press Ctrl+C to stop",
             icon_eye().green()
         ),
-        _ => {}
     }
 
-    // Optional SCSS compile-on-save in a background thread (doesn't touch the server).
+    // SCSS compile-on-save in a background thread
     if std::path::Path::new(scss_dir).exists() {
         let scss_in = scss_dir.to_string();
         let css_out = css_dir.to_string();
         std::thread::spawn(move || {
             watcher::watch_scss(&scss_in, &css_out, false);
+        });
+    }
+
+    // File change watcher — POSTs to /__dev/api/reload on the framework server
+    if info.language != "tina4js" {
+        let reload_port = port;
+        std::thread::spawn(move || {
+            watcher::watch_and_reload(reload_port);
         });
     }
 

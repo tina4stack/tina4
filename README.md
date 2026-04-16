@@ -82,28 +82,32 @@ tina4 serve
 | `tina4 doctor` | Check installed languages, package managers, and Tina4 CLIs |
 | `tina4 install <language>` | Install a language runtime (python, php, ruby, nodejs) |
 | `tina4 init [language] <path>` | Scaffold a new Tina4 project. Prompts for language if not specified and multiple runtimes are available |
-| `tina4 serve [--port N] [--dev] [--production]` | Compile SCSS, start the dev server, and watch for changes |
-| `tina4 scss [-w]` | Compile SCSS files (src/scss → src/public/css). Use `-w` to watch |
+| `tina4 serve [--port N] [--host H] [--dev] [--production] [--no-browser]` | Compile SCSS, start the dev server, watch files, open the browser |
+| `tina4 scss [-w]` | Compile SCSS files (`src/scss` → `src/public/css`). Use `-w` to watch |
 | `tina4 migrate [--create <name>]` | Run database migrations or create a new one |
-| `tina4 test` | Run project tests |
+| `tina4 test` | Run project tests (delegated to the framework CLI) |
 | `tina4 routes` | List registered routes |
 | `tina4 generate <type> <name>` | Generate scaffolding: model, route, migration, middleware |
 | `tina4 ai [--all] [--force]` | Detect AI coding tools and install framework context/skills |
-| `tina4 upgrade` | Upgrade a v2 project to v3 structure |
-| `tina4 update` | Self-update the tina4 binary and clean up old v2 CLIs |
-| `tina4 books` | Download the Tina4 documentation book |
+| `tina4 console` | Start an interactive REPL with the framework loaded (delegated) |
+| `tina4 env [--sync] [--example] [--list]` | Scan the project for referenced env vars, merge with `.env.example`, prompt for missing values |
+| `tina4 agent [--port N]` | Start the AI agent server for Code With Me |
+| `tina4 books` | Download the Tina4 book into the current directory |
+| `tina4 docs` | Download framework-specific documentation into `.tina4-docs/` |
+| `tina4 i-want-to-stop-using-v2-and-switch-to-v3` | Migrate a v2 project to the v3 structure |
+| `tina4 update` | Self-update the tina4 binary and remove old v2 CLI binaries |
 
 ## How it works
 
 1. **Language detection** — scans for `pyproject.toml`, `composer.json`, `Gemfile`, or `package.json` to determine the project language
 2. **SCSS compilation** — uses the [grass](https://github.com/connorskees/grass) crate (pure Rust Sass compiler) so individual frameworks don't need their own SCSS compilers
-3. **File watching** — monitors `src/`, `migrations/`, and `.env` for changes. On a meaningful change it POSTs `/__dev/api/reload` to the framework (the server keeps running); the framework then broadcasts the reload to the browser via WebSocket (`/__dev_reload`) with a polling fallback (`GET /__dev/api/mtime`). SCSS changes are recompiled in-place and signalled as `type: "css"` so the browser swaps the stylesheet without a full reload. Events are filtered to real source changes — metadata/access events, `__pycache__`, `.git`, `node_modules`, `vendor`, `dist`, `target`, `logs`, `.log`/`.db*`/`.pyc`/`.swp` files are ignored, and a real mtime check defeats overlayfs / polling-mode spurious events
-4. **Delegation** — forwards commands like `migrate`, `test`, `routes`, and `ai` to `tina4python`, `tina4php`, `tina4ruby`, or `tina4nodejs` as appropriate
+3. **File watching** — monitors `src/`, `migrations/`, and `.env` for changes. On a meaningful change it POSTs `/__dev/api/reload` to the framework (the server keeps running); the framework then broadcasts the reload to the browser via WebSocket (`/__dev_reload`) with a polling fallback (`GET /__dev/api/mtime`). SCSS changes are recompiled in-place and signalled as `type: "css"` so the browser swaps the stylesheet without a full reload. Events are filtered to real source changes — metadata/access events, `__pycache__`, `.git`, `node_modules`, `vendor`, `dist`, `target`, `logs`, `.log`/`.db*`/`.pyc`/`.swp` files are ignored, and a real mtime check defeats overlayfs / polling-mode spurious events (Podman, distrobox)
+4. **Delegation** — forwards commands like `migrate`, `test`, `routes`, `console`, and `ai` to `tina4python`, `tina4php`, `tina4ruby`, or `tina4nodejs` as appropriate
 5. **Self-update** — `tina4 update` checks GitHub releases and replaces the binary in-place. Also detects and removes old v2 CLI binaries that may be shadowing the new CLI
 
 ## Upgrading from v2
 
-If you have an older v2 Tina4 project, run `tina4 upgrade` inside the project directory. This will:
+If you have an older v2 Tina4 project, run `tina4 i-want-to-stop-using-v2-and-switch-to-v3` inside the project directory. The verbose name is deliberate — this is a one-way migration and we want you to mean it. It will:
 
 - Move top-level directories (`routes/`, `orm/`, `templates/`, etc.) into `src/`
 - Update dependency versions in your manifest file to v3

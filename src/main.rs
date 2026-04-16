@@ -402,10 +402,22 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
         }
     };
 
-    // Give the server a moment to bind, then open browser (unless --no-browser)
+    // Give the server a moment to bind, then open browser.
+    //
+    // Three ways to suppress:
+    //   1. `--no-browser` CLI flag
+    //   2. `TINA4_NO_BROWSER=true` in the process environment
+    //   3. `TINA4_NO_BROWSER=true` in the project's .env file
+    //
+    // The .env read mirrors what the framework side does, so a single
+    // entry in .env governs both browser-open points (fixes tina4-book#131).
     std::thread::sleep(std::time::Duration::from_secs(2));
     let url = format!("http://localhost:{}", port);
-    if no_browser {
+    let env_no_browser = read_dotenv_bool("TINA4_NO_BROWSER");
+    let os_no_browser = std::env::var("TINA4_NO_BROWSER")
+        .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes"))
+        .unwrap_or(false);
+    if no_browser || env_no_browser || os_no_browser {
         println!("{} Server ready: {}", icon_ok().green(), url.cyan());
     } else {
         console::open_browser(&url);
@@ -464,6 +476,36 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
             std::process::exit(1);
         }
     }
+}
+
+/// Read a boolean-valued variable from the given `.env` file.
+/// Returns true for values `true` / `1` / `yes` (case-insensitive), false otherwise.
+/// Pure function of the path and contents — easy to test.
+fn read_dotenv_bool_from<P: AsRef<std::path::Path>>(path: P, key: &str) -> bool {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            if k.trim() == key {
+                let v = v.trim().trim_matches('"').trim_matches('\'').to_lowercase();
+                return matches!(v.as_str(), "true" | "1" | "yes");
+            }
+        }
+    }
+    false
+}
+
+/// Convenience: read from `.env` in the current working directory.
+/// Used by `handle_serve` so env vars like `TINA4_NO_BROWSER` can live in
+/// `.env` and govern both the CLI's browser-open and the framework's.
+fn read_dotenv_bool(key: &str) -> bool {
+    read_dotenv_bool_from(".env", key)
 }
 
 fn install_production_server(info: &detect::ProjectInfo) {
@@ -1439,4 +1481,74 @@ Always read and follow `.claude/skills/tina4-js/SKILL.md` when working with this
     }
 
     println!("  {} AI context installed for tina4-js project", icon_ok());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a temp .env file and hand its path to the test. Each test
+    /// uses a unique filename so parallel test runners don't collide.
+    fn with_env_file<F: FnOnce(&std::path::Path)>(name: &str, contents: &str, f: F) {
+        let path = std::env::temp_dir().join(format!("tina4-dotenv-{}-{}-{}", std::process::id(), name, fastrand_like()));
+        std::fs::write(&path, contents).unwrap();
+        f(&path);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn fastrand_like() -> u64 {
+        // Tiny per-thread counter; avoids pulling in a rng crate.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        N.fetch_add(1, Ordering::Relaxed)
+    }
+
+    #[test]
+    fn dotenv_bool_reads_true() {
+        with_env_file("true", "TINA4_NO_BROWSER=true\n", |p| {
+            assert!(read_dotenv_bool_from(p, "TINA4_NO_BROWSER"));
+        });
+    }
+
+    #[test]
+    fn dotenv_bool_reads_quoted_true() {
+        with_env_file("qtrue", "TINA4_NO_BROWSER=\"true\"\n", |p| {
+            assert!(read_dotenv_bool_from(p, "TINA4_NO_BROWSER"));
+        });
+    }
+
+    #[test]
+    fn dotenv_bool_reads_yes_and_one() {
+        with_env_file("yesone", "A=yes\nB=1\n", |p| {
+            assert!(read_dotenv_bool_from(p, "A"));
+            assert!(read_dotenv_bool_from(p, "B"));
+        });
+    }
+
+    #[test]
+    fn dotenv_bool_returns_false_for_false() {
+        with_env_file("false", "TINA4_NO_BROWSER=false\n", |p| {
+            assert!(!read_dotenv_bool_from(p, "TINA4_NO_BROWSER"));
+        });
+    }
+
+    #[test]
+    fn dotenv_bool_returns_false_for_missing_key() {
+        with_env_file("missing", "SOMETHING_ELSE=true\n", |p| {
+            assert!(!read_dotenv_bool_from(p, "TINA4_NO_BROWSER"));
+        });
+    }
+
+    #[test]
+    fn dotenv_bool_returns_false_for_no_env_file() {
+        assert!(!read_dotenv_bool_from("/does/not/exist/.env", "TINA4_NO_BROWSER"));
+    }
+
+    #[test]
+    fn dotenv_bool_ignores_comments_and_blanks() {
+        with_env_file("comments", "# comment\n\nTINA4_NO_BROWSER=yes\n# TINA4_DEBUG=true\n", |p| {
+            assert!(read_dotenv_bool_from(p, "TINA4_NO_BROWSER"));
+            assert!(!read_dotenv_bool_from(p, "TINA4_DEBUG"));
+        });
+    }
 }

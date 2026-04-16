@@ -97,7 +97,7 @@ tina4 serve
 
 1. **Language detection** — scans for `pyproject.toml`, `composer.json`, `Gemfile`, or `package.json` to determine the project language
 2. **SCSS compilation** — uses the [grass](https://github.com/connorskees/grass) crate (pure Rust Sass compiler) so individual frameworks don't need their own SCSS compilers
-3. **File watching** — monitors `src/`, `migrations/`, and `.env` for changes; recompiles SCSS and restarts the dev server automatically
+3. **File watching** — monitors `src/`, `migrations/`, and `.env` for changes. On a meaningful change it POSTs `/__dev/api/reload` to the framework (the server keeps running); the framework then broadcasts the reload to the browser via WebSocket (`/__dev_reload`) with a polling fallback (`GET /__dev/api/mtime`). SCSS changes are recompiled in-place and signalled as `type: "css"` so the browser swaps the stylesheet without a full reload. Events are filtered to real source changes — metadata/access events, `__pycache__`, `.git`, `node_modules`, `vendor`, `dist`, `target`, `logs`, `.log`/`.db*`/`.pyc`/`.swp` files are ignored, and a real mtime check defeats overlayfs / polling-mode spurious events
 4. **Delegation** — forwards commands like `migrate`, `test`, `routes`, and `ai` to `tina4python`, `tina4php`, `tina4ruby`, or `tina4nodejs` as appropriate
 5. **Self-update** — `tina4 update` checks GitHub releases and replaces the binary in-place. Also detects and removes old v2 CLI binaries that may be shadowing the new CLI
 

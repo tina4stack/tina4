@@ -1,6 +1,6 @@
 # Tina4 CLI
 
-Version 3.8.12 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 frameworks.
+Version 3.8.15 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 frameworks.
 
 ## Build & Test
 
@@ -31,7 +31,17 @@ tina4 update                     Self-update the binary
 ## Key Architecture
 
 - Auto-detects project language from app.py/index.php/app.rb/app.ts
-- File watcher (notify crate) restarts server on src/, migrations/, .env changes
+- **Sole file watcher** for the Tina4 stack (notify crate). Watches
+  `src/`, `migrations/`, `.env`. On a meaningful change it POSTs
+  `/__dev/api/reload` to the running framework server — it does NOT
+  restart the server. The framework broadcasts the reload signal to
+  connected browsers via WebSocket (`/__dev_reload`) with a polling
+  fallback (`GET /__dev/api/mtime`).
+- **Event filter** (see `src/watcher.rs`): drops Access / Metadata-only
+  events; ignores `__pycache__`, `.git`, `.venv`, `node_modules`,
+  `vendor`, `dist`, `target`, `logs`; ignores `.log`, `.db`, `.db-wal`,
+  `.db-shm`, `.sqlite`, `.tmp`, `.swp`, `.pyc` files; does a real mtime
+  check to defeat overlayfs / polling-mode spurious events.
 - SCSS compilation via grass crate (zero-dep, no sass/node required)
 - Port auto-increment if default port is in use
 - Cross-platform: macOS, Linux, Windows (ANSI fallbacks for cmd.exe)

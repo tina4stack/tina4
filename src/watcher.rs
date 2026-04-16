@@ -1,16 +1,85 @@
 use colored::Colorize;
-use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
-use std::path::Path;
+use notify::event::{EventKind, ModifyKind};
+use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::console::icon_fail;
+
+/// Path fragments whose events we always ignore. Server-side writes
+/// to these locations cause reload loops on some filesystems (notably
+/// overlayfs on Podman/distrobox, where `notify` falls back to polling
+/// and re-reports unchanged files as Modify events).
+const IGNORED_SUBSTRINGS: &[&str] = &[
+    "/__pycache__/",
+    "/.git/",
+    "/.venv/",
+    "/venv/",
+    "/node_modules/",
+    "/vendor/",
+    "/dist/",
+    "/target/",
+    "/logs/",
+    "/.tina4/",
+];
+
+/// File extensions whose events we always ignore.
+const IGNORED_EXTENSIONS: &[&str] = &[
+    "log", "db", "db-wal", "db-shm", "sqlite", "sqlite-journal",
+    "tmp", "swp", "swo", "pyc", "pyo",
+];
+
+/// Filter out events that are not real source-file changes.
+///
+/// On overlayfs (Podman/distrobox) the `notify` crate falls back to
+/// polling mode, which happily re-reports the same file as "modified"
+/// every poll even when no process has touched it. We defend in layers:
+///
+///   1. Event-kind: only Create / Modify(data) / Remove count.
+///      Metadata and Access events are dropped.
+///   2. Path: ignore well-known noise paths (logs, caches, vcs, build).
+///   3. Extension: ignore transient file types (.log, .db-wal, .pyc).
+///   4. Real-mtime check (done by caller via `is_actually_modified`).
+fn is_meaningful_event(event: &Event) -> bool {
+    let kind_ok = matches!(
+        event.kind,
+        EventKind::Create(_)
+            | EventKind::Remove(_)
+            | EventKind::Modify(ModifyKind::Data(_))
+            | EventKind::Modify(ModifyKind::Name(_))
+            | EventKind::Modify(ModifyKind::Any)
+            | EventKind::Any
+    );
+    if !kind_ok {
+        return false;
+    }
+    for path in &event.paths {
+        let s = path.to_string_lossy();
+        if IGNORED_SUBSTRINGS.iter().any(|sub| s.contains(sub)) {
+            return false;
+        }
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            if IGNORED_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Return the file's mtime if it exists. Used to filter out spurious
+/// events where the filesystem layer re-reports an unchanged file.
+fn file_mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
+}
 
 /// Watch src/, migrations/, .env for changes and POST /__dev/api/reload
 /// to the framework server so the browser reloads. Blocks forever.
 pub fn watch_and_reload(port: u16) {
     let (tx, rx) = mpsc::channel();
-    let config = Config::default().with_poll_interval(Duration::from_secs(1));
+    let config = Config::default().with_poll_interval(Duration::from_secs(2));
 
     let mut watcher: RecommendedWatcher =
         Watcher::new(tx, config).expect("Failed to create watcher");
@@ -28,22 +97,55 @@ pub fn watch_and_reload(port: u16) {
         let _ = watcher.watch(env_path, RecursiveMode::NonRecursive);
     }
 
+    // Track last known mtime per file so we can drop spurious events.
+    let mut mtimes: HashMap<PathBuf, SystemTime> = HashMap::new();
     let mut last_reload = Instant::now();
     let url = format!("http://127.0.0.1:{}/__dev/api/reload", port);
 
     loop {
         match rx.recv() {
-            Ok(event) => {
-                // Debounce: skip if less than 500ms since last reload
+            Ok(Ok(event)) => {
+                // Layer 1+2+3: event-kind / path / extension filter
+                if !is_meaningful_event(&event) {
+                    continue;
+                }
+
+                // Layer 4: real-mtime check. On overlayfs the watcher
+                // polls and re-fires events for unchanged files; skip
+                // if the mtime hasn't advanced since we last saw it.
+                let mut any_changed = false;
+                let mut changed_path: Option<PathBuf> = None;
+                for p in &event.paths {
+                    if let Some(mt) = file_mtime(p) {
+                        match mtimes.get(p) {
+                            Some(prev) if *prev == mt => continue,
+                            _ => {
+                                mtimes.insert(p.clone(), mt);
+                                any_changed = true;
+                                if changed_path.is_none() {
+                                    changed_path = Some(p.clone());
+                                }
+                            }
+                        }
+                    } else {
+                        // File doesn't exist (Remove event) — still meaningful
+                        any_changed = true;
+                        if changed_path.is_none() {
+                            changed_path = Some(p.clone());
+                        }
+                    }
+                }
+                if !any_changed {
+                    continue;
+                }
+
+                // Global debounce: coalesce bursts within 500ms
                 if last_reload.elapsed() < Duration::from_millis(500) {
                     continue;
                 }
                 last_reload = Instant::now();
 
-                // Extract changed file path from event
-                let file = event
-                    .ok()
-                    .and_then(|e| e.paths.first().cloned())
+                let file = changed_path
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
 
@@ -67,8 +169,12 @@ pub fn watch_and_reload(port: u16) {
                     let _ = ureq_post(&url_clone, &body);
                 });
             }
+            Ok(Err(e)) => {
+                // `notify` emitted an error event — log and continue.
+                eprintln!("{} Watcher event error: {}", icon_fail().red(), e);
+            }
             Err(e) => {
-                eprintln!("{} Watcher error: {}", icon_fail().red(), e);
+                eprintln!("{} Watcher channel closed: {}", icon_fail().red(), e);
                 break;
             }
         }
@@ -142,5 +248,124 @@ pub fn watch_scss(input_dir: &str, output_dir: &str, minify: bool) {
                 break;
             }
         }
+    }
+}
+
+// ── Tests ───────────────────────────────────────────────────────
+//
+// Regression guards for the file-watcher spurious-reload loop
+// reported in tina4stack/tina4-book#129 on Fedora Linux under
+// Podman/distrobox (overlayfs fallback to polling). Keep these
+// thin — they assert behaviour, not implementation.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::event::{AccessKind, CreateKind, DataChange, MetadataKind, RemoveKind};
+    use std::path::PathBuf;
+
+    fn ev(kind: EventKind, path: &str) -> Event {
+        Event {
+            kind,
+            paths: vec![PathBuf::from(path)],
+            attrs: Default::default(),
+        }
+    }
+
+    #[test]
+    fn modify_data_event_on_source_file_is_meaningful() {
+        let e = ev(
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            "/project/src/routes/home.py",
+        );
+        assert!(is_meaningful_event(&e));
+    }
+
+    #[test]
+    fn create_event_is_meaningful() {
+        let e = ev(EventKind::Create(CreateKind::File), "/project/src/routes/new.py");
+        assert!(is_meaningful_event(&e));
+    }
+
+    #[test]
+    fn remove_event_is_meaningful() {
+        let e = ev(
+            EventKind::Remove(RemoveKind::File),
+            "/project/src/routes/old.py",
+        );
+        assert!(is_meaningful_event(&e));
+    }
+
+    #[test]
+    fn access_event_is_ignored() {
+        // Overlayfs polling mode can emit spurious Access events on stat()
+        let e = ev(
+            EventKind::Access(AccessKind::Any),
+            "/project/src/routes/home.py",
+        );
+        assert!(!is_meaningful_event(&e));
+    }
+
+    #[test]
+    fn metadata_only_event_is_ignored() {
+        let e = ev(
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
+            "/project/src/routes/home.py",
+        );
+        assert!(!is_meaningful_event(&e));
+    }
+
+    #[test]
+    fn log_file_is_ignored() {
+        let e = ev(
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            "/project/logs/tina4.log",
+        );
+        assert!(!is_meaningful_event(&e));
+    }
+
+    #[test]
+    fn sqlite_wal_file_is_ignored() {
+        let e = ev(
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            "/project/data/app.db-wal",
+        );
+        assert!(!is_meaningful_event(&e));
+    }
+
+    #[test]
+    fn pycache_event_is_ignored() {
+        let e = ev(
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            "/project/src/routes/__pycache__/home.cpython-313.pyc",
+        );
+        assert!(!is_meaningful_event(&e));
+    }
+
+    #[test]
+    fn git_internal_event_is_ignored() {
+        let e = ev(
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            "/project/.git/HEAD",
+        );
+        assert!(!is_meaningful_event(&e));
+    }
+
+    #[test]
+    fn node_modules_event_is_ignored() {
+        let e = ev(
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            "/project/node_modules/.package-lock.json",
+        );
+        assert!(!is_meaningful_event(&e));
+    }
+
+    #[test]
+    fn swap_file_is_ignored() {
+        let e = ev(
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            "/project/src/routes/.home.py.swp",
+        );
+        assert!(!is_meaningful_event(&e));
     }
 }

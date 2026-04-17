@@ -29,6 +29,7 @@ const IGNORED_SUBSTRINGS: &[&str] = &[
 const IGNORED_EXTENSIONS: &[&str] = &[
     "log", "db", "db-wal", "db-shm", "sqlite", "sqlite-journal",
     "tmp", "swp", "swo", "pyc", "pyo",
+    "scss", // SCSS watcher owns these — the compiled .css triggers the reload
 ];
 
 /// Filter out events that are not real source-file changes.
@@ -227,24 +228,85 @@ pub fn watch_scss(input_dir: &str, output_dir: &str, minify: bool) {
     }
 
     let mut last_compile = Instant::now();
+    let mut mtimes: HashMap<PathBuf, SystemTime> = HashMap::new();
 
     loop {
         match rx.recv() {
-            Ok(_event) => {
+            Ok(Ok(event)) => {
+                // Filter 1: event kind (skip Access, Metadata).
+                // We check kind directly instead of is_meaningful_event()
+                // because IGNORED_EXTENSIONS blocks .scss from the reload
+                // watcher — here in the SCSS watcher we WANT .scss files.
+                let kind_ok = matches!(
+                    event.kind,
+                    EventKind::Create(_)
+                        | EventKind::Remove(_)
+                        | EventKind::Modify(ModifyKind::Data(_))
+                        | EventKind::Modify(ModifyKind::Name(_))
+                        | EventKind::Modify(ModifyKind::Any)
+                        | EventKind::Any
+                );
+                if !kind_ok {
+                    continue;
+                }
+
+                // Filter 2: only .scss files
+                let has_scss = event.paths.iter().any(|p| {
+                    p.extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| e.eq_ignore_ascii_case("scss"))
+                        .unwrap_or(false)
+                });
+                if !has_scss {
+                    continue;
+                }
+
+                // Filter 3: real mtime check (defeats overlayfs polling noise)
+                let mut any_changed = false;
+                for p in &event.paths {
+                    if let Some(mt) = file_mtime(p) {
+                        match mtimes.get(p) {
+                            Some(prev) if *prev == mt => continue,
+                            _ => {
+                                mtimes.insert(p.clone(), mt);
+                                any_changed = true;
+                            }
+                        }
+                    } else {
+                        any_changed = true; // Remove event
+                    }
+                }
+                if !any_changed {
+                    continue;
+                }
+
                 // Debounce: skip if less than 500ms since last compile
                 if last_compile.elapsed() < Duration::from_millis(500) {
                     continue;
                 }
                 last_compile = Instant::now();
 
+                let file = event
+                    .paths
+                    .first()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+
                 println!(
-                    "\n{} SCSS changed — recompiling...",
-                    "♻".cyan()
+                    "\n{} SCSS changed ({}) — recompiling...",
+                    "♻".cyan(),
+                    Path::new(&file)
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
                 );
                 crate::scss::compile_dir(input_dir, output_dir, minify);
             }
+            Ok(Err(e)) => {
+                eprintln!("{} SCSS watcher event error: {}", icon_fail().red(), e);
+            }
             Err(e) => {
-                eprintln!("{} Watcher error: {}", icon_fail().red(), e);
+                eprintln!("{} SCSS watcher channel closed: {}", icon_fail().red(), e);
                 break;
             }
         }
@@ -367,5 +429,99 @@ mod tests {
             "/project/src/routes/.home.py.swp",
         );
         assert!(!is_meaningful_event(&e));
+    }
+
+    // ── SCSS watcher filter tests ──
+
+    /// Helper: returns true if an event would pass the SCSS watcher's
+    /// kind + extension filter (mirrors the logic in watch_scss).
+    ///
+    /// Note: the SCSS watcher uses `is_meaningful_event` for kind/path
+    /// filtering but then does its OWN `.scss` extension check — it does
+    /// not rely on IGNORED_EXTENSIONS (which intentionally blocks `.scss`
+    /// from the *reload* watcher to prevent double-fire).
+    fn would_trigger_scss_compile(event: &Event) -> bool {
+        // Kind filter: same as is_meaningful_event but without the
+        // extension check (SCSS watcher checks extension separately)
+        let kind_ok = matches!(
+            event.kind,
+            EventKind::Create(_)
+                | EventKind::Remove(_)
+                | EventKind::Modify(ModifyKind::Data(_))
+                | EventKind::Modify(ModifyKind::Name(_))
+                | EventKind::Modify(ModifyKind::Any)
+                | EventKind::Any
+        );
+        if !kind_ok {
+            return false;
+        }
+        // Path substring filter (same as is_meaningful_event)
+        for path in &event.paths {
+            let s = path.to_string_lossy();
+            if IGNORED_SUBSTRINGS.iter().any(|sub| s.contains(sub)) {
+                return false;
+            }
+        }
+        // SCSS watcher's own extension filter: only .scss
+        event.paths.iter().any(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("scss"))
+                .unwrap_or(false)
+        })
+    }
+
+    #[test]
+    fn scss_file_modify_triggers_compile() {
+        let e = ev(
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            "/project/src/scss/main.scss",
+        );
+        assert!(would_trigger_scss_compile(&e));
+    }
+
+    #[test]
+    fn scss_file_create_triggers_compile() {
+        let e = ev(
+            EventKind::Create(CreateKind::File),
+            "/project/src/scss/_variables.scss",
+        );
+        assert!(would_trigger_scss_compile(&e));
+    }
+
+    #[test]
+    fn non_scss_file_in_scss_dir_does_not_trigger() {
+        let e = ev(
+            EventKind::Create(CreateKind::File),
+            "/project/src/scss/README.md",
+        );
+        assert!(!would_trigger_scss_compile(&e));
+    }
+
+    #[test]
+    fn css_file_in_scss_dir_does_not_trigger() {
+        let e = ev(
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            "/project/src/scss/output.css",
+        );
+        assert!(!would_trigger_scss_compile(&e));
+    }
+
+    #[test]
+    fn access_event_on_scss_does_not_trigger() {
+        let e = ev(
+            EventKind::Access(AccessKind::Any),
+            "/project/src/scss/main.scss",
+        );
+        assert!(!would_trigger_scss_compile(&e));
+    }
+
+    #[test]
+    fn py_file_in_src_does_not_trigger_scss() {
+        let e = ev(
+            EventKind::Create(CreateKind::File),
+            "/project/src/routes/api.py",
+        );
+        assert!(!would_trigger_scss_compile(&e));
     }
 }

@@ -370,19 +370,47 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
         scss::compile_dir(scss_dir, css_dir, false);
     }
 
-    // Start the AI agent server in background (for Code With Me)
-    // Agent port = framework port + 2000
-    let agent_port = port + 2000;
-    std::thread::spawn(move || {
-        match std::panic::catch_unwind(|| {
-            agent::run(agent_port);
-        }) {
-            Ok(_) => {}
-            Err(e) => {
-                eprintln!("  {} Agent server crashed: {:?}", console::icon_warn(), e);
+    // Start the AI agent server in background (for Code With Me).
+    // Agent port = framework port + 2000.
+    //
+    // Gated on BOTH:
+    //   1. `--production` CLI flag is NOT set (explicit user intent)
+    //   2. TINA4_DEBUG is truthy
+    //
+    // Either gate alone would suffice in normal usage — `--production`
+    // sets TINA4_DEBUG=false a few lines up — but we check both so
+    // that a stale shell env or weird wrapper script can't leak the
+    // agent port into a production deployment. The agent exposes LLM
+    // endpoints, plan execution, and file-write tools; shipping it
+    // in prod would be a serious footgun.
+    let debug_mode = std::env::var("TINA4_DEBUG")
+        .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes" | "on"))
+        .unwrap_or(false);
+    let allow_agents = debug_mode && !force_production;
+    if allow_agents {
+        let agent_port = port + 2000;
+        std::thread::spawn(move || {
+            match std::panic::catch_unwind(|| {
+                agent::run(agent_port);
+            }) {
+                Ok(_) => {}
+                Err(e) => {
+                    eprintln!("  {} Agent server crashed: {:?}", console::icon_warn(), e);
+                }
             }
-        }
-    });
+        });
+    } else {
+        let reason = if force_production {
+            "--production flag set"
+        } else {
+            "TINA4_DEBUG=false"
+        };
+        println!(
+            "  {} Agent server disabled ({})",
+            icon_info().blue(),
+            reason
+        );
+    }
 
     // Start language server (auto-detects production server internally)
     let cli = info.cli_name();

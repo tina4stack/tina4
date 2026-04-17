@@ -686,6 +686,66 @@ pub fn save_thought(project_dir: &Path, thought: &Thought) {
     let _ = fs::write(&path, serde_json::to_string_pretty(&thoughts).unwrap_or_default());
 }
 
+/// Short Tina4 framework cheat-sheet baked into the binary as a fallback.
+/// Used when we can't find the full framework docs on disk. Keep it
+/// dense — this is what gets prepended to every coder message.
+const TINA4_FALLBACK_CONTEXT: &str = r#"# Tina4 framework cheat-sheet
+
+You are working in a Tina4 project. Conventions:
+- Routes: `from tina4_python.core.router import get, post, noauth, secured`. `@noauth` / `@secured` / `@description` go ABOVE `@get`/`@post`. Example: `@noauth()` then `@post("/api/x")` on the innermost decorator.
+- Always `response({...})`. NEVER `response.json(...)`.
+- Path params: `{id:int}`, `{price:float}`, `{rest:path}`.
+- DB: `from tina4_python.database import Database`. `Database("sqlite:///app.db", ...)`. `db.fetch(sql,[...])` returns `DatabaseResult`; iterate `.records` (list of dicts). `fetch_one` returns dict-or-None. Dict access only: `row["name"]`, never `row.name`. Transactions: `db.start_transaction/commit/rollback` — NEVER `db.execute("COMMIT")`.
+- ORM: one class per file in `src/orm/`. `IntegerField(primary_key=True, auto_increment=True)`, `StringField()`. `User.find(1)`, `User.where("age>?",[18])`, `user.save()`.
+- Migrations: REQUIRED for schema. `tina4 generate migration "create x"` then `tina4 migrate`. Never raw DDL outside migrations. SQLite uses `INTEGER PRIMARY KEY AUTOINCREMENT`; PostgreSQL `SERIAL`; MySQL `AUTO_INCREMENT`.
+- Templates (Frond/Jinja2): `{% extends "base.twig" %}`. `{% elif %}` not `{% elseif %}`. `{{ x|raw }}` for unescaped. `{{ "a " ~ b }}` for string concat (NOT `+`). Always include `{{ form_token() }}` in forms and `placeholder` on every input.
+- .env: `DATABASE_URL=sqlite:///app.db`, `TINA4_DEBUG=true`, `SECRET=...`, `TINA4_TOKEN_LIMIT=60`.
+- Built-ins — never reinvent: `Queue(topic="x").push({...})` for background work, `Api(base_url, auth_header)` for HTTP, `Auth.hash_password/check_password` for passwords, `get_token/valid_token` for JWT, `@cached(True, max_age=120)` for response caching, `background(fn, interval)` for periodic tasks.
+- Project layout: `src/routes/*.py` (auto-discovered), `src/orm/*.py` (models), `src/app/` (helpers), `src/templates/` (Twig), `src/scss/` (auto-compiled), `migrations/NNNNNN_description.sql`.
+"#;
+
+/// Try to locate the installed framework's CLAUDE.md so the coder
+/// gets version-matched context. Falls back to the embedded
+/// cheat-sheet above when we can't find anything. Always returns a
+/// ready-to-prepend string (with trailing blank line) or empty when
+/// we genuinely can't help.
+pub fn load_framework_context(project_dir: &Path) -> String {
+    // Candidate locations, in preference order. First hit wins.
+    // The venv path depends on Python minor version — glob it.
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+
+    // Python projects: look in the active venv's site-packages
+    for venv in &[".venv", "venv"] {
+        let lib = project_dir.join(venv).join("lib");
+        if let Ok(entries) = fs::read_dir(&lib) {
+            for e in entries.flatten() {
+                let site = e.path().join("site-packages/tina4_python");
+                candidates.push(site.join("CLAUDE.md"));
+            }
+        }
+    }
+    // PHP: vendor path
+    candidates.push(project_dir.join("vendor/tina4stack/tina4php/CLAUDE.md"));
+    // Ruby: bundle path — approximate
+    candidates.push(project_dir.join("vendor/bundle/ruby").join("tina4/CLAUDE.md"));
+    // Node.js
+    candidates.push(project_dir.join("node_modules/tina4-nodejs/CLAUDE.md"));
+    // Project-local override (user can drop their own)
+    candidates.push(project_dir.join(".tina4/framework-context.md"));
+
+    for p in candidates {
+        if p.is_file() {
+            if let Ok(text) = fs::read_to_string(&p) {
+                if text.len() > 100 {
+                    return format!("## Framework Reference\nSource: {}\n\n{}\n\n", p.display(), text);
+                }
+            }
+        }
+    }
+    // Fallback — embedded short reference.
+    format!("## Framework Reference (embedded fallback)\n\n{}\n\n", TINA4_FALLBACK_CONTEXT)
+}
+
 /// Scan project and build context string for the coder agent.
 pub fn build_project_context(project_dir: &Path) -> String {
     let mut ctx = String::new();
@@ -1723,24 +1783,47 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                     return;
                 }
 
-                // Parse numbered steps
-                let steps: Vec<String> = plan_content.lines()
-                    .filter(|line| {
-                        let trimmed = line.trim();
-                        trimmed.len() > 2 && trimmed.chars().next().map_or(false, |c| c.is_ascii_digit())
-                            && (trimmed.contains(". ") || trimmed.contains(") "))
-                    })
-                    .map(|line| {
-                        let trimmed = line.trim();
-                        if let Some(pos) = trimmed.find(". ") {
+                // Parse steps. We accept TWO plan formats — numbered lists
+                // AND GitHub-style markdown checkboxes ("- [ ] step",
+                // "* [x] step"). The dev-admin UI writes checkboxes
+                // because it renders checkbox progress natively; hand-
+                // written plans usually use numbered lists. Either way
+                // we end up with a {text, done} struct per step so we
+                // can skip already-completed work without needing a
+                // separate state.json.
+                #[derive(Clone)]
+                struct Step { text: String, done: bool }
+
+                let mut steps: Vec<Step> = Vec::new();
+                for line in plan_content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.len() < 3 { continue; }
+
+                    // Checkbox: `- [ ] X`, `* [ ] X`, `- [x] X` (case-insensitive x)
+                    if (trimmed.starts_with("- ") || trimmed.starts_with("* "))
+                        && trimmed.len() > 5 && trimmed.as_bytes()[2] == b'['
+                        && trimmed.as_bytes()[4] == b']'
+                    {
+                        let box_char = trimmed.as_bytes()[3];
+                        let done = box_char == b'x' || box_char == b'X';
+                        let text = trimmed[5..].trim().to_string();
+                        if !text.is_empty() { steps.push(Step { text, done }); }
+                        continue;
+                    }
+
+                    // Numbered: `1. X` or `1) X`
+                    let first = trimmed.chars().next().unwrap_or(' ');
+                    if first.is_ascii_digit() && (trimmed.contains(". ") || trimmed.contains(") ")) {
+                        let text = if let Some(pos) = trimmed.find(". ") {
                             trimmed[pos + 2..].to_string()
                         } else if let Some(pos) = trimmed.find(") ") {
                             trimmed[pos + 2..].to_string()
                         } else {
                             trimmed.to_string()
-                        }
-                    })
-                    .collect();
+                        };
+                        if !text.is_empty() { steps.push(Step { text, done: false }); }
+                    }
+                }
 
                 let total = steps.len();
 
@@ -1774,31 +1857,41 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
 
                 for (i, step) in steps.iter().enumerate() {
                     let num = i + 1;
+                    let step_text = step.text.clone();
 
-                    // Skip completed steps
-                    if state.completed.contains(&num) {
-                        summaries.push(format!("{}. {} ✓ (done earlier)", num, step));
+                    // Skip completed steps — either marked in state.json
+                    // (from an earlier run that was interrupted) OR
+                    // already ticked in the markdown itself (the AI
+                    // chat calls plan_complete_step which sets `[x]`).
+                    if step.done || state.completed.contains(&num) {
+                        summaries.push(format!("{}. {} ✓ (done earlier)", num, step_text));
+                        if !state.completed.contains(&num) { state.completed.push(num); }
                         continue;
                     }
 
                     // Progress update
-                    let step_escaped = step.replace('\\', "\\\\").replace('"', "\\\"");
+                    let step_escaped = step_text.replace('\\', "\\\\").replace('"', "\\\"");
                     sse_ev(&mut stream, "message", &format!(
                         "{{\"content\":\"**Step {} of {}:** {}\",\"agent\":\"supervisor\"}}",
                         num, total, step_escaped
                     )).await;
-                    sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({"text": format!("Step {}/{}: {}", num, total, step), "agent": "coder"}))).await;
+                    sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({"text": format!("Step {}/{}: {}", num, total, step_text), "agent": "coder"}))).await;
 
                     // Build real project context by scanning files
                     let project_ctx = build_project_context(&project_dir);
+                    let framework_ctx = load_framework_context(&project_dir);
 
-                    // Call coder with full project context
+                    // Call coder with full project + framework context.
+                    // The framework cheat-sheet teaches it tina4 idioms
+                    // (response() not response.json(), DatabaseResult.records,
+                    // @noauth import path, etc.) so first-turn code is correct
+                    // for the specific tina4 flavour in use.
                     let coder_msg = format!(
-                        "## Project Context\n{}\n\n\
+                        "{}## Project Context\n{}\n\n\
                         ## Task\nImplement step {} of {}:\n**{}**\n\n\
                         ## Full Plan\n{}\n\n\
                         Return each file as:\n## FILE: path/to/file\n```\ncontent\n```",
-                        project_ctx, num, total, step, plan_content
+                        framework_ctx, project_ctx, num, total, step_text, plan_content
                     );
                     let coder_msgs = vec![LlmMessage { role: "user".into(), content: coder_msg }];
 
@@ -1831,11 +1924,11 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                             state.completed.push(num);
                             let _ = fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap_or_default());
 
-                            summaries.push(format!("{}. {} ✓", num, step));
+                            summaries.push(format!("{}. {} ✓", num, step_text));
                             sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({"text": format!("Step {} done — {} files", num, step_files.len()), "agent": "coder"}))).await;
                         }
                         Err(e) => {
-                            summaries.push(format!("{}. {} ✗", num, step));
+                            summaries.push(format!("{}. {} ✗", num, step_text));
                             failed = true;
 
                             // Save state so we can resume from here

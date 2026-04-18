@@ -932,6 +932,67 @@ pub fn scan_project(project_dir: &Path) -> Vec<(String, String, String)> {
     issues
 }
 
+/// Re-verify an escalation's underlying claim against the filesystem
+/// right before emitting it as a thought. This catches:
+///   1. Stale escalations: the file got added after the issue was
+///      first logged and before the engine's next full scan.
+///   2. Race conditions: scan ran, user fixed it, loop still about to
+///      emit the stale escalation.
+///   3. Future hallucination-resistant claim types as they're added.
+///
+/// Returning `false` means "claim no longer applies, skip this thought."
+/// Unknown ids return `true` so we don't accidentally silence new
+/// escalation categories that haven't been wired through here yet.
+fn verify_escalation_claim(project_dir: &Path, id: &str) -> bool {
+    match id {
+        // "Project has .env but no .env.example" — true iff .env exists
+        // *and* .env.example doesn't. If either of those isn't the
+        // case, drop the thought.
+        "no_env_example" => {
+            project_dir.join(".env").exists() && !project_dir.join(".env.example").exists()
+        }
+        // "Routes but no tests" — true iff at least one route file
+        // exists *and* tests directory has no test files. Re-scan
+        // rather than trust the cached escalation message.
+        "no_tests" | "low_coverage" => {
+            let routes = project_dir.join("src").join("routes");
+            if !routes.exists() { return false; }
+            let route_count = fs::read_dir(&routes)
+                .map(|it| it.filter_map(|e| e.ok())
+                    .filter(|e| e.path().extension().map_or(false, |ext|
+                        ext == "py" || ext == "php" || ext == "rb" || ext == "ts"))
+                    .count())
+                .unwrap_or(0);
+            if route_count == 0 { return false; }
+            let tests = [project_dir.join("tests"), project_dir.join("spec")];
+            let test_count: usize = tests.iter()
+                .filter_map(|d| fs::read_dir(d).ok())
+                .flat_map(|it| it.filter_map(|e| e.ok()))
+                .filter(|e| {
+                    let n = e.file_name().to_string_lossy().to_string();
+                    n.starts_with("test_") || n.ends_with("_test.py")
+                        || n.ends_with("_spec.rb") || n.ends_with(".test.ts")
+                })
+                .count();
+            if id == "no_tests" { test_count == 0 } else { route_count > test_count + 2 }
+        }
+        // "Lots of uncommitted changes" — re-run git status.
+        "uncommitted_files" => {
+            match std::process::Command::new("git")
+                .args(["status", "--porcelain"])
+                .current_dir(project_dir)
+                .output()
+            {
+                Ok(out) => String::from_utf8_lossy(&out.stdout).lines().count() > 3,
+                Err(_) => false,
+            }
+        }
+        // Unknown id — let it through. New escalation types added to
+        // scan_project should extend this match so they're verified.
+        _ => true,
+    }
+}
+
 /// Background thinking loop — runs as a tokio task.
 pub async fn background_thinking_loop(
     project_dir: PathBuf,
@@ -953,6 +1014,21 @@ pub async fn background_thinking_loop(
         let mut escalations = load_escalations(&project_dir);
         let now = chrono_now();
 
+        // Auto-resolve escalations whose issue no longer appears in the
+        // current scan. Without this, the engine keeps pushing a thought
+        // for "missing .env.example" long after the user added the file.
+        // Mark acted_on rather than removing — preserves the history so
+        // we can audit what the engine flagged + when it got fixed.
+        let live_ids: std::collections::HashSet<String> = issues.iter().map(|(_, id, _)| id.clone()).collect();
+        for esc in escalations.iter_mut() {
+            if !esc.dismissed && !esc.acted_on && !live_ids.contains(&esc.id) {
+                esc.acted_on = true;
+                // Note the resolution time via last_prompted so an audit
+                // of escalations.json shows when the issue disappeared.
+                esc.last_prompted = now.clone();
+            }
+        }
+
         // Track new issues
         for (category, id, description) in &issues {
             let existing = escalations.iter_mut().find(|e| e.id == *id);
@@ -973,9 +1049,13 @@ pub async fn background_thinking_loop(
         }
         save_escalations(&project_dir, &escalations);
 
-        // Pick the most important un-dismissed issue
+        // Pick the most important un-dismissed issue, *and* re-verify
+        // its claim against the filesystem right before emitting. Belt
+        // and braces — even if auto-resolution above misses an edge
+        // case, the claim has to still be true at emit time.
         let active: Vec<&Escalation> = escalations.iter()
             .filter(|e| !e.dismissed && !e.acted_on && e.level >= 1)
+            .filter(|e| verify_escalation_claim(&project_dir, &e.id))
             .collect();
 
         if let Some(top) = active.first() {
@@ -1364,19 +1444,26 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                     Some(SupervisorAction { action: ref a, .. }) if a == "code" => {
                         let ctx = action.as_ref().and_then(|a| a.context.clone()).unwrap_or_default();
                         let files = action.as_ref().and_then(|a| a.files.clone()).unwrap_or_default();
-                        sse_event(&mut stream, "status", &sse_json(&serde_json::json!({"text": "→ Coder: writing code...", "agent": "coder"}))).await;
+                        sse_event(&mut stream, "status", &sse_json(&serde_json::json!({"text": "→ Grounding against tina4-rag…", "agent": "coder"}))).await;
 
                         let coder = agents.iter().find(|a| a.name == "coder");
                         let coder_prompt = coder.map(|c| c.system_prompt.as_str()).unwrap_or("");
                         let coder_model = resolve_model("coder", &agents, &settings);
 
-                        let coder_msg = format!(
+                        let base_msg = format!(
                             "Write the following code:\n\n{}\n\nFiles to create/modify: {:?}\n\nReturn each file as:\n## FILE: path/to/file\n```\ncontent\n```",
                             ctx, files
                         );
+                        // Prepend RAG-retrieved framework patterns + a
+                        // machine-checkable grounding requirement so the
+                        // coder cites or explicitly diverges from the
+                        // examples. One retry if the first attempt skips
+                        // the citation.
+                        let (coder_msg, hits) = ground_coder_msg(&base_msg, &ctx, &files).await;
+                        sse_event(&mut stream, "status", &sse_json(&serde_json::json!({"text": "→ Coder: writing code…", "agent": "coder"}))).await;
                         let coder_msgs = vec![LlmMessage { role: "user".into(), content: coder_msg }];
 
-                        match llm_call(coder_model, coder_prompt, &coder_msgs, 4096, 0.1).await {
+                        match llm_call_with_grounding_retry(coder_model, coder_prompt, coder_msgs, 4096, 0.1, &hits).await {
                             Ok(code_output) => {
                                 // Parse file outputs and write them
                                 let mut files_written = Vec::new();
@@ -1498,17 +1585,23 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                                     step_num, total_steps, step.replace('\\', "\\\\").replace('"', "\\\"")
                                 )).await;
 
-                                // Send step to coder
-                                let coder_msg = format!(
+                                // Send step to coder — RAG-grounded so the
+                                // model writes off actual Tina4 examples.
+                                // Files list inferred from the step text
+                                // is sparse here, but the step + language
+                                // tag in the query is still enough to
+                                // retrieve useful convention chunks.
+                                let base_msg = format!(
                                     "Implement this single step from the project plan:\n\n**Step {}:** {}\n\n\
                                     Full plan context:\n{}\n\n\
                                     Project directory: {}\n\n\
                                     Return each file as:\n## FILE: path/to/file\n```\ncontent\n```",
                                     step_num, step, plan_content, project_dir.display()
                                 );
+                                let (coder_msg, hits) = ground_coder_msg(&base_msg, step, &[]).await;
                                 let coder_msgs = vec![LlmMessage { role: "user".into(), content: coder_msg }];
 
-                                match llm_call(coder_model, coder_prompt, &coder_msgs, 4096, 0.1).await {
+                                match llm_call_with_grounding_retry(coder_model, coder_prompt, coder_msgs, 4096, 0.1, &hits).await {
                                     Ok(code_output) => {
                                         // Parse and write files
                                         let mut step_files = Vec::new();
@@ -1886,16 +1979,22 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                     // (response() not response.json(), DatabaseResult.records,
                     // @noauth import path, etc.) so first-turn code is correct
                     // for the specific tina4 flavour in use.
-                    let coder_msg = format!(
+                    //
+                    // RAG grounding is layered on top of the static
+                    // cheat-sheet: the cheat-sheet covers the universal
+                    // idioms, RAG pulls chunks specific to *this* step's
+                    // intent. Together they beat either on its own.
+                    let base_msg = format!(
                         "{}## Project Context\n{}\n\n\
                         ## Task\nImplement step {} of {}:\n**{}**\n\n\
                         ## Full Plan\n{}\n\n\
                         Return each file as:\n## FILE: path/to/file\n```\ncontent\n```",
                         framework_ctx, project_ctx, num, total, step_text, plan_content
                     );
+                    let (coder_msg, hits) = ground_coder_msg(&base_msg, &step_text, &[]).await;
                     let coder_msgs = vec![LlmMessage { role: "user".into(), content: coder_msg }];
 
-                    match llm_call(coder_model, coder_prompt, &coder_msgs, 4096, 0.1).await {
+                    match llm_call_with_grounding_retry(coder_model, coder_prompt, coder_msgs, 4096, 0.1, &hits).await {
                         Ok(code_output) => {
                             let mut step_files = Vec::new();
                             for section in code_output.split("## FILE:") {
@@ -1968,6 +2067,218 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                 }
                 sse_ev(&mut stream, "done", "{}").await;
 
+            } else if first_line.starts_with("GET /supervise/sessions") {
+                // List active supervisor sessions. Used by dev-admin to
+                // rehydrate state after a reload — each returned session
+                // has a branch + worktree that can be diffed/committed.
+                let sessions = crate::session::list_sessions(&project_dir);
+                let body = serde_json::to_string(&sessions).unwrap_or_else(|_| "[]".into());
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            } else if first_line.starts_with("POST /supervise/create") {
+                // Create a new session: git worktree + branch off HEAD.
+                // Body: {"title": "...", "plan": "..."} — both optional.
+                let body_start = request.find("\r\n\r\n").unwrap_or(n) + 4;
+                let body_str = &request[body_start..];
+                #[derive(Deserialize, Default)]
+                struct CreateReq {
+                    #[serde(default)]
+                    title: String,
+                    #[serde(default)]
+                    plan: String,
+                }
+                let req: CreateReq = serde_json::from_str(body_str).unwrap_or_default();
+                match crate::session::create_session(&project_dir, &req.title, &req.plan) {
+                    Ok(meta) => {
+                        let body = serde_json::to_string(&meta).unwrap_or_default();
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                            body.len(), body
+                        );
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                    }
+                    Err(e) => {
+                        let body = format!(r#"{{"error":{}}}"#, serde_json::to_string(&e).unwrap_or_default());
+                        let resp = format!(
+                            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                            body.len(), body
+                        );
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                    }
+                }
+            } else if first_line.starts_with("GET /supervise/diff") {
+                // Dev-admin renders the Diff tab from this payload. The
+                // session id comes in the query string (?id=abc) so the
+                // browser can just fetch it without a POST body.
+                //
+                // After computing the raw git diff, we decorate it with
+                // RAG-backed convention warnings (slice 3). The session
+                // worktree is the right place to look at file content
+                // from — that's the branch version the user is about to
+                // apply. Async path is kept off the hot sync diff so a
+                // slow RAG doesn't block the git work.
+                let id = extract_query_param(first_line, "id").unwrap_or_default();
+                if id.is_empty() {
+                    let body = r#"{"error":"missing id"}"#;
+                    let resp = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                } else {
+                    match crate::session::diff_session(&project_dir, &id) {
+                        Ok(mut diff) => {
+                            // Find the session worktree so we can read
+                            // the branch-version of each changed file
+                            // (which may differ from main-tree contents).
+                            let worktree = crate::session::list_sessions(&project_dir)
+                                .into_iter()
+                                .find(|s| s.id == diff.id)
+                                .map(|s| s.worktree);
+                            if let Some(worktree) = worktree {
+                                let files: Vec<(String, String)> = diff.files.iter()
+                                    .filter(|f| f.status != "D") // can't verify a deleted file
+                                    .map(|f| (f.path.clone(), detect_language_from_path(&f.path)))
+                                    .collect();
+                                if !files.is_empty() {
+                                    let warnings = crate::rag::verify_files(&worktree, &files).await;
+                                    diff.warnings = warnings;
+                                }
+                            }
+                            let body = serde_json::to_string(&diff).unwrap_or_default();
+                            let resp = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                                body.len(), body
+                            );
+                            let _ = stream.write_all(resp.as_bytes()).await;
+                        }
+                        Err(e) => {
+                            let body = format!(r#"{{"error":{}}}"#, serde_json::to_string(&e).unwrap_or_default());
+                            let resp = format!(
+                                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                                body.len(), body
+                            );
+                            let _ = stream.write_all(resp.as_bytes()).await;
+                        }
+                    }
+                }
+            } else if first_line.starts_with("POST /supervise/rag/search") {
+                // Expose raw RAG search so agents (and humans poking the
+                // server) can retrieve framework snippets without
+                // speaking tina4-rag's wire format directly. Mostly
+                // used during the coder prompt assembly where a single
+                // query fans out into the system prompt.
+                let body_start = request.find("\r\n\r\n").unwrap_or(n) + 4;
+                let body_str = &request[body_start..];
+                #[derive(Deserialize, Default)]
+                struct SearchReq {
+                    query: String,
+                    #[serde(default = "default_top_k")]
+                    top_k: usize,
+                }
+                fn default_top_k() -> usize { 5 }
+                let req: SearchReq = serde_json::from_str(body_str).unwrap_or_default();
+                if req.query.is_empty() {
+                    let body = r#"{"error":"missing query"}"#;
+                    let resp = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                } else {
+                    let hits = crate::rag::search(&req.query, req.top_k).await;
+                    let body = serde_json::to_string(&serde_json::json!({
+                        "query": req.query,
+                        "hits": hits,
+                    })).unwrap_or_default();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                        body.len(), body
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                }
+            } else if first_line.starts_with("POST /supervise/commit") {
+                // Apply the session's diff to the user's working tree.
+                // Body: {"id": "...", "accept": ["path1", ...]} — empty
+                // accept means "apply all."
+                let body_start = request.find("\r\n\r\n").unwrap_or(n) + 4;
+                let body_str = &request[body_start..];
+                #[derive(Deserialize, Default)]
+                struct CommitReq {
+                    id: String,
+                    #[serde(default)]
+                    accept: Vec<String>,
+                }
+                let req: CommitReq = match serde_json::from_str(body_str) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let body = format!(r#"{{"error":"invalid body: {}"}}"#, e);
+                        let resp = format!(
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                            body.len(), body
+                        );
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                        return;
+                    }
+                };
+                match crate::session::commit_session(&project_dir, &req.id, &req.accept) {
+                    Ok(result) => {
+                        let body = serde_json::to_string(&result).unwrap_or_default();
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                            body.len(), body
+                        );
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                    }
+                    Err(e) => {
+                        let body = format!(r#"{{"error":{}}}"#, serde_json::to_string(&e).unwrap_or_default());
+                        let resp = format!(
+                            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                            body.len(), body
+                        );
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                    }
+                }
+            } else if first_line.starts_with("POST /supervise/cancel") {
+                // Drop the session's worktree + branch. Idempotent.
+                // Body: {"id": "..."}
+                let body_start = request.find("\r\n\r\n").unwrap_or(n) + 4;
+                let body_str = &request[body_start..];
+                #[derive(Deserialize)]
+                struct CancelReq { id: String }
+                let req: CancelReq = match serde_json::from_str(body_str) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let body = format!(r#"{{"error":"invalid body: {}"}}"#, e);
+                        let resp = format!(
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                            body.len(), body
+                        );
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                        return;
+                    }
+                };
+                match crate::session::cancel_session(&project_dir, &req.id) {
+                    Ok(()) => {
+                        let body = r#"{"ok":true}"#;
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                            body.len(), body
+                        );
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                    }
+                    Err(e) => {
+                        let body = format!(r#"{{"error":{}}}"#, serde_json::to_string(&e).unwrap_or_default());
+                        let resp = format!(
+                            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                            body.len(), body
+                        );
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                    }
+                }
             } else if first_line.starts_with("OPTIONS") {
                 // CORS preflight
                 let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nAccess-Control-Max-Age: 86400\r\n\r\n";
@@ -1980,6 +2291,213 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
     }
 }
 
+/// Decorate a coder user-message with retrieved framework patterns
+/// AND mandate a machine-checkable citation comment on each emitted
+/// file. `verify_coder_grounding` parses the response for these
+/// citations; writes without them get bounced back as a retry.
+///
+/// Degrades gracefully: if RAG is unreachable or returns no hits, the
+/// base message goes through unchanged and the verifier is a no-op.
+/// A down RAG should never block writes — that'd be worse than
+/// un-grounded writes.
+///
+/// Returns (enriched_message, hits). Caller passes hits into
+/// `verify_coder_grounding` so verification only runs when we actually
+/// had RAG context to cite.
+async fn ground_coder_msg(base_msg: &str, task: &str, files: &[String])
+    -> (String, Vec<crate::rag::RagHit>)
+{
+    let query = build_rag_query(task, files);
+    if query.is_empty() {
+        return (base_msg.to_string(), Vec::new());
+    }
+    let hits = crate::rag::search(&query, 4).await;
+    let context = crate::rag::format_hits_for_prompt(&hits, 500);
+    if context.is_empty() {
+        return (base_msg.to_string(), hits);
+    }
+
+    // MANDATORY citation: every emitted file must start with a
+    // comment naming the RAG hit it was grounded in (or explicitly
+    // flagging a deliberate divergence). The verifier checks for this
+    // and bounces missing citations back for a retry.
+    //
+    // Why this matters: slice 4 retrieved RAG context, slice 3
+    // verifies files post-commit. The gap was "the coder read the
+    // chunks but ignored them." A machine-checkable citation
+    // requirement closes that gap — either the coder follows a
+    // pattern it cites, or it explicitly says which pattern it's
+    // breaking and why. Anything else fails the verifier.
+    let grounding_rule = "\n\nGROUNDING (mandatory):\n\
+        Every file you emit MUST start with exactly one comment line:\n\
+        - `# grounded-by: [N]` where N is the index of the RAG example \
+           you followed (e.g. `# grounded-by: [0]`).\n\
+        - `# diverging-from-rag: <one-line reason>` if you deliberately \
+           chose a pattern not in the retrieved examples.\n\
+        Use the language's line-comment syntax (# for python/ruby, // \
+        for js/ts/php, -- for sql, {# … #} for twig). The comment is \
+        the FIRST non-blank line of the file. Files without this comment \
+        will be rejected and you'll be asked to rewrite.";
+
+    let enriched = format!(
+        "{context}{grounding_rule}\n\n--- TASK ---\n\n{base_msg}"
+    );
+    (enriched, hits)
+}
+
+/// Verify that the coder's response cited the RAG grounding as
+/// instructed. Returns Ok(()) if every file block starts with a
+/// grounding comment, or Err(explanation) with a message suitable
+/// for feeding back as a retry prompt.
+///
+/// Called only when hits were non-empty — if RAG returned nothing,
+/// there's nothing to cite, and we accept the response as-is.
+fn verify_coder_grounding(response: &str, hits: &[crate::rag::RagHit]) -> Result<(), String> {
+    if hits.is_empty() {
+        return Ok(()); // no grounding context was injected → nothing to cite
+    }
+    let mut offending: Vec<String> = Vec::new();
+    for section in response.split("## FILE:") {
+        let section = section.trim();
+        if section.is_empty() { continue; }
+        let mut lines = section.lines();
+        let path = lines.next().unwrap_or("").trim();
+        if path.is_empty() { continue; }
+        // Find the first content line after the opening ``` fence.
+        // Skip empty lines + the ``` marker + optional language tag.
+        let mut saw_open_fence = false;
+        let mut first_line_of_code: Option<&str> = None;
+        for line in lines {
+            let trimmed = line.trim();
+            if !saw_open_fence {
+                if trimmed.starts_with("```") { saw_open_fence = true; }
+                continue;
+            }
+            if trimmed.is_empty() { continue; }
+            if trimmed.starts_with("```") { break; } // empty file block
+            first_line_of_code = Some(trimmed);
+            break;
+        }
+        let first = first_line_of_code.unwrap_or("").to_lowercase();
+        // Accept any of the comment styles, since the coder picks the
+        // right one for the language. Require "grounded-by" or
+        // "diverging-from-rag" in the first line of code.
+        let ok = first.contains("grounded-by") || first.contains("diverging-from-rag");
+        if !ok {
+            offending.push(path.to_string());
+        }
+    }
+    if offending.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "These files are missing the mandatory grounding citation on line 1: {}.\n\
+            Rewrite every file to start with `# grounded-by: [N]` (citing a retrieved example) \
+            or `# diverging-from-rag: <reason>`. Use the language's comment syntax.",
+            offending.join(", ")
+        ))
+    }
+}
+
+/// Call the coder LLM with a single retry when grounding verification
+/// fails. Sequence:
+///   1. First attempt with the original prompt.
+///   2. Run `verify_coder_grounding` on the response.
+///   3. If it fails, feed the error message back as an additional
+///      assistant/user turn and retry ONCE more.
+///   4. Return the final response regardless of whether retry passed
+///      — better a best-effort write than a hard block when the model
+///      just can't comply.
+///
+/// The retry is bounded at one attempt because two failures usually
+/// means the model is confused about the format, not genuinely
+/// un-grounded, and further retries waste tokens + latency.
+async fn llm_call_with_grounding_retry(
+    model: &ModelSettings,
+    system_prompt: &str,
+    mut messages: Vec<LlmMessage>,
+    max_tokens: u32,
+    temperature: f32,
+    hits: &[crate::rag::RagHit],
+) -> Result<String, String> {
+    let first = llm_call(model, system_prompt, &messages, max_tokens, temperature).await?;
+    match verify_coder_grounding(&first, hits) {
+        Ok(()) => Ok(first),
+        Err(reason) => {
+            eprintln!("[grounding] first attempt failed verification, retrying once: {reason}");
+            // Feed the first response back so the model sees what it
+            // emitted, then append the correction. qwen responds well
+            // to seeing its own output + a specific correction.
+            messages.push(LlmMessage { role: "assistant".into(), content: first });
+            messages.push(LlmMessage {
+                role: "user".into(),
+                content: format!(
+                    "Your response missed the mandatory grounding citation. {reason}\n\n\
+                    Rewrite the files with the required comment as the first line. Emit ONLY the corrected `## FILE:` blocks."
+                ),
+            });
+            llm_call(model, system_prompt, &messages, max_tokens, temperature).await
+        }
+    }
+}
+
+/// Build the query string we hand to tina4-rag for coder grounding.
+/// Combines (a) the detected language from the first target file with
+/// (b) the first 120 chars of the task description. That's usually
+/// enough signal for semantic retrieval to surface the right chunks.
+fn build_rag_query(task: &str, files: &[String]) -> String {
+    let lang = files
+        .iter()
+        .map(|f| detect_language_from_path(f))
+        .find(|l| l != "general")
+        .unwrap_or_default();
+    let short_task: String = task.chars().take(120).collect();
+    let combined = if lang.is_empty() {
+        short_task.trim().to_string()
+    } else {
+        format!("{lang} {}", short_task.trim())
+    };
+    combined.trim().to_string()
+}
+
+/// Map a file extension / path shape to the language name RAG
+/// verification expects ("python", "javascript", "typescript",
+/// "php", "ruby", "sql"). Falls back to "general" for anything the
+/// corpus doesn't specifically tag — still lets retrieval work off
+/// the query text alone.
+fn detect_language_from_path(path: &str) -> String {
+    let lower = path.to_lowercase();
+    if lower.ends_with(".py") { return "python".into(); }
+    if lower.ends_with(".ts") || lower.ends_with(".tsx") { return "typescript".into(); }
+    if lower.ends_with(".js") || lower.ends_with(".jsx") || lower.ends_with(".mjs") { return "javascript".into(); }
+    if lower.ends_with(".php") { return "php".into(); }
+    if lower.ends_with(".rb") { return "ruby".into(); }
+    if lower.ends_with(".sql") { return "sql".into(); }
+    if lower.ends_with(".twig") || lower.ends_with(".jinja") { return "twig".into(); }
+    if lower.ends_with(".html") || lower.ends_with(".htm") { return "html".into(); }
+    "general".into()
+}
+
+/// Pull a query-string parameter out of an HTTP request line like
+/// `GET /supervise/diff?id=abc123 HTTP/1.1`. Returns None if the
+/// parameter isn't present. Minimal URL-decoding — we only emit
+/// session ids (hex) and plain slugs, so percent-decoding is not
+/// needed here. If richer params start flowing through the query
+/// string, swap this for a proper decoder.
+fn extract_query_param(request_line: &str, key: &str) -> Option<String> {
+    // Format: METHOD /path[?q=v&...] HTTP/X.Y
+    let path = request_line.split_whitespace().nth(1)?;
+    let q = path.split_once('?')?.1;
+    for pair in q.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k == key {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn chrono_now() -> String {
     // Simple ISO 8601 timestamp without chrono dep
     let d = std::time::SystemTime::now()
@@ -1988,4 +2506,145 @@ fn chrono_now() -> String {
     let secs = d.as_secs();
     // Good enough for now — proper chrono can be added later
     format!("{}Z", secs)
+}
+
+// ── Tests ─────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rag::{RagHit, RagMetadata};
+
+    fn hit(title: &str) -> RagHit {
+        RagHit {
+            text: "from tina4_python.core.router import get\n@get('/x')\nasync def x(req, res): pass".into(),
+            metadata: RagMetadata { title: title.into(), ..Default::default() },
+            distance: 0.3,
+        }
+    }
+
+    #[test]
+    fn grounding_ok_when_no_hits_even_if_missing_citation() {
+        // If RAG was unreachable or empty, we have nothing to cite —
+        // don't block writes.
+        let response = "## FILE: src/x.py\n```\nprint('hi')\n```";
+        assert!(verify_coder_grounding(response, &[]).is_ok());
+    }
+
+    #[test]
+    fn grounding_ok_with_grounded_by_comment() {
+        let response = "\
+## FILE: src/x.py
+```
+# grounded-by: [0]
+from tina4_python.core.router import get
+```";
+        assert!(verify_coder_grounding(response, &[hit("Ch 2")]).is_ok());
+    }
+
+    #[test]
+    fn grounding_ok_with_diverging_comment() {
+        let response = "\
+## FILE: src/x.py
+```
+# diverging-from-rag: using Flask here because the project is hybrid
+from flask import Blueprint
+```";
+        assert!(verify_coder_grounding(response, &[hit("Ch 2")]).is_ok());
+    }
+
+    #[test]
+    fn grounding_rejects_missing_citation() {
+        let response = "\
+## FILE: src/x.py
+```
+from tina4_python.core.router import get
+async def x(req, res): pass
+```";
+        let r = verify_coder_grounding(response, &[hit("Ch 2")]);
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("src/x.py"));
+    }
+
+    #[test]
+    fn grounding_rejects_only_offending_files_named() {
+        // Mixed response — one cited, one not. Error message should
+        // name only the bad file so the retry prompt is focused.
+        let response = "\
+## FILE: src/good.py
+```
+# grounded-by: [1]
+x = 1
+```
+
+## FILE: src/bad.py
+```
+y = 2
+```";
+        let r = verify_coder_grounding(response, &[hit("Ch 2")]);
+        assert!(r.is_err());
+        let msg = r.unwrap_err();
+        assert!(msg.contains("src/bad.py"));
+        assert!(!msg.contains("src/good.py"));
+    }
+
+    #[test]
+    fn grounding_accepts_slash_slash_comment_for_js() {
+        let response = "\
+## FILE: src/x.ts
+```
+// grounded-by: [0]
+export function x() {}
+```";
+        assert!(verify_coder_grounding(response, &[hit("Ch 2")]).is_ok());
+    }
+
+    #[test]
+    fn grounding_accepts_dash_dash_comment_for_sql() {
+        let response = "\
+## FILE: migrations/0001.sql
+```
+-- grounded-by: [3]
+CREATE TABLE x (id INT);
+```";
+        assert!(verify_coder_grounding(response, &[hit("Ch 2")]).is_ok());
+    }
+
+    #[test]
+    fn grounding_skips_blank_lines_before_citation() {
+        // Fenced blocks sometimes open with a blank line; the verifier
+        // should treat the first non-blank line as "line 1 of code."
+        let response = "\
+## FILE: src/x.py
+```
+
+# grounded-by: [0]
+print('hi')
+```";
+        assert!(verify_coder_grounding(response, &[hit("Ch 2")]).is_ok());
+    }
+
+    // ── verify_escalation_claim ─────────────────────────────
+
+    #[test]
+    fn escalation_claim_no_env_example_drops_when_file_exists() {
+        let tmp = std::env::temp_dir().join(format!("tina4-esc-{}", std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join(".env"), "X=1").unwrap();
+        // No .env.example → claim applies
+        assert!(verify_escalation_claim(&tmp, "no_env_example"));
+        // Add .env.example → claim no longer applies
+        std::fs::write(tmp.join(".env.example"), "X=").unwrap();
+        assert!(!verify_escalation_claim(&tmp, "no_env_example"));
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn escalation_claim_unknown_id_passes_through() {
+        // Unknown escalation ids haven't been wired into the verifier
+        // yet; they should fall through rather than silently drop.
+        let tmp = std::env::temp_dir();
+        assert!(verify_escalation_claim(&tmp, "new_category_future"));
+    }
 }

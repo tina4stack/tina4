@@ -6,7 +6,9 @@ mod doctor;
 mod generate;
 mod init;
 mod install;
+mod rag;
 mod scss;
+mod session;
 mod upgrade;
 mod watcher;
 

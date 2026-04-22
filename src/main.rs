@@ -42,7 +42,7 @@ enum Commands {
 
     /// Scaffold a new Tina4 project: tina4 init <language> <path>
     Init {
-        /// Language: python, php, ruby, nodejs
+        /// Language: python, php, ruby, nodejs, js (tina4-js frontend SPA)
         lang: Option<String>,
         /// Project directory (absolute or relative path)
         path: Option<String>,

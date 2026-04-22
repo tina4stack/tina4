@@ -13,7 +13,7 @@ pub fn run(lang: Option<&str>, path: Option<&str>) {
         Some(l) => {
             // Validate it's actually a language, not a path passed as first arg
             let norm = l.to_lowercase();
-            if matches!(norm.as_str(), "python" | "py" | "php" | "ruby" | "rb" | "nodejs" | "node" | "js" | "typescript" | "ts" | "tina4js" | "tina4-js" | "frontend") {
+            if matches!(norm.as_str(), "python" | "py" | "php" | "ruby" | "rb" | "nodejs" | "node" | "typescript" | "ts" | "js" | "tina4js" | "tina4-js" | "frontend") {
                 l
             } else {
                 // First arg looks like a path, not a language — prompt for language
@@ -51,11 +51,14 @@ pub fn run(lang: Option<&str>, path: Option<&str>) {
         "python" | "py" => init_project("python", path),
         "php" => init_project("php", path),
         "ruby" | "rb" => init_project("ruby", path),
-        "nodejs" | "node" | "js" | "typescript" | "ts" => init_project("nodejs", path),
-        "tina4js" | "tina4-js" | "frontend" => init_project("tina4js", path),
+        // NB: `js` now routes to the browser-side tina4-js SPA (not nodejs).
+        //     Backend Node.js lives under `nodejs`, `node`, `typescript`, `ts`.
+        //     This matches developer intuition: `js` = frontend JavaScript.
+        "nodejs" | "node" | "typescript" | "ts" => init_project("nodejs", path),
+        "js" | "tina4js" | "tina4-js" | "frontend" => init_project("tina4js", path),
         _ => {
             eprintln!(
-                "{} Unknown language: {}. Use: python, php, ruby, nodejs, tina4js",
+                "{} Unknown language: {}. Use: python, php, ruby, nodejs, js (tina4-js frontend)",
                 icon_fail().red(),
                 lang
             );
@@ -146,9 +149,9 @@ fn prompt_language() -> String {
 fn print_usage() {
     println!("Usage: tina4 init <language> <path>");
     println!();
-    println!("Languages: python, php, ruby, nodejs, tina4js");
+    println!("Languages: python, php, ruby, nodejs, js (tina4-js frontend)");
     println!("Example:   tina4 init python ./my-app");
-    println!("           tina4 init tina4js ./my-frontend");
+    println!("           tina4 init js ./my-frontend   (tina4-js SPA)");
 }
 
 fn init_project(language: &str, path: &str) {

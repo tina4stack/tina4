@@ -130,9 +130,9 @@ pub type Result<T> = std::result::Result<T, SessionError>;
 /// `.tina4/sessions/<id>/tree/`, persist metadata, return the info
 /// the caller needs to hand back to dev-admin.
 ///
-/// Fails fast if the project isn't a git repo (99% of the time it is;
-/// the handful of cases that aren't should `git init` first). We could
-/// auto-init but that masks user confusion — better to say so clearly.
+/// If the project isn't a git repo yet, `ensure_git_repo` will try to
+/// `git init` + make an empty initial commit so `git worktree add` has
+/// a HEAD to branch from. Only fails if git itself isn't on PATH.
 pub fn create_session(project_dir: &Path, title: &str, plan: &str) -> Result<SessionMeta> {
     ensure_git_repo(project_dir)?;
 
@@ -579,14 +579,38 @@ fn parse_trailer(body: &str) -> std::collections::BTreeMap<String, String> {
 // ─── Helpers ──────────────────────────────────────────────────────
 
 fn ensure_git_repo(project_dir: &Path) -> Result<()> {
-    match git_run(project_dir, &["rev-parse", "--git-dir"]) {
-        Ok(()) => Ok(()),
-        Err(_) => Err(format!(
-            "{} is not a git repository. Run `git init` first — the \
-             supervisor needs git to stage changes safely.",
-            project_dir.display()
-        )),
+    // Fast path: the project is already a git repo.
+    if git_run(project_dir, &["rev-parse", "--git-dir"]).is_ok() {
+        return Ok(());
     }
+
+    // No git dir. Two failure modes:
+    //   1. git binary missing on PATH   → unfixable here; report clearly.
+    //   2. git binary present, no repo  → auto-init. The supervisor needs
+    //      a repo so it can `git worktree add` a throwaway branch; asking
+    //      the user to run `git init` manually is friction for something
+    //      the CLI can do in one shell-out. We also drop a permissive
+    //      initial commit so `worktree add HEAD` has a HEAD to branch
+    //      from (a brand-new repo has no commits and the next step would
+    //      fail with "fatal: invalid reference: HEAD").
+    if which::which("git").is_err() {
+        return Err(format!(
+            "{} is not a git repository and `git` was not found on PATH. \
+             Install git (https://git-scm.com/downloads) and retry.",
+            project_dir.display()
+        ));
+    }
+
+    git_run(project_dir, &["init"])
+        .map_err(|e| format!("git init failed in {}: {e}", project_dir.display()))?;
+
+    // A freshly-initialised repo has no HEAD. `git worktree add ... HEAD`
+    // in create_session() needs one, so we make an empty initial commit.
+    // --allow-empty keeps us from having to stage a placeholder file.
+    git_run(project_dir, &["commit", "--allow-empty", "-m", "tina4: initial commit"])
+        .map_err(|e| format!("git commit (initial) failed in {}: {e}", project_dir.display()))?;
+
+    Ok(())
 }
 
 fn load_session(project_dir: &Path, id: &str) -> Result<SessionMeta> {
@@ -766,6 +790,56 @@ mod tests {
         let id = new_session_id();
         assert_eq!(id.len(), 12);
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// A directory that is not yet a git repo should get one auto-created
+    /// by `ensure_git_repo`, complete with an initial commit so the next
+    /// step (`git worktree add HEAD`) has a HEAD to branch from. This
+    /// lets users start a supervisor session in a fresh project without
+    /// having to run `git init` themselves.
+    #[test]
+    fn ensure_git_repo_auto_inits_empty_dir() {
+        let dir = std::env::temp_dir().join(format!(
+            "tina4-autoinit-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // Configure git locally so the auto-commit doesn't error on CI
+        // machines with no global git identity.
+        let _ = Command::new("git")
+            .arg("-C").arg(&dir)
+            .args(["init", "-q"])
+            .output();
+        let _ = Command::new("git")
+            .arg("-C").arg(&dir)
+            .args(["config", "user.email", "t@t"])
+            .output();
+        let _ = Command::new("git")
+            .arg("-C").arg(&dir)
+            .args(["config", "user.name", "t"])
+            .output();
+        // Wipe .git to simulate a non-repo project directory, but keep
+        // the global-config shim via env var so auto-init's commit call
+        // doesn't explode on a clean CI box.
+        let _ = fs::remove_dir_all(dir.join(".git"));
+        std::env::set_var("GIT_AUTHOR_NAME", "t");
+        std::env::set_var("GIT_AUTHOR_EMAIL", "t@t");
+        std::env::set_var("GIT_COMMITTER_NAME", "t");
+        std::env::set_var("GIT_COMMITTER_EMAIL", "t@t");
+
+        assert!(!dir.join(".git").exists(), "precondition: no .git yet");
+        ensure_git_repo(&dir).expect("auto-init should succeed when git is on PATH");
+        assert!(dir.join(".git").exists(), ".git should exist after auto-init");
+
+        // A second call is a no-op — the fast path should hit `rev-parse`
+        // and return Ok without trying to re-init or re-commit.
+        ensure_git_repo(&dir).expect("second call should be a no-op");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

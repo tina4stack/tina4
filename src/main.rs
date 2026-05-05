@@ -1,6 +1,7 @@
 pub mod console;
 mod agent;
 mod env_config;
+mod env_migrate;
 mod detect;
 mod doctor;
 mod generate;
@@ -155,6 +156,14 @@ enum Commands {
         /// List all env vars the project uses
         #[arg(long)]
         list: bool,
+        /// Migrate legacy un-prefixed env vars (DATABASE_URL, SECRET,
+        /// SMTP_*, IMAP_*, HOST_NAME, SWAGGER_*, ORM_*) to their
+        /// TINA4_* canonical names. Writes a .env.bak backup first.
+        #[arg(long)]
+        migrate: bool,
+        /// Skip confirmation prompts (use with --migrate in CI scripts).
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -226,7 +235,13 @@ fn main() {
         Commands::Console => delegate_command(vec!["console".into()]),
         Commands::Books => handle_books(),
         Commands::Docs => handle_docs(),
-        Commands::Env { sync, example, list } => env_config::run(sync, example, list),
+        Commands::Env { sync, example, list, migrate, yes } => {
+            if migrate {
+                env_migrate::run(yes);
+            } else {
+                env_config::run(sync, example, list);
+            }
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 pub mod console;
 mod agent;
+mod deploy;
 mod env_config;
 mod env_migrate;
 mod detect;
@@ -71,6 +72,11 @@ enum Commands {
         /// Do not open the browser on startup
         #[arg(long)]
         no_browser: bool,
+
+        /// Disable hot-reload signal from the file watcher (sets
+        /// TINA4_NO_RELOAD=true). Useful in stable demos and CI.
+        #[arg(long)]
+        no_reload: bool,
     },
 
     /// Compile SCSS files from src/scss/ to src/public/css/
@@ -94,6 +100,12 @@ enum Commands {
         /// Create a new migration file with this description
         #[arg(long)]
         create: Option<String>,
+        /// Roll back the most recent migration batch
+        #[arg(long, conflicts_with = "create")]
+        rollback: bool,
+        /// Show pending vs applied migrations without running anything
+        #[arg(long, conflicts_with_all = ["create", "rollback"])]
+        status: bool,
     },
 
     /// Run tests (delegates to language CLI)
@@ -145,6 +157,37 @@ enum Commands {
         port: Option<u16>,
     },
 
+    /// Build production assets (SCSS minify + bundle for the front-end)
+    Build {
+        /// Disable minification (default: minify in production builds)
+        #[arg(long)]
+        no_minify: bool,
+    },
+
+    /// Run database seeders to populate development/demo data
+    Seed {
+        /// Optional seeder name (default: run every seed file in seeds/)
+        #[arg()]
+        name: Option<String>,
+    },
+
+    /// Queue management — `tina4 queue work` runs a long-lived consumer
+    Queue {
+        #[command(subcommand)]
+        action: QueueAction,
+    },
+
+    /// Generate deployment scaffolding (Dockerfile, systemd unit,
+    /// nginx server block, or cPanel .htaccess + README)
+    Deploy {
+        /// Target environment: docker, systemd, nginx, cpanel
+        #[arg()]
+        target: String,
+        /// Overwrite existing files instead of skipping them
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Configure environment variables interactively
     Env {
         /// Just scan and sync — don't prompt interactively
@@ -167,6 +210,22 @@ enum Commands {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum QueueAction {
+    /// Long-lived worker — pop jobs and run them until interrupted
+    Work {
+        /// Topic / queue name (default: framework default — usually "default")
+        #[arg(long)]
+        topic: Option<String>,
+    },
+    /// Show queue depth and recent stats
+    Stats,
+    /// Re-queue every dead-letter job for retry
+    Retry,
+    /// Delete completed jobs older than the configured retention
+    Clear,
+}
+
 fn main() {
     console::enable_ansi();
     let cli = Cli::parse();
@@ -178,7 +237,16 @@ fn main() {
 
         Commands::Init { lang, path } => init::run(lang.as_deref(), path.as_deref()),
 
-        Commands::Serve { port, host, dev, production, no_browser } => handle_serve(port, &host, dev, production, no_browser),
+        Commands::Serve { port, host, dev, production, no_browser, no_reload } => {
+            // --no-reload is the flag form of TINA4_NO_RELOAD=true.
+            // Set it in the environment before handing off to the
+            // server bootstrap so the watcher and language CLI both
+            // see it.
+            if no_reload {
+                std::env::set_var("TINA4_NO_RELOAD", "true");
+            }
+            handle_serve(port, &host, dev, production, no_browser);
+        }
 
         Commands::Scss {
             input,
@@ -197,12 +265,21 @@ fn main() {
             }
         }
 
-        Commands::Migrate { create } => {
-            delegate_command(if let Some(desc) = create {
-                vec!["migrate:create".into(), desc]
+        Commands::Migrate { create, rollback, status } => {
+            // Three mutually-exclusive modes (clap enforces): create a
+            // new migration file, roll back the most recent batch, or
+            // print status. Default (none of the above) runs all
+            // pending migrations.
+            let args = if let Some(desc) = create {
+                vec!["migrate".into(), "--create".into(), desc]
+            } else if rollback {
+                vec!["migrate".into(), "--rollback".into()]
+            } else if status {
+                vec!["migrate".into(), "--status".into()]
             } else {
                 vec!["migrate".into()]
-            });
+            };
+            delegate_command(args);
         }
 
         Commands::Test => delegate_command(vec!["test".into()]),
@@ -235,6 +312,45 @@ fn main() {
         Commands::Console => delegate_command(vec!["console".into()]),
         Commands::Books => handle_books(),
         Commands::Docs => handle_docs(),
+        Commands::Build { no_minify } => {
+            // For now `build` runs the SCSS compiler in minify-by-default
+            // mode and delegates to the language CLI for any
+            // language-specific bundling step (Node bundles via
+            // `tina4nodejs build`, etc.). This stays small intentionally —
+            // the alternative is dragging a full asset pipeline in.
+            scss::compile_dir("src/scss", "src/public/css", !no_minify);
+            // Try the language CLI's build subcommand; if the language
+            // doesn't have one, the delegate exits non-zero and we
+            // surface that to the user — they get to decide whether
+            // to wire one up.
+            delegate_command(vec!["build".into()]);
+        }
+
+        Commands::Seed { name } => {
+            let mut args = vec!["seed".into()];
+            if let Some(n) = name { args.push(n); }
+            delegate_command(args);
+        }
+
+        Commands::Queue { action } => {
+            let mut args = vec!["queue".into()];
+            match action {
+                QueueAction::Work { topic } => {
+                    args.push("work".into());
+                    if let Some(t) = topic {
+                        args.push("--topic".into());
+                        args.push(t);
+                    }
+                }
+                QueueAction::Stats => args.push("stats".into()),
+                QueueAction::Retry => args.push("retry".into()),
+                QueueAction::Clear => args.push("clear".into()),
+            }
+            delegate_command(args);
+        }
+
+        Commands::Deploy { target, force } => deploy::run(&target, force),
+
         Commands::Env { sync, example, list, migrate, yes } => {
             if migrate {
                 env_migrate::run(yes);

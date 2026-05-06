@@ -245,6 +245,16 @@ fn main() {
             if no_reload {
                 std::env::set_var("TINA4_NO_RELOAD", "true");
             }
+            // --no-browser must also propagate to the spawned language
+            // CLI. Without this, Rust suppressed its own
+            // open_browser() call but the framework process (tina4python,
+            // tina4php, etc.) still opened one of its own — the flag
+            // looked broken to anyone running the dev server in CI or
+            // a remote shell. Setting the env var here gives the
+            // language CLI the same signal Rust uses internally.
+            if no_browser {
+                std::env::set_var("TINA4_NO_BROWSER", "true");
+            }
             handle_serve(port, &host, dev, production, no_browser);
         }
 

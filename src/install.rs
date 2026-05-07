@@ -49,14 +49,91 @@ fn install_python() {
     } else {
         println!("  {} Installing uv...", icon_play().green());
         if console::is_windows() {
-            let _ = console::shell_exec("powershell -ExecutionPolicy ByPass -c \"irm https://astral.sh/uv/install.ps1 | iex\"");
+            // CRITICAL: invoke PowerShell directly, NOT through cmd /C.
+            // The previous `shell_exec("powershell -c \"irm ... | iex\"")`
+            // wrapped the whole string in `cmd /C ...`, and cmd.exe's pipe
+            // operator parsed `|` before PowerShell saw it — so PowerShell
+            // only received `irm <url>` (the download), never `| iex` (the
+            // execution). The script downloaded silently, never ran, and
+            // the next `install_tina4_cli` call hit the "uv not found"
+            // path. Each arg here goes as a discrete argv entry, so no
+            // shell parsing breaks the pipe inside the script.
+            let status = Command::new("powershell")
+                .args([
+                    "-ExecutionPolicy", "ByPass",
+                    "-NoProfile",
+                    "-Command", "irm https://astral.sh/uv/install.ps1 | iex",
+                ])
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .status();
+            match status {
+                Ok(s) if s.success() => {
+                    println!("  {} uv installed", icon_ok().green());
+                    refresh_uv_path_windows();
+                }
+                Ok(s) => eprintln!("  {} uv installer exited with {}", icon_fail().red(), s),
+                Err(e) => eprintln!("  {} Failed to launch PowerShell: {}", icon_fail().red(), e),
+            }
         } else {
-            let _ = console::shell_exec("curl -LsSf https://astral.sh/uv/install.sh | sh");
+            let status = Command::new("sh")
+                .args(["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"])
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .status();
+            match status {
+                Ok(s) if s.success() => {
+                    println!("  {} uv installed", icon_ok().green());
+                    refresh_uv_path_unix();
+                }
+                Ok(s) => eprintln!("  {} uv installer exited with {}", icon_fail().red(), s),
+                Err(e) => eprintln!("  {} Failed to launch shell: {}", icon_fail().red(), e),
+            }
         }
     }
 
     // Install tina4python
     install_tina4_cli("tina4python", "uv", &["tool", "install", "tina4-python"]);
+}
+
+/// Splice uv's known install directory into the current process's PATH on
+/// Windows. Without this, `which::which("uv")` in this same process can't
+/// find the just-installed binary because Windows env-var changes don't
+/// propagate to running processes — the user would have to re-run
+/// `tina4 install python` in a new shell to get tina4python installed.
+fn refresh_uv_path_windows() {
+    let Ok(home) = std::env::var("USERPROFILE") else { return };
+    // uv's official Windows installer puts uv.exe under %USERPROFILE%\.local\bin
+    // (newer) or %USERPROFILE%\.cargo\bin (older). Add both — duplicates in
+    // PATH are harmless.
+    let candidates = [
+        format!("{home}\\.local\\bin"),
+        format!("{home}\\.cargo\\bin"),
+    ];
+    let current = std::env::var("PATH").unwrap_or_default();
+    let mut parts: Vec<String> = current.split(';').map(|s| s.to_string()).collect();
+    for c in &candidates {
+        if std::path::Path::new(c).exists() && !parts.iter().any(|p| p.eq_ignore_ascii_case(c)) {
+            parts.insert(0, c.clone());
+        }
+    }
+    std::env::set_var("PATH", parts.join(";"));
+}
+
+/// Splice ~/.local/bin and ~/.cargo/bin into PATH on Unix for the same reason
+/// as refresh_uv_path_windows — `which::which` only searches the current
+/// process's PATH, which doesn't yet include uv's install location.
+fn refresh_uv_path_unix() {
+    let Ok(home) = std::env::var("HOME") else { return };
+    let candidates = [format!("{home}/.local/bin"), format!("{home}/.cargo/bin")];
+    let current = std::env::var("PATH").unwrap_or_default();
+    let mut parts: Vec<String> = current.split(':').map(|s| s.to_string()).collect();
+    for c in &candidates {
+        if std::path::Path::new(c).exists() && !parts.iter().any(|p| p == c) {
+            parts.insert(0, c.clone());
+        }
+    }
+    std::env::set_var("PATH", parts.join(":"));
 }
 
 fn install_php() {
@@ -176,13 +253,32 @@ fn install_tina4_js() {
     let url = "https://raw.githubusercontent.com/tina4stack/tina4-js/master/dist/tina4js.min.js";
     println!("  {} Downloading from {}", icon_play().green(), "tina4stack/tina4-js".cyan());
 
-    let download_cmd = if console::is_windows() {
-        format!("powershell -c \"Invoke-WebRequest -Uri '{}' -OutFile '{}'\"", url, target.display())
+    // Invoke PowerShell / curl directly (no `cmd /C` wrapper). Wrapping a
+    // PowerShell pipeline through cmd.exe lets cmd's parser eat the pipe
+    // operator before PowerShell sees it — same root cause as the uv
+    // installer bug fixed earlier in this file.
+    let download_status = if console::is_windows() {
+        Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "Invoke-WebRequest -Uri '{}' -OutFile '{}'",
+                    url,
+                    target.display()
+                ),
+            ])
+            .status()
     } else {
-        format!("curl -fsSL '{}' -o '{}'", url, target.display())
+        Command::new("sh")
+            .args([
+                "-c",
+                &format!("curl -fsSL '{}' -o '{}'", url, target.display()),
+            ])
+            .status()
     };
 
-    match console::shell_exec(&download_cmd) {
+    match download_status {
         Ok(s) if s.success() => {
             println!("  {} tina4js.min.js installed at {}", icon_ok().green(), target.display());
         }

@@ -902,6 +902,12 @@ fn scaffold_tina4js(path: &str) {
     write_file(path, "package.json", &package_json);
 
     // tsconfig.json
+    //
+    // baseUrl + paths give you the `@/` alias for absolute imports —
+    // `import { homePage } from '@/pages/home'` instead of brittle
+    // `../../pages/home` relative chains. The matching Vite alias is
+    // in vite.config.ts; both must agree or the editor and the bundler
+    // disagree about where `@/` points.
     write_file(
         path,
         "tsconfig.json",
@@ -914,7 +920,11 @@ fn scaffold_tina4js(path: &str) {
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"]
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
   },
   "include": ["src/**/*.ts"]
 }
@@ -922,12 +932,23 @@ fn scaffold_tina4js(path: &str) {
     );
 
     // vite.config.ts
+    //
+    // resolve.alias maps `@` → /src so the bundler resolves `@/...`
+    // imports. Keep it in lockstep with the `paths` entry in
+    // tsconfig.json — TypeScript uses tsconfig for type-checking and
+    // editor go-to-definition, Vite uses this for the actual build.
     write_file(
         path,
         "vite.config.ts",
         r#"import { defineConfig } from 'vite';
+import { resolve } from 'path';
 
 export default defineConfig({
+  resolve: {
+    alias: {
+      '@': resolve(__dirname, 'src'),
+    },
+  },
   server: {
     port: 5173,
     // Proxy API calls to tina4-php/python backend in dev
@@ -962,7 +983,7 @@ export default defineConfig({
         path,
         "src/main.ts",
         r#"import { signal, computed, html, route, router, navigate, api } from 'tina4js';
-import './routes/index';
+import '@/routes/index';
 
 // Debug overlay in dev mode (Ctrl+Shift+D to toggle, tree-shaken from production builds)
 if (import.meta.env.DEV) import('tina4js/debug');
@@ -980,7 +1001,7 @@ router.start({ target: '#root', mode: 'hash' });
         path,
         "src/routes/index.ts",
         r#"import { route, navigate, html, signal, computed } from 'tina4js';
-import { homePage } from '../pages/home';
+import { homePage } from '@/pages/home';
 
 // Home
 route('/', homePage);

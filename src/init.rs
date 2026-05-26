@@ -623,7 +623,24 @@ packages = ["src"]
     );
     write_file(path, "pyproject.toml", &pyproject);
 
-    // src/routes/ is created empty — users add routes via gallery or manually
+    // src/routes/index.py — hello-world so `tina4 serve` shows a working
+    // page on first run and users see the convention for adding routes.
+    write_file(
+        path,
+        "src/routes/index.py",
+        r#""""Hello-world route — replace with your own."""
+from tina4_python.core.router import get
+
+
+@get("/")
+async def index(request, response):
+    return response({
+        "message": "Hello from Tina4!",
+        "docs": "https://tina4.com/python",
+        "next": "Add more files to src/routes/ — they auto-load on save.",
+    })
+"#,
+    );
 
     println!("  {} Created Python scaffold", icon_ok().green());
 }
@@ -714,6 +731,23 @@ SetEnvIf Authorization .+ HTTP_AUTHORIZATION=$0
 "#,
     );
 
+    // src/routes/index.php — hello-world so first `tina4 serve` shows a
+    // working page and users see the route-file convention.
+    write_file(
+        path,
+        "src/routes/index.php",
+        r#"<?php
+// Hello-world route — replace with your own.
+\Tina4\Router::get('/', function (\Tina4\Request $request, \Tina4\Response $response) {
+    return $response->json([
+        'message' => 'Hello from Tina4!',
+        'docs' => 'https://tina4.com/php',
+        'next' => 'Add more files to src/routes/ — they auto-load on save.',
+    ]);
+});
+"#,
+    );
+
     // nginx config example
     write_file(
         path,
@@ -795,7 +829,21 @@ gem "tina4ruby", "~> 3.0"
 "#,
     );
 
-    // src/routes/ is created empty — users add routes via gallery or manually
+    // src/routes/index.rb — hello-world so first `tina4 serve` shows a
+    // working page and users see the route-file convention.
+    write_file(
+        path,
+        "src/routes/index.rb",
+        r##"# Hello-world route — replace with your own.
+Tina4::Router.get("/") do |request, response|
+  response.json({
+    message: "Hello from Tina4!",
+    docs: "https://tina4.com/ruby",
+    next: "Add more files to src/routes/ — they auto-load on save.",
+  })
+end
+"##,
+    );
 
     println!("  {} Created Ruby scaffold", icon_ok().green());
 }
@@ -867,7 +915,24 @@ startServer();
 "#,
     );
 
-    // src/routes/ is created empty — users add routes via gallery or manually
+    // src/routes/get.ts — hello-world so first `tina4 serve` shows a
+    // working page and users see the file-based-routing convention.
+    // Node.js uses HTTP-method filenames (get.ts, post.ts, ...).
+    write_file(
+        path,
+        "src/routes/get.ts",
+        r#"import type { Tina4Request, Tina4Response } from "tina4-nodejs";
+
+// Hello-world handler for GET / — replace with your own.
+export default async function (req: Tina4Request, res: Tina4Response) {
+  res.json({
+    message: "Hello from Tina4!",
+    docs: "https://tina4.com/nodejs",
+    next: "Add more files to src/routes/ — they auto-load on save.",
+  });
+}
+"#,
+    );
 
     println!("  {} Created Node.js scaffold", icon_ok().green());
 }

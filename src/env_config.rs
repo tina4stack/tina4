@@ -18,10 +18,11 @@ fn known_vars() -> Vec<(&'static str, &'static str, &'static str, &'static str)>
         ("TINA4_NO_RELOAD", "false", "Disable hot-reload (useful for AI-assisted development)", "Server"),
         ("TINA4_NO_AI_PORT", "false", "Disable test port (port+1000)", "Server"),
 
-        // Database
-        ("DATABASE_URL", "sqlite:///data/app.db", "Database connection string", "Database"),
-        ("DATABASE_USERNAME", "", "Database username (if not in URL)", "Database"),
-        ("DATABASE_PASSWORD", "", "Database password (if not in URL)", "Database"),
+        // Database — v3.12 renamed these to TINA4_* (boot guard refuses
+        // to start with bare DATABASE_URL set).
+        ("TINA4_DATABASE_URL", "sqlite:///data/app.db", "Database connection string", "Database"),
+        ("TINA4_DATABASE_USERNAME", "", "Database username (if not in URL)", "Database"),
+        ("TINA4_DATABASE_PASSWORD", "", "Database password (if not in URL)", "Database"),
         ("TINA4_AUTOCOMMIT", "false", "Auto-commit database transactions", "Database"),
         ("TINA4_DB_CACHE", "false", "Enable query result caching", "Database"),
         ("TINA4_DB_CACHE_TTL", "300", "Query cache TTL in seconds", "Database"),
@@ -108,7 +109,7 @@ fn interactive_features() -> Vec<Feature> {
     vec![
         Feature {
             name: "Database",
-            env_key: "DATABASE_URL",
+            env_key: "TINA4_DATABASE_URL",
             options: vec!["sqlite", "postgres", "mysql", "mssql", "firebird", "mongodb"],
             default: "sqlite",
             follow_up: vec![],
@@ -455,7 +456,7 @@ pub fn run(sync: bool, example_only: bool, list_only: bool) {
             .cloned()
             .unwrap_or_else(|| feature.default.to_string());
 
-        if feature.env_key == "DATABASE_URL" {
+        if feature.env_key == "TINA4_DATABASE_URL" {
             println!("  Current: {}", current.cyan());
 
             let engine = prompt_select(

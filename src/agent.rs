@@ -145,6 +145,82 @@ struct LlmChoice {
     message: LlmMessage,
 }
 
+// ── Anthropic-specific request/response ──
+//
+// Anthropic's /v1/messages API has a different shape from OpenAI-compatible
+// providers:
+//   - `system` is a top-level field, NOT a message with role="system"
+//   - the response is `{ content: [{ type: "text", text: "..." }], ... }`,
+//     not `{ choices: [{ message: { content } }] }`
+// Sending the OpenAI shape gets you a parse error or, worse, silently
+// ignored system prompts. Build a separate body and parser for the
+// `anthropic` provider branch.
+//
+// Prompt caching: we send `system` as an array of content blocks with
+// `cache_control: { type: "ephemeral" }` so repeated calls within the
+// 5-minute TTL pay ~10% of the input-token cost on the cached prefix.
+// The supervisor's system prompt is hundreds of tokens and identical
+// every turn — exactly the workload caching is designed for.
+//
+// The minimum cacheable size depends on the model (1024 tokens for
+// Sonnet, 2048 for Opus). If the prompt is below the threshold Anthropic
+// silently returns `cache_creation_input_tokens: 0` instead of an error —
+// so unconditional caching is safe.
+
+#[derive(Debug, Serialize)]
+struct CacheControl {
+    #[serde(rename = "type")]
+    ty: &'static str, // always "ephemeral"
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicSystemBlock {
+    #[serde(rename = "type")]
+    ty: &'static str, // always "text"
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
+}
+
+#[derive(Debug, Serialize)]
+struct AnthropicRequest {
+    model: String,
+    messages: Vec<LlmMessage>,
+    max_tokens: u32,
+    temperature: f32,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    system: Vec<AnthropicSystemBlock>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicResponse {
+    content: Vec<AnthropicContent>,
+    #[serde(default)]
+    usage: Option<AnthropicUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicContent {
+    #[serde(rename = "type")]
+    _ty: String,
+    text: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct AnthropicUsage {
+    #[serde(default)]
+    input_tokens: u32,
+    /// Tokens written to the cache on this call (first time we see this prefix).
+    /// Costs ~25% more than uncached input — pays back on the next read.
+    #[serde(default)]
+    cache_creation_input_tokens: u32,
+    /// Tokens read from the cache. Costs ~10% of normal input — the whole point.
+    #[serde(default)]
+    cache_read_input_tokens: u32,
+    #[serde(default)]
+    output_tokens: u32,
+}
+
 // ── Default agent configs ──
 
 const DEFAULT_AGENTS: &[(&str, &str, &str)] = &[
@@ -427,6 +503,14 @@ pub fn load_agents(project_dir: &Path) -> Vec<Agent> {
 }
 
 /// Load chat settings from `.tina4/chat/settings.json` or use defaults.
+///
+/// When no settings file exists yet, defaults pick a sensible starting point:
+///   - `ANTHROPIC_API_KEY` set → Claude Sonnet for thinking + vision
+///     (image_gen stays on Tina4 Cloud — Anthropic doesn't generate images).
+///   - otherwise → Tina4 Cloud endpoints (zero-config local model server).
+///
+/// A settings.json on disk always wins, so saving via the dev admin UI
+/// overrides the env-var default cleanly.
 pub fn load_chat_settings(project_dir: &Path) -> ChatSettings {
     let path = project_dir.join(".tina4").join("chat").join("settings.json");
     if let Ok(s) = fs::read_to_string(&path) {
@@ -434,6 +518,32 @@ pub fn load_chat_settings(project_dir: &Path) -> ChatSettings {
             return settings;
         }
     }
+
+    // Env-var path — lets users iterate with `ANTHROPIC_API_KEY=sk-ant-...
+    // tina4 agent` without first having to click through the settings UI.
+    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+        if !key.is_empty() {
+            let claude = |model: &str| ModelSettings {
+                provider: "anthropic".into(),
+                model: model.into(),
+                url: "https://api.anthropic.com".into(),
+                api_key: key.clone(),
+            };
+            return ChatSettings {
+                thinking: claude("claude-sonnet-4-5"),
+                vision: claude("claude-sonnet-4-5"),
+                // Claude has no image generation model — fall back to the
+                // Tina4 Cloud endpoint so /generate_image still works.
+                image_gen: ModelSettings {
+                    provider: "tina4".into(),
+                    model: String::new(),
+                    url: "http://41.71.84.173:11436".into(),
+                    api_key: String::new(),
+                },
+            };
+        }
+    }
+
     // Defaults — Tina4 Cloud (per-model-type endpoints, models fetched at runtime)
     ChatSettings {
         thinking: ModelSettings {
@@ -457,6 +567,51 @@ pub fn load_chat_settings(project_dir: &Path) -> ChatSettings {
     }
 }
 
+/// Resolve which `ModelSettings` an agent should use, given its `config.model`
+/// field. The field can be:
+///
+///   1. A slot name (`"thinking"`, `"vision"`, `"image-gen"` / `"image_gen"`)
+///      — clone the matching slot from `ChatSettings`. This is the legacy
+///      behaviour and still the default for every shipped agent.
+///   2. A direct model name (`"claude-opus-4-5"`, `"gpt-5"`, `"o3"`)
+///      — infer the provider from the prefix, build a fresh `ModelSettings`,
+///      and pull the API key from the matching env var:
+///        * `claude-*` → Anthropic, key from `ANTHROPIC_API_KEY`
+///        * `gpt-*` / `o1-*` / `o3-*` / `o4-*` → OpenAI, key from `OPENAI_API_KEY`
+///      This lets a single agent's `config.json` override the global slot —
+///      e.g. supervisor + planner on Opus, coder on Sonnet, vision on Sonnet
+///      — without each agent needing its own slot in `ChatSettings`.
+pub fn resolve_agent_model(model_field: &str, settings: &ChatSettings) -> ModelSettings {
+    match model_field {
+        "thinking" => settings.thinking.clone(),
+        "vision" => settings.vision.clone(),
+        "image-gen" | "image_gen" => settings.image_gen.clone(),
+        // Direct model name — infer provider from prefix
+        m if m.starts_with("claude-") => ModelSettings {
+            provider: "anthropic".into(),
+            model: m.to_string(),
+            url: "https://api.anthropic.com".into(),
+            api_key: std::env::var("ANTHROPIC_API_KEY")
+                .unwrap_or_else(|_| settings.thinking.api_key.clone()),
+        },
+        m if m.starts_with("gpt-") || m.starts_with("o1-")
+            || m.starts_with("o3-") || m.starts_with("o4-")
+            || m == "o3" || m == "o4-mini" =>
+        {
+            ModelSettings {
+                provider: "openai".into(),
+                model: m.to_string(),
+                url: "https://api.openai.com".into(),
+                api_key: std::env::var("OPENAI_API_KEY")
+                    .unwrap_or_else(|_| settings.thinking.api_key.clone()),
+            }
+        }
+        // Unknown — fall back to thinking slot (legacy behaviour for any
+        // string that doesn't match a known pattern).
+        _ => settings.thinking.clone(),
+    }
+}
+
 /// Save chat message to `.tina4/chat/history.json`.
 pub fn save_message(project_dir: &Path, message: &ChatMessage) {
     let history_path = project_dir.join(".tina4").join("chat").join("history.json");
@@ -477,6 +632,126 @@ pub fn load_history(project_dir: &Path) -> Vec<ChatMessage> {
     } else {
         Vec::new()
     }
+}
+
+// ── Defensive file writes for coder agent output ──────────────────────
+//
+// Until now the coder loop did `fs::write(path, llm_output)` directly.
+// When the LLM truncated its response (max_tokens limit, transient
+// error, malformed code-fence parsing), the user's existing file got
+// overwritten with a partial version — silently, no backup, no log.
+// "Applying a small patch went and messed up my whole file" is the
+// canonical symptom.
+//
+// Below we add:
+//   1. agent_log(category, message) — append-only structured log
+//      at `.tina4/agent.log`. Every agent action logs here.
+//   2. agent_write_file(rel_path, content) — drop-in replacement for
+//      `fs::write` with: pre-write backup, truncation refusal, log.
+
+/// Result of an `agent_write_file` operation — passed up so the coder
+/// loop can surface size/line deltas in its SSE status events.
+#[derive(Debug, Clone)]
+pub struct WriteStats {
+    pub path: String,
+    pub old_size: u64,
+    pub new_size: u64,
+    pub old_lines: usize,
+    pub new_lines: usize,
+    pub backup_path: Option<String>,
+}
+
+/// Append a structured line to `.tina4/agent.log` AND echo to stderr.
+/// Stderr makes the events visible in the live `tina4 agent` console;
+/// the file gives a post-mortem trail when a session has already ended.
+pub fn agent_log(project_dir: &Path, category: &str, message: &str) {
+    let dir = project_dir.join(".tina4");
+    let _ = fs::create_dir_all(&dir);
+    let log_path = dir.join("agent.log");
+    let line = format!("{} [{}] {}\n", chrono_now(), category, message);
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+        let _ = f.write_all(line.as_bytes());
+    }
+    eprintln!("  [agent {}] {}", category, message);
+}
+
+/// Defensive file write for coder-agent output.
+///
+/// Safety mechanisms over a bare `fs::write`:
+///   1. **Backup** — if the target exists, copy to
+///      `.tina4/backups/<flat-path>.<ts>.bak` first.
+///   2. **Truncation guard** — refuse to overwrite a non-trivial file
+///      (>200B) with a write that's drastically smaller (<30% of
+///      existing size). Returns `Err`; the caller surfaces it to the
+///      user as a clear refusal rather than a silent loss.
+///   3. **Structured log** — every attempt lands in `.tina4/agent.log`
+///      with old/new size + line count so the user can audit what
+///      the agent did.
+pub fn agent_write_file(project_dir: &Path, rel_path: &str, content: &str) -> Result<WriteStats, String> {
+    let full = project_dir.join(rel_path);
+
+    let old_content = fs::read_to_string(&full).ok();
+    let old_size = old_content.as_ref().map(|s| s.len() as u64).unwrap_or(0);
+    let old_lines = old_content.as_ref().map(|s| s.lines().count()).unwrap_or(0);
+    let new_size = content.len() as u64;
+    let new_lines = content.lines().count();
+
+    // Truncation guard — refuse suspicious shrinkage on non-trivial files.
+    if old_size > 200 && (new_size * 100) < (old_size * 30) {
+        let msg = format!(
+            "REFUSED {} (would shrink {} → {} bytes / {} → {} lines, looks truncated)",
+            rel_path, old_size, new_size, old_lines, new_lines,
+        );
+        agent_log(project_dir, "write.refused", &msg);
+        return Err(msg);
+    }
+
+    // Backup before overwrite.
+    let backup_path = if old_size > 0 {
+        let backup_dir = project_dir.join(".tina4").join("backups");
+        let _ = fs::create_dir_all(&backup_dir);
+        let safe_name = rel_path.replace('/', "__").replace('\\', "__");
+        let ts = chrono_now().replace(':', "-");
+        let name = format!("{}.{}.bak", safe_name, ts);
+        let bp = backup_dir.join(&name);
+        match fs::copy(&full, &bp) {
+            Ok(_) => Some(format!(".tina4/backups/{}", name)),
+            Err(e) => {
+                agent_log(project_dir, "write.backup_failed",
+                    &format!("{} (could not back up: {})", rel_path, e));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Ensure parent dir.
+    if let Some(parent) = full.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    fs::write(&full, content).map_err(|e| {
+        let msg = format!("FAILED {} ({})", rel_path, e);
+        agent_log(project_dir, "write.failed", &msg);
+        msg
+    })?;
+
+    let stats = WriteStats {
+        path: rel_path.to_string(),
+        old_size, new_size,
+        old_lines, new_lines,
+        backup_path: backup_path.clone(),
+    };
+
+    let bak = backup_path.as_deref().unwrap_or("(no prior file)");
+    agent_log(project_dir, "write.ok", &format!(
+        "{} ({}B/{}L → {}B/{}L, backup: {})",
+        rel_path, old_size, old_lines, new_size, new_lines, bak,
+    ));
+
+    Ok(stats)
 }
 
 /// Fetch the first available model from an Ollama-compatible server.
@@ -537,30 +812,14 @@ pub async fn llm_call(
         settings.model.clone()
     };
 
-    let mut all_messages = Vec::new();
-    if !system_prompt.is_empty() {
-        all_messages.push(LlmMessage {
-            role: "system".into(),
-            content: system_prompt.into(),
-        });
-    }
-    all_messages.extend_from_slice(messages);
-
-    // For Ollama/custom providers, request larger context window
-    let options = if settings.provider == "custom" || settings.provider == "tina4" {
-        Some(LlmOptions { num_ctx: 32768 })
-    } else {
-        None
-    };
-
-    let body = LlmRequest {
-        model: model_name,
-        messages: all_messages,
-        max_tokens,
-        temperature,
-        stream: None,
-        options,
-    };
+    // Log the call so users tailing `tina4 agent` see what's actually
+    // being sent (which model, how many messages, system-prompt size).
+    // Helps debug "why is it slow" and "is it really calling Claude?".
+    eprintln!(
+        "  [llm] {} {} system={}B messages={} max_tokens={}",
+        settings.provider, model_name, system_prompt.len(),
+        messages.len(), max_tokens,
+    );
 
     // Build full API URL from base URL + provider-specific path
     let base_url = settings.url.trim_end_matches('/');
@@ -579,8 +838,60 @@ pub async fn llm_call(
     };
 
     let mut req = client.post(&api_url)
-        .header("Content-Type", "application/json")
-        .json(&body);
+        .header("Content-Type", "application/json");
+
+    // Anthropic gets a completely different body shape — `system` is a
+    // top-level field, not the first entry in `messages`. Build that here
+    // so the rest of the function only has to handle two response shapes.
+    //
+    // Prompt caching: send the system prompt as a content block with
+    // `cache_control: ephemeral`. The cache key is content-hashed, so
+    // identical system prompts across turns hit the cache automatically.
+    if settings.provider == "anthropic" {
+        let system = if system_prompt.is_empty() {
+            Vec::new()
+        } else {
+            vec![AnthropicSystemBlock {
+                ty: "text",
+                text: system_prompt.to_string(),
+                cache_control: Some(CacheControl { ty: "ephemeral" }),
+            }]
+        };
+        let body = AnthropicRequest {
+            model: model_name,
+            messages: messages.to_vec(),
+            max_tokens,
+            temperature,
+            system,
+        };
+        req = req.json(&body);
+    } else {
+        let mut all_messages = Vec::new();
+        if !system_prompt.is_empty() {
+            all_messages.push(LlmMessage {
+                role: "system".into(),
+                content: system_prompt.into(),
+            });
+        }
+        all_messages.extend_from_slice(messages);
+
+        // For Ollama/custom providers, request larger context window
+        let options = if settings.provider == "custom" || settings.provider == "tina4" {
+            Some(LlmOptions { num_ctx: 32768 })
+        } else {
+            None
+        };
+
+        let body = LlmRequest {
+            model: model_name,
+            messages: all_messages,
+            max_tokens,
+            temperature,
+            stream: None,
+            options,
+        };
+        req = req.json(&body);
+    }
 
     // Add auth header based on provider
     if !settings.api_key.is_empty() {
@@ -597,16 +908,39 @@ pub async fn llm_call(
     let text = resp.text().await.map_err(|e| format!("Read failed: {}", e))?;
 
     if !status.is_success() {
-        return Err(format!("LLM API error {}: {}", status, &text[..text.len().min(200)]));
+        return Err(format!("LLM API error {}: {}", status, &text[..text.len().min(500)]));
     }
 
-    // Parse OpenAI-compatible response
-    let parsed: LlmResponse = serde_json::from_str(&text)
-        .map_err(|e| format!("Parse failed: {} — body: {}", e, &text[..text.len().min(200)]))?;
+    // Parse response based on provider — Anthropic and OpenAI shapes differ.
+    if settings.provider == "anthropic" {
+        let parsed: AnthropicResponse = serde_json::from_str(&text)
+            .map_err(|e| format!("Anthropic parse failed: {} — body: {}", e, &text[..text.len().min(500)]))?;
 
-    parsed.choices.first()
-        .map(|c| c.message.content.clone())
-        .ok_or_else(|| "No response content".into())
+        // Log cache stats so it's obvious whether caching is working.
+        // Stays quiet when nothing is cacheable (sub-threshold prompts).
+        if let Some(u) = &parsed.usage {
+            if u.cache_creation_input_tokens > 0 || u.cache_read_input_tokens > 0 {
+                eprintln!(
+                    "  [anthropic] cache: write={} read={} input={} output={}",
+                    u.cache_creation_input_tokens,
+                    u.cache_read_input_tokens,
+                    u.input_tokens,
+                    u.output_tokens,
+                );
+            }
+        }
+
+        parsed.content.into_iter()
+            .find(|c| !c.text.is_empty())
+            .map(|c| c.text)
+            .ok_or_else(|| "No response content".into())
+    } else {
+        let parsed: LlmResponse = serde_json::from_str(&text)
+            .map_err(|e| format!("Parse failed: {} — body: {}", e, &text[..text.len().min(500)]))?;
+        parsed.choices.first()
+            .map(|c| c.message.content.clone())
+            .ok_or_else(|| "No response content".into())
+    }
 }
 
 /// Parse supervisor LLM response into a structured action.
@@ -699,7 +1033,7 @@ You are working in a Tina4 project. Conventions:
 - ORM: one class per file in `src/orm/`. `IntegerField(primary_key=True, auto_increment=True)`, `StringField()`. `User.find(1)`, `User.where("age>?",[18])`, `user.save()`.
 - Migrations: REQUIRED for schema. `tina4 generate migration "create x"` then `tina4 migrate`. Never raw DDL outside migrations. SQLite uses `INTEGER PRIMARY KEY AUTOINCREMENT`; PostgreSQL `SERIAL`; MySQL `AUTO_INCREMENT`.
 - Templates (Frond/Jinja2): `{% extends "base.twig" %}`. `{% elif %}` not `{% elseif %}`. `{{ x|raw }}` for unescaped. `{{ "a " ~ b }}` for string concat (NOT `+`). Always include `{{ form_token() }}` in forms and `placeholder` on every input.
-- .env: `DATABASE_URL=sqlite:///app.db`, `TINA4_DEBUG=true`, `SECRET=...`, `TINA4_TOKEN_LIMIT=60`.
+- .env: `TINA4_DATABASE_URL=sqlite:///app.db`, `TINA4_DEBUG=true`, `TINA4_SECRET=...`, `TINA4_TOKEN_LIMIT=60`.
 - Built-ins — never reinvent: `Queue(topic="x").push({...})` for background work, `Api(base_url, auth_header)` for HTTP, `Auth.hash_password/check_password` for passwords, `get_token/valid_token` for JWT, `@cached(True, max_age=120)` for response caching, `background(fn, interval)` for periodic tasks.
 - Project layout: `src/routes/*.py` (auto-discovered), `src/orm/*.py` (models), `src/app/` (helpers), `src/templates/` (Twig), `src/scss/` (auto-compiled), `migrations/NNNNNN_description.sql`.
 "#;
@@ -1316,17 +1650,15 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                     serde_json::to_string(obj).unwrap_or_default()
                 }
 
-                // Resolve model for an agent by its config.model field
-                fn resolve_model<'a>(agent_name: &str, agents: &[Agent], settings: &'a ChatSettings) -> &'a ModelSettings {
-                    let model_type = agents.iter()
+                // Resolve model for an agent by its config.model field —
+                // delegates to the free-fn helper so slot lookups and direct
+                // model names (`claude-opus-4-5`, `gpt-5`, etc.) both work.
+                fn resolve_model(agent_name: &str, agents: &[Agent], settings: &ChatSettings) -> ModelSettings {
+                    let model_field = agents.iter()
                         .find(|a| a.name == agent_name)
                         .map(|a| a.config.model.as_str())
                         .unwrap_or("thinking");
-                    match model_type {
-                        "vision" => &settings.vision,
-                        "image-gen" => &settings.image_gen,
-                        _ => &settings.thinking,
-                    }
+                    resolve_agent_model(model_field, settings)
                 }
 
                 // Step 1: Call supervisor with conversation history + project context
@@ -1405,7 +1737,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                         );
                         let planner_msgs = vec![LlmMessage { role: "user".into(), content: planner_msg }];
 
-                        match llm_call(planner_model, planner_prompt, &planner_msgs, 4096, 0.2).await {
+                        match llm_call(&planner_model, planner_prompt, &planner_msgs, 4096, 0.2).await {
                             Ok(plan_content) => {
                                 // Save plan to .tina4/plans/
                                 let plan_name = format!("{}-plan.md", chrono_now().replace("Z", ""));
@@ -1463,7 +1795,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                         sse_event(&mut stream, "status", &sse_json(&serde_json::json!({"text": "→ Coder: writing code…", "agent": "coder"}))).await;
                         let coder_msgs = vec![LlmMessage { role: "user".into(), content: coder_msg }];
 
-                        match llm_call_with_grounding_retry(coder_model, coder_prompt, coder_msgs, 4096, 0.1, &hits).await {
+                        match llm_call_with_grounding_retry(&coder_model, coder_prompt, coder_msgs, 4096, 0.1, &hits).await {
                             Ok(code_output) => {
                                 // Parse file outputs and write them
                                 let mut files_written = Vec::new();
@@ -1484,16 +1816,24 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                                             remaining.as_str()
                                         };
 
-                                        let full_path = project_dir.join(file_path);
-                                        if let Some(parent) = full_path.parent() {
-                                            let _ = fs::create_dir_all(parent);
-                                        }
-                                        if fs::write(&full_path, content.trim()).is_ok() {
-                                            files_written.push(file_path.to_string());
-                                            sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
-                                                "text": format!("Written: {}", file_path),
-                                                "agent": "coder"
-                                            }))).await;
+                                        // Defensive write — backs up the prior file, refuses
+                                        // truncated LLM responses, logs to .tina4/agent.log.
+                                        match agent_write_file(&project_dir, file_path, content.trim()) {
+                                            Ok(stats) => {
+                                                files_written.push(file_path.to_string());
+                                                sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
+                                                    "text": format!("Written: {} ({}L → {}L)",
+                                                        file_path, stats.old_lines, stats.new_lines),
+                                                    "agent": "coder",
+                                                    "backup": stats.backup_path,
+                                                }))).await;
+                                            }
+                                            Err(reason) => {
+                                                sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
+                                                    "text": format!("Skipped {}: {}", file_path, reason),
+                                                    "agent": "coder",
+                                                }))).await;
+                                            }
                                         }
                                     }
                                 }
@@ -1601,7 +1941,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                                 let (coder_msg, hits) = ground_coder_msg(&base_msg, step, &[]).await;
                                 let coder_msgs = vec![LlmMessage { role: "user".into(), content: coder_msg }];
 
-                                match llm_call_with_grounding_retry(coder_model, coder_prompt, coder_msgs, 4096, 0.1, &hits).await {
+                                match llm_call_with_grounding_retry(&coder_model, coder_prompt, coder_msgs, 4096, 0.1, &hits).await {
                                     Ok(code_output) => {
                                         // Parse and write files
                                         let mut step_files = Vec::new();
@@ -1620,13 +1960,18 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                                                     remaining.as_str()
                                                 };
 
-                                                let full_path = project_dir.join(file_path);
-                                                if let Some(parent) = full_path.parent() {
-                                                    let _ = fs::create_dir_all(parent);
-                                                }
-                                                if fs::write(&full_path, content.trim()).is_ok() {
-                                                    step_files.push(file_path.to_string());
-                                                    all_files_written.push(file_path.to_string());
+                                                // Defensive write — backup + truncation guard + log.
+                                                match agent_write_file(&project_dir, file_path, content.trim()) {
+                                                    Ok(_) => {
+                                                        step_files.push(file_path.to_string());
+                                                        all_files_written.push(file_path.to_string());
+                                                    }
+                                                    Err(reason) => {
+                                                        sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
+                                                            "text": format!("Skipped {} on step {}: {}", file_path, step_num, reason),
+                                                            "agent": "coder",
+                                                        }))).await;
+                                                    }
                                                 }
                                             }
                                         }
@@ -1687,7 +2032,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                         let debug_model = resolve_model("debug", &agents, &settings);
                         let debug_msgs = vec![LlmMessage { role: "user".into(), content: format!("Analyze this error and suggest a fix:\n\n{}", err_msg) }];
 
-                        match llm_call(debug_model, debug_prompt, &debug_msgs, 4096, 0.2).await {
+                        match llm_call(&debug_model, debug_prompt, &debug_msgs, 4096, 0.2).await {
                             Ok(analysis) => {
                                 let escaped = analysis.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
                                 sse_event(&mut stream, "message", &format!("{{\"content\":\"{}\",\"agent\":\"debug\"}}", escaped)).await;
@@ -1942,8 +2287,12 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
 
                 let coder = agents.iter().find(|a| a.name == "coder");
                 let coder_prompt = coder.map(|c| c.system_prompt.as_str()).unwrap_or("");
-                let coder_model_type = coder.map(|a| a.config.model.as_str()).unwrap_or("thinking");
-                let coder_model = match coder_model_type { "vision" => &settings.vision, "image-gen" => &settings.image_gen, _ => &settings.thinking };
+                let coder_model_field = coder.map(|a| a.config.model.as_str()).unwrap_or("thinking");
+                // resolve_agent_model handles both slot names ("thinking",
+                // "vision", "image-gen") AND direct model names like
+                // "claude-opus-4-5" — so agent configs can opt into Opus
+                // without needing their own slot in ChatSettings.
+                let coder_model = resolve_agent_model(coder_model_field, &settings);
 
                 let mut summaries: Vec<String> = Vec::new();
                 let mut failed = false;
@@ -1994,7 +2343,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                     let (coder_msg, hits) = ground_coder_msg(&base_msg, &step_text, &[]).await;
                     let coder_msgs = vec![LlmMessage { role: "user".into(), content: coder_msg }];
 
-                    match llm_call_with_grounding_retry(coder_model, coder_prompt, coder_msgs, 4096, 0.1, &hits).await {
+                    match llm_call_with_grounding_retry(&coder_model, coder_prompt, coder_msgs, 4096, 0.1, &hits).await {
                         Ok(code_output) => {
                             let mut step_files = Vec::new();
                             for section in code_output.split("## FILE:") {
@@ -2010,11 +2359,20 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                                         if let Some(end) = after.find("```") { &after[..end] } else { after }
                                     } else { remaining.as_str() };
 
-                                    let full_path = project_dir.join(file_path);
-                                    if let Some(parent) = full_path.parent() { let _ = fs::create_dir_all(parent); }
-                                    if fs::write(&full_path, content.trim()).is_ok() {
-                                        step_files.push(file_path.to_string());
-                                        state.files.push(file_path.to_string());
+                                    // Defensive write — backup + truncation guard + log.
+                                    // sse_event isn't in scope here (this branch executes
+                                    // outside the streaming HTTP loop) — agent_log already
+                                    // writes to .tina4/agent.log AND stderr, so the refusal
+                                    // is visible without an SSE event.
+                                    match agent_write_file(&project_dir, file_path, content.trim()) {
+                                        Ok(_) => {
+                                            step_files.push(file_path.to_string());
+                                            state.files.push(file_path.to_string());
+                                        }
+                                        Err(reason) => {
+                                            agent_log(&project_dir, "step.skipped",
+                                                &format!("step {} skipped {}: {}", num, file_path, reason));
+                                        }
                                     }
                                 }
                             }
@@ -2646,5 +3004,260 @@ print('hi')
         // yet; they should fall through rather than silently drop.
         let tmp = std::env::temp_dir();
         assert!(verify_escalation_claim(&tmp, "new_category_future"));
+    }
+
+    // ── Defensive file write tests ──
+
+    fn tmp_project() -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(format!(
+            "tina4-write-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn agent_write_creates_new_file_and_logs() {
+        let project = tmp_project();
+        let result = agent_write_file(&project, "src/new.py", "print('hi')\n");
+        assert!(result.is_ok());
+        let stats = result.unwrap();
+        assert_eq!(stats.old_size, 0);
+        assert!(stats.new_size > 0);
+        assert!(stats.backup_path.is_none());
+        assert!(project.join("src/new.py").exists());
+        // Log file written
+        let log = std::fs::read_to_string(project.join(".tina4/agent.log")).unwrap();
+        assert!(log.contains("write.ok"));
+        assert!(log.contains("src/new.py"));
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    #[test]
+    fn agent_write_backs_up_existing_file() {
+        let project = tmp_project();
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(project.join("src/old.py"), "# original 200 bytes ".repeat(15)).unwrap();
+        let original = std::fs::read_to_string(project.join("src/old.py")).unwrap();
+
+        // New content of comparable size — passes truncation guard.
+        let new = "# replacement 200 bytes ".repeat(15);
+        let result = agent_write_file(&project, "src/old.py", &new);
+        assert!(result.is_ok(), "expected ok, got {:?}", result);
+        let stats = result.unwrap();
+        assert!(stats.backup_path.is_some(), "expected backup path, got none");
+
+        // Backup contains the original content
+        let backup_full = project.join(stats.backup_path.unwrap());
+        let backed_up = std::fs::read_to_string(&backup_full).unwrap();
+        assert_eq!(backed_up, original);
+
+        // Current file has the new content
+        let now = std::fs::read_to_string(project.join("src/old.py")).unwrap();
+        assert_eq!(now, new);
+
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    #[test]
+    fn agent_write_refuses_truncated_overwrite() {
+        // The "applying a small patch went and messed up my whole file"
+        // scenario — LLM returns 30 bytes for a 4000-byte file. Must
+        // refuse the write and leave the original intact.
+        let project = tmp_project();
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        let big_original = "real real real ".repeat(300); // 4500 bytes
+        std::fs::write(project.join("src/big.py"), &big_original).unwrap();
+
+        let truncated = "oops"; // 4 bytes — way under threshold
+        let result = agent_write_file(&project, "src/big.py", truncated);
+        assert!(result.is_err(), "expected refusal, got ok");
+        let err = result.unwrap_err();
+        assert!(err.contains("REFUSED"));
+        assert!(err.contains("truncated") || err.contains("shrink"));
+
+        // Original is intact.
+        let after = std::fs::read_to_string(project.join("src/big.py")).unwrap();
+        assert_eq!(after, big_original);
+
+        // No backup created (we refused before backing up — file is safe in place).
+        // But log records the refusal so we can audit.
+        let log = std::fs::read_to_string(project.join(".tina4/agent.log")).unwrap();
+        assert!(log.contains("write.refused"));
+
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    // ── Anthropic-specific unit tests ──
+
+    #[test]
+    fn resolve_agent_model_slot_thinking() {
+        let settings = ChatSettings {
+            thinking: ModelSettings {
+                provider: "x".into(), model: "m".into(),
+                url: "u".into(), api_key: "k".into(),
+            },
+            vision: ModelSettings { provider: "v".into(), ..ModelSettings::default_test() },
+            image_gen: ModelSettings { provider: "i".into(), ..ModelSettings::default_test() },
+        };
+        let m = resolve_agent_model("thinking", &settings);
+        assert_eq!(m.provider, "x");
+        assert_eq!(m.api_key, "k");
+    }
+
+    #[test]
+    fn resolve_agent_model_direct_claude_uses_env_key() {
+        // Sets a marker key and checks the resolver picks it up. We
+        // restore the prior value afterwards so other tests aren't
+        // disturbed. Single-threaded only matters here because the env
+        // is process-wide; cargo test runs in parallel by default but
+        // these reads happen synchronously inside the resolver.
+        let prev = std::env::var("ANTHROPIC_API_KEY").ok();
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test-resolver");
+        let settings = empty_chat_settings();
+        let m = resolve_agent_model("claude-opus-4-5", &settings);
+        assert_eq!(m.provider, "anthropic");
+        assert_eq!(m.model, "claude-opus-4-5");
+        assert_eq!(m.url, "https://api.anthropic.com");
+        assert_eq!(m.api_key, "sk-ant-test-resolver");
+        match prev {
+            Some(v) => std::env::set_var("ANTHROPIC_API_KEY", v),
+            None => std::env::remove_var("ANTHROPIC_API_KEY"),
+        }
+    }
+
+    #[test]
+    fn resolve_agent_model_unknown_falls_back_to_thinking() {
+        let settings = ChatSettings {
+            thinking: ModelSettings {
+                provider: "FALLBACK".into(), model: String::new(),
+                url: String::new(), api_key: String::new(),
+            },
+            ..empty_chat_settings()
+        };
+        let m = resolve_agent_model("not-a-real-model-prefix", &settings);
+        assert_eq!(m.provider, "FALLBACK");
+    }
+
+    fn empty_chat_settings() -> ChatSettings {
+        ChatSettings {
+            thinking: ModelSettings::default_test(),
+            vision: ModelSettings::default_test(),
+            image_gen: ModelSettings::default_test(),
+        }
+    }
+
+    // Small test-only helper — production code always sets every field
+    // explicitly, but tests want a quick "give me an empty one."
+    impl ModelSettings {
+        fn default_test() -> Self {
+            ModelSettings {
+                provider: String::new(),
+                model: String::new(),
+                url: String::new(),
+                api_key: String::new(),
+            }
+        }
+    }
+
+    #[test]
+    fn anthropic_request_body_marks_system_for_caching() {
+        // Verify the serialised body has the system prompt as a content
+        // block with cache_control:ephemeral — not a bare string. Without
+        // this shape we'd silently lose the 90% cache discount on every
+        // repeated supervisor turn.
+        let body = AnthropicRequest {
+            model: "claude-sonnet-4-5".into(),
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: "hi".into(),
+            }],
+            max_tokens: 16,
+            temperature: 0.0,
+            system: vec![AnthropicSystemBlock {
+                ty: "text",
+                text: "You are a test agent.".into(),
+                cache_control: Some(CacheControl { ty: "ephemeral" }),
+            }],
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(json.contains(r#""type":"text""#), "system block missing type:text: {}", json);
+        assert!(json.contains(r#""text":"You are a test agent.""#), "system text missing: {}", json);
+        assert!(json.contains(r#""cache_control""#), "cache_control missing: {}", json);
+        assert!(json.contains(r#""type":"ephemeral""#), "ephemeral marker missing: {}", json);
+    }
+
+    #[test]
+    fn anthropic_empty_system_omits_field() {
+        // An empty system block shouldn't appear in the JSON at all —
+        // Anthropic rejects empty system arrays in some versions and an
+        // empty string in others. Skip-if-empty avoids both footguns.
+        let body = AnthropicRequest {
+            model: "claude-sonnet-4-5".into(),
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: "hi".into(),
+            }],
+            max_tokens: 16,
+            temperature: 0.0,
+            system: Vec::new(),
+        };
+        let json = serde_json::to_string(&body).unwrap();
+        assert!(!json.contains("system"), "empty system field leaked into JSON: {}", json);
+    }
+
+    /// Live smoke test against the real Anthropic API.
+    /// Skipped silently when `ANTHROPIC_API_KEY` is unset — so `cargo test`
+    /// stays green for everyone, but the moment you set the key locally
+    /// you get a 1-second confirmation that the body shape, headers, and
+    /// response parser all line up.
+    ///
+    /// Run with:
+    ///   ANTHROPIC_API_KEY=sk-ant-... cargo test --release anthropic_live -- --nocapture
+    #[tokio::test]
+    async fn anthropic_live_roundtrip() {
+        let key = match std::env::var("ANTHROPIC_API_KEY") {
+            Ok(k) if !k.is_empty() => k,
+            _ => {
+                eprintln!("(skipped — ANTHROPIC_API_KEY not set)");
+                return;
+            }
+        };
+
+        let settings = ModelSettings {
+            provider: "anthropic".into(),
+            model: "claude-sonnet-4-5".into(),
+            url: "https://api.anthropic.com".into(),
+            api_key: key,
+        };
+        let messages = vec![LlmMessage {
+            role: "user".into(),
+            content: "Reply with the single word: pong".into(),
+        }];
+
+        let result = llm_call(
+            &settings,
+            "You are a terse test responder.",
+            &messages,
+            32,
+            0.0,
+        ).await;
+
+        match result {
+            Ok(reply) => {
+                eprintln!("anthropic reply: {:?}", reply);
+                assert!(!reply.trim().is_empty(), "Anthropic returned an empty reply");
+                // Be lenient — model might say "pong" with extra whitespace,
+                // a period, or quotes. Just check the substring.
+                assert!(
+                    reply.to_lowercase().contains("pong"),
+                    "expected 'pong' in reply, got: {:?}",
+                    reply,
+                );
+            }
+            Err(e) => panic!("Anthropic call failed: {}", e),
+        }
     }
 }

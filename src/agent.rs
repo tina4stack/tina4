@@ -61,6 +61,27 @@ pub struct ChatMessage {
     pub agent: Option<String>,  // which agent generated this
 }
 
+// ── Thread metadata ──────────────────────────────────────────────────
+//
+// A "thread" is a sustained conversation with the supervisor. Messages
+// already carry `thread_id`; this struct adds the human-facing
+// metadata (title, archive flag, timestamps) that doesn't fit on each
+// message and needs to outlive empty-thread states.
+//
+// Stored at `.tina4/chat/threads.json` as an array. message_count and
+// status_hint are computed on-demand from history.json at /threads
+// enumeration time — they're not stored, so they can't go stale.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadMeta {
+    pub id: String,
+    pub title: String,
+    pub created_at: String,
+    pub last_message_at: String,
+    #[serde(default)]
+    pub archived: bool,
+}
+
 // ── Escalation tracking ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -632,6 +653,92 @@ pub fn load_history(project_dir: &Path) -> Vec<ChatMessage> {
     } else {
         Vec::new()
     }
+}
+
+// ── Thread persistence ────────────────────────────────────────────────
+
+/// Load thread metadata from `.tina4/chat/threads.json`. Missing file
+/// is not an error — returns an empty vec so callers don't have to
+/// special-case "first run".
+pub fn load_threads(project_dir: &Path) -> Vec<ThreadMeta> {
+    let path = project_dir.join(".tina4").join("chat").join("threads.json");
+    if let Ok(s) = fs::read_to_string(&path) {
+        serde_json::from_str(&s).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Write the full threads list back to `.tina4/chat/threads.json`.
+pub fn save_threads(project_dir: &Path, threads: &[ThreadMeta]) {
+    let path = project_dir.join(".tina4").join("chat").join("threads.json");
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(s) = serde_json::to_string_pretty(threads) {
+        let _ = fs::write(&path, s);
+    }
+}
+
+/// Insert-or-update a thread record. Called from /chat whenever a
+/// message lands on a thread_id — so the metadata file stays in sync
+/// even if the SPA forgets to POST /threads first (lazy creation).
+/// Returns the resulting ThreadMeta so the caller can broadcast it.
+pub fn upsert_thread(project_dir: &Path, thread_id: &str, fallback_title: &str) -> ThreadMeta {
+    let mut threads = load_threads(project_dir);
+    let now = chrono_now();
+    if let Some(t) = threads.iter_mut().find(|t| t.id == thread_id) {
+        t.last_message_at = now.clone();
+        let result = t.clone();
+        save_threads(project_dir, &threads);
+        return result;
+    }
+    let meta = ThreadMeta {
+        id: thread_id.to_string(),
+        title: if fallback_title.is_empty() { "New thread".into() }
+               else { truncate_title(fallback_title) },
+        created_at: now.clone(),
+        last_message_at: now,
+        archived: false,
+    };
+    threads.push(meta.clone());
+    save_threads(project_dir, &threads);
+    meta
+}
+
+/// Trim user input down to a sidebar-friendly title. We cut at 60
+/// characters, prefer a word boundary, and strip newlines so the
+/// sidebar row stays one line tall.
+fn truncate_title(s: &str) -> String {
+    let cleaned: String = s.lines().next().unwrap_or("").trim().to_string();
+    if cleaned.chars().count() <= 60 {
+        return cleaned;
+    }
+    let cut: String = cleaned.chars().take(60).collect();
+    // Back off to the last space so we don't slice mid-word.
+    match cut.rfind(' ') {
+        Some(i) if i > 30 => format!("{}…", &cut[..i]),
+        _ => format!("{}…", cut),
+    }
+}
+
+/// Status badge for the sidebar — derived fresh from the last message
+/// on each thread enumeration so we don't have to track it explicitly:
+///   - "needs_input" — last assistant message is a planner output
+///     (user must approve or revise) OR ends with a question mark
+///   - "error" — last assistant message starts with the error sentinel
+///   - "done" — last assistant message is a normal completion
+///   - "idle" — no messages, or last message was from the user (we're
+///     not actively running here, the user just hasn't sent yet OR
+///     they posted and then closed the tab before a response arrived)
+pub fn compute_thread_status(messages: &[&ChatMessage]) -> &'static str {
+    let Some(last) = messages.last() else { return "idle"; };
+    if last.role != "assistant" { return "idle"; }
+    if last.agent.as_deref() == Some("planner") { return "needs_input"; }
+    let trimmed = last.content.trim_end();
+    if trimmed.ends_with('?') { return "needs_input"; }
+    if trimmed.starts_with("Error:") || trimmed.starts_with("✗") { return "error"; }
+    "done"
 }
 
 // ── Defensive file writes for coder agent output ──────────────────────
@@ -1628,6 +1735,14 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                     agent: None,
                 };
                 save_message(&project_dir, &user_msg);
+
+                // Lazy-upsert the thread record so it appears in the
+                // sidebar even if the SPA forgot to POST /threads first.
+                // Title falls back to the user's first message; subsequent
+                // turns only bump last_message_at.
+                if let Some(tid) = chat_req.thread_id.as_deref() {
+                    upsert_thread(&project_dir, tid, &chat_req.message);
+                }
 
                 // SSE response headers
                 let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\nX-Accel-Buffering: no\r\n\r\n";
@@ -2637,9 +2752,136 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                         let _ = stream.write_all(resp.as_bytes()).await;
                     }
                 }
+            } else if first_line.starts_with("GET /threads/") && first_line.contains("/messages") {
+                // GET /threads/{id}/messages — full history scoped to one
+                // thread. Cheap; just filters history.json by thread_id.
+                let path_segment = first_line.split_whitespace().nth(1).unwrap_or("/");
+                let id = path_segment
+                    .trim_start_matches("/threads/")
+                    .trim_end_matches("/messages")
+                    .trim_end_matches('/')
+                    .to_string();
+                let history = load_history(&project_dir);
+                let scoped: Vec<&ChatMessage> = history.iter()
+                    .filter(|m| m.thread_id.as_deref() == Some(id.as_str()))
+                    .collect();
+                let body = serde_json::to_string(&scoped).unwrap_or_else(|_| "[]".into());
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            } else if first_line.starts_with("GET /threads") {
+                // GET /threads — list all threads with computed
+                // message_count + status_hint. The SPA sidebar polls
+                // (or just calls on demand) to keep badges fresh.
+                let threads = load_threads(&project_dir);
+                let history = load_history(&project_dir);
+                #[derive(Serialize)]
+                struct ThreadListItem<'a> {
+                    #[serde(flatten)]
+                    meta: &'a ThreadMeta,
+                    message_count: usize,
+                    status_hint: &'static str,
+                }
+                let items: Vec<ThreadListItem> = threads.iter().map(|t| {
+                    let msgs: Vec<&ChatMessage> = history.iter()
+                        .filter(|m| m.thread_id.as_deref() == Some(t.id.as_str()))
+                        .collect();
+                    ThreadListItem {
+                        meta: t,
+                        message_count: msgs.len(),
+                        status_hint: compute_thread_status(&msgs),
+                    }
+                }).collect();
+                let body = serde_json::to_string(&items).unwrap_or_else(|_| "[]".into());
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            } else if first_line.starts_with("POST /threads") && !first_line.contains("/messages") {
+                // POST /threads — create a new thread record. Body
+                // is `{"title": "..."}` (optional; auto-titled later
+                // on first message if absent). Returns the full
+                // ThreadMeta so the SPA can switch to it immediately.
+                let body_start = request.find("\r\n\r\n").unwrap_or(n) + 4;
+                let body_str = &request[body_start..];
+                #[derive(Deserialize, Default)]
+                struct CreateReq {
+                    #[serde(default)]
+                    title: Option<String>,
+                    #[serde(default)]
+                    id: Option<String>,
+                }
+                let req: CreateReq = serde_json::from_str(body_str).unwrap_or_default();
+                let id = req.id.unwrap_or_else(|| format!(
+                    "t-{:x}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default().as_millis(),
+                ));
+                let title = req.title.unwrap_or_default();
+                let meta = upsert_thread(&project_dir, &id, &title);
+                let body = serde_json::to_string(&meta).unwrap_or_default();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            } else if first_line.starts_with("PATCH /threads/") {
+                // PATCH /threads/{id} — rename or archive. Body is
+                // a partial: `{"title": "..."}` and/or `{"archived": true}`.
+                // No-ops are accepted so the SPA can blast updates
+                // without checking the current state first.
+                let path_segment = first_line.split_whitespace().nth(1).unwrap_or("/");
+                let id = path_segment.trim_start_matches("/threads/")
+                    .trim_end_matches('/').to_string();
+                let body_start = request.find("\r\n\r\n").unwrap_or(n) + 4;
+                let body_str = &request[body_start..];
+                #[derive(Deserialize, Default)]
+                struct PatchReq {
+                    #[serde(default)]
+                    title: Option<String>,
+                    #[serde(default)]
+                    archived: Option<bool>,
+                }
+                let req: PatchReq = serde_json::from_str(body_str).unwrap_or_default();
+                let mut threads = load_threads(&project_dir);
+                let mut updated: Option<ThreadMeta> = None;
+                if let Some(t) = threads.iter_mut().find(|t| t.id == id) {
+                    if let Some(title) = req.title {
+                        t.title = truncate_title(&title);
+                    }
+                    if let Some(archived) = req.archived {
+                        t.archived = archived;
+                    }
+                    updated = Some(t.clone());
+                }
+                if updated.is_some() {
+                    save_threads(&project_dir, &threads);
+                }
+                match updated {
+                    Some(meta) => {
+                        let body = serde_json::to_string(&meta).unwrap_or_default();
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                            body.len(), body
+                        );
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                    }
+                    None => {
+                        let body = r#"{"error":"thread not found"}"#;
+                        let resp = format!(
+                            "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                            body.len(), body
+                        );
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                    }
+                }
             } else if first_line.starts_with("OPTIONS") {
                 // CORS preflight
-                let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nAccess-Control-Max-Age: 86400\r\n\r\n";
+                let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, PATCH, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nAccess-Control-Max-Age: 86400\r\n\r\n";
                 let _ = stream.write_all(resp.as_bytes()).await;
             } else {
                 let resp = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";

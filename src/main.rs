@@ -280,12 +280,18 @@ fn main() {
             // new migration file, roll back the most recent batch, or
             // print status. Default (none of the above) runs all
             // pending migrations.
+            //
+            // All four framework CLIs (Python, PHP, Ruby, Node) use the
+            // COLON FORM natively: migrate:create, migrate:rollback,
+            // migrate:status. Sending --create as a flag silently does
+            // nothing — the language CLI then treats "--create" as the
+            // migrations directory path and reports "no migrations found."
             let args = if let Some(desc) = create {
-                vec!["migrate".into(), "--create".into(), desc]
+                vec!["migrate:create".into(), desc]
             } else if rollback {
-                vec!["migrate".into(), "--rollback".into()]
+                vec!["migrate:rollback".into()]
             } else if status {
-                vec!["migrate".into(), "--status".into()]
+                vec!["migrate:status".into()]
             } else {
                 vec!["migrate".into()]
             };

@@ -571,13 +571,34 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
         port.to_string().yellow()
     );
 
-    let mut server = match start_language_server(&info, port, host) {
-        Some(child) => child,
+    // Spawn the first language server.
+    let initial_child = match start_language_server(&info, port, host) {
+        Some(c) => c,
         None => {
             eprintln!("{} Failed to start server", icon_fail().red());
             std::process::exit(1);
         }
     };
+
+    // ── Respawn coordination ───────────────────────────────────────
+    // The watcher (when it sees a code file change like .py / .env)
+    // signals: kill the child + set "respawned_by_us" so the main
+    // loop knows the exit was intentional, not a crash. After respawn
+    // the watcher also POSTs the usual /__dev/api/reload so the
+    // browser refresh polling kicks in once the new child is healthy.
+    //
+    // Why a respawn instead of in-process reload: Python caches
+    // imported modules in sys.modules, so the framework's _auto_discover
+    // can pick up NEW files but cannot re-execute modified ones. Every
+    // AI edit to an existing route silently has no effect until the
+    // process restarts. importlib.reload() is unsafe (stale handlers,
+    // in-flight requests, closure state). A clean child respawn is
+    // 1-2s of downtime in exchange for guaranteed correctness.
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let mut current_child = initial_child;
+    let respawn_requested = Arc::new(AtomicBool::new(false));
 
     // Give the server a moment to bind, then open browser.
     //
@@ -603,17 +624,17 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
 
     // File watcher — the Rust CLI owns all file watching. On change it:
     //   1. Compiles SCSS (if src/scss/ exists)
-    //   2. POSTs /__dev/api/reload to the framework server
-    //   3. The framework updates its mtime counter
-    //   4. The browser's polling script detects the change and reloads
-    // No framework-internal watchers — clean separation of concerns.
+    //   2. For .py/.env (code) → kills child to trigger respawn
+    //   3. For .css/.scss/.twig/.html (assets) → POSTs /__dev/api/reload
+    //   4. After either, browser reload signal goes out via the
+    //      framework's WebSocket / mtime endpoint
     match info.language.as_str() {
         "tina4js" => println!(
             "{} Vite HMR active — press Ctrl+C to stop",
             icon_eye().green()
         ),
         _ => println!(
-            "{} File watcher active — press Ctrl+C to stop",
+            "{} File watcher active (code changes → respawn, assets → reload) — press Ctrl+C to stop",
             icon_eye().green()
         ),
     }
@@ -627,18 +648,68 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
         });
     }
 
-    // File change watcher — POSTs to /__dev/api/reload on the framework server
+    // File change watcher — gets a shared atomic flag it can set on
+    // code-file changes. Main polls the flag below.
     if info.language != "tina4js" {
         let reload_port = port;
+        let watcher_flag = Arc::clone(&respawn_requested);
         std::thread::spawn(move || {
-            watcher::watch_and_reload(reload_port);
+            watcher::watch_and_reload(reload_port, Some(watcher_flag));
         });
     }
 
-    // Block until the language server exits (Ctrl+C kills it, which unblocks us).
-    match server.wait() {
-        Ok(status) => {
-            if !status.success() {
+    // ── Respawn loop ───────────────────────────────────────────────
+    // Polls the current child every 250ms with try_wait() AND checks
+    // the respawn_requested flag. If the flag is set, kill the child
+    // we own and spin up a fresh one. If the child exits naturally
+    // (non-zero), surface the error and bail.
+    let info_clone = info.clone();
+    let host_clone = host.to_string();
+    loop {
+        // Inner poll loop — exits when either:
+        //   (a) child exited naturally (status returned by try_wait)
+        //   (b) watcher set respawn_requested → we kill + break
+        let exit_cause: ExitCause = loop {
+            // Watcher signalled? Kill our child and trigger respawn.
+            if respawn_requested.swap(false, Ordering::SeqCst) {
+                let _ = current_child.kill();
+                let _ = current_child.wait(); // reap zombie
+                break ExitCause::Respawn;
+            }
+            // Child exited on its own?
+            match current_child.try_wait() {
+                Ok(Some(status)) => break ExitCause::Exited(status),
+                Ok(None) => { /* still running */ }
+                Err(e) => break ExitCause::WaitError(e),
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        };
+
+        match exit_cause {
+            ExitCause::Respawn => {
+                println!("{} Respawning {} after code change…",
+                    icon_play().green(), info_clone.cli_name().cyan());
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                match start_language_server(&info_clone, port, &host_clone) {
+                    Some(new_child) => {
+                        current_child = new_child;
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        let body = r#"{"type":"reload","file":"<respawn>"}"#;
+                        let url = format!("http://127.0.0.1:{}/__dev/api/reload", port);
+                        let _ = watcher::ureq_post(&url, body);
+                        println!("{} Server ready: {}", icon_ok().green(),
+                            format!("http://localhost:{}", port).cyan());
+                        // Loop back — keep polling the new child
+                    }
+                    None => {
+                        eprintln!("{} Respawn failed — child wouldn't start. Fix the error and re-run.",
+                            icon_fail().red());
+                        std::process::exit(1);
+                    }
+                }
+            }
+            ExitCause::Exited(status) if status.success() => break,
+            ExitCause::Exited(status) => {
                 let code = status.code().unwrap_or(-1);
                 eprintln!(
                     "\n{} Server process exited with code {}. Check logs/error.log or your PHP/Python error log for details.",
@@ -647,12 +718,18 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
                 );
                 std::process::exit(code);
             }
-        }
-        Err(e) => {
-            eprintln!("\n{} Server process error: {}", icon_fail().red(), e);
-            std::process::exit(1);
+            ExitCause::WaitError(e) => {
+                eprintln!("\n{} Server process error: {}", icon_fail().red(), e);
+                std::process::exit(1);
+            }
         }
     }
+}
+
+enum ExitCause {
+    Respawn,
+    Exited(std::process::ExitStatus),
+    WaitError(std::io::Error),
 }
 
 /// Read a boolean-valued variable from the given `.env` file.

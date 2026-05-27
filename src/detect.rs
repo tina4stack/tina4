@@ -1,6 +1,7 @@
 use std::path::Path;
 
 /// Information about a detected Tina4 project.
+#[derive(Clone)]
 pub struct ProjectInfo {
     pub language: String,
     #[allow(dead_code)]

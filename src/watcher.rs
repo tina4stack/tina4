@@ -1,12 +1,12 @@
 use colored::Colorize;
 use notify::event::{EventKind, ModifyKind};
-use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, Event, PollWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::console::icon_fail;
+use crate::console::{icon_eye, icon_fail};
 
 /// Path fragments whose events we always ignore. Server-side writes
 /// to these locations cause reload loops on some filesystems (notably
@@ -76,26 +76,71 @@ fn file_mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
-/// Watch src/, migrations/, .env for changes and POST /__dev/api/reload
-/// to the framework server so the browser reloads. Blocks forever.
-pub fn watch_and_reload(port: u16) {
-    let (tx, rx) = mpsc::channel();
-    let config = Config::default().with_poll_interval(Duration::from_secs(2));
+/// Atomic flag the watcher SETS when it detects a code-file change.
+/// Main's serve loop polls this flag (via try_wait + check) and, when
+/// it sees the flag set, kills the child it owns + respawns. Decouples
+/// the watcher from the child's lifecycle (the watcher doesn't need
+/// to own a reference to the child — it just shouts "restart please").
+type RespawnHandle = std::sync::Arc<std::sync::atomic::AtomicBool>;
 
-    let mut watcher: RecommendedWatcher =
-        Watcher::new(tx, config).expect("Failed to create watcher");
+fn is_code_change(file: &str) -> bool {
+    // Files that require a process restart because language runtimes
+    // cache modules in memory. CSS/SCSS/template changes go via the
+    // soft-reload POST instead — no respawn needed.
+    let lower = file.to_ascii_lowercase();
+    lower.ends_with(".py")
+        || lower.ends_with(".php")
+        || lower.ends_with(".rb")
+        || lower.ends_with(".ts")
+        || lower.ends_with(".js")
+        || lower.ends_with(".env")
+        || lower.ends_with("/.env")
+}
+
+/// Watch src/, migrations/, .env for changes. On code changes, kill
+/// the child process (main's respawn loop spins up a fresh one). On
+/// asset changes (CSS/SCSS/templates), POST /__dev/api/reload so the
+/// framework signals the browser to soft-reload. Blocks forever.
+pub fn watch_and_reload(port: u16, respawn: Option<RespawnHandle>) {
+    let (tx, rx) = mpsc::channel();
+    // Use PollWatcher instead of RecommendedWatcher (FSEvents on macOS)
+    // because FSEvents stops delivering events when the parent process
+    // is detached (setsid / start_new_session=True), which is exactly
+    // how the dev admin spawns tina4 serve from a Python subprocess.
+    // PollWatcher just stat()s every interval — works in every context,
+    // costs ~1s of latency per change.
+    let config = Config::default().with_poll_interval(Duration::from_secs(1));
+
+    let mut watcher: PollWatcher =
+        PollWatcher::new(tx, config).expect("Failed to create watcher");
 
     let dirs = ["src", "migrations"];
+    let mut watched_count = 0;
     for dir in &dirs {
         let p = Path::new(dir);
-        if p.exists() {
-            let _ = watcher.watch(p, RecursiveMode::Recursive);
+        // notify on macOS FSEvents needs absolute paths or paths
+        // resolvable from CWD. Canonicalize so we don't silently
+        // get a "no events from src" failure when the watcher
+        // subscribed to a path it can't see.
+        match p.canonicalize() {
+            Ok(abs) => match watcher.watch(&abs, RecursiveMode::Recursive) {
+                Ok(_) => {
+                    watched_count += 1;
+                    eprintln!("{} watching {}", icon_eye().cyan(), abs.display());
+                }
+                Err(e) => eprintln!("{} could not watch {}: {}", icon_fail().red(), abs.display(), e),
+            },
+            Err(_) => { /* dir doesn't exist; silently skip */ }
         }
     }
     // Watch .env file
     let env_path = Path::new(".env");
-    if env_path.exists() {
-        let _ = watcher.watch(env_path, RecursiveMode::NonRecursive);
+    if let Ok(abs) = env_path.canonicalize() {
+        let _ = watcher.watch(&abs, RecursiveMode::NonRecursive);
+    }
+    if watched_count == 0 {
+        eprintln!("{} watcher started but watching ZERO directories — file changes won't fire",
+            icon_fail().red());
     }
 
     // Track last known mtime per file so we can drop spurious events.
@@ -106,8 +151,13 @@ pub fn watch_and_reload(port: u16) {
     loop {
         match rx.recv() {
             Ok(Ok(event)) => {
+                // TEMP DEBUG: log every event before filtering
+                eprintln!("[watcher] event kind={:?} paths={:?}",
+                    event.kind,
+                    event.paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>());
                 // Layer 1+2+3: event-kind / path / extension filter
                 if !is_meaningful_event(&event) {
+                    eprintln!("[watcher]   ↳ filtered out as not meaningful");
                     continue;
                 }
 
@@ -137,27 +187,52 @@ pub fn watch_and_reload(port: u16) {
                     }
                 }
                 if !any_changed {
+                    eprintln!("[watcher]   ↳ no mtime change (or already seen)");
                     continue;
                 }
 
                 // Global debounce: coalesce bursts within 500ms
                 if last_reload.elapsed() < Duration::from_millis(500) {
+                    eprintln!("[watcher]   ↳ debounced ({}ms since last)", last_reload.elapsed().as_millis());
                     continue;
                 }
                 last_reload = Instant::now();
+                eprintln!("[watcher]   ↳ FIRING: file={}", changed_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default());
 
                 let file = changed_path
                     .map(|p| p.to_string_lossy().to_string())
                     .unwrap_or_default();
 
-                // Determine type: css for .css/.scss, reload for everything else
+                // Determine type: css for .css/.scss, code-change for
+                // .py/.php/.rb/.ts/.js/.env (triggers respawn),
+                // reload for everything else (templates, markdown).
+                let is_code = is_code_change(&file);
                 let reload_type = if file.ends_with(".css") || file.ends_with(".scss") {
                     "css"
+                } else if is_code {
+                    "code"
                 } else {
                     "reload"
                 };
 
-                // POST to the framework's reload endpoint
+                if is_code {
+                    if let Some(ref flag) = respawn {
+                        // Just signal — main polls the flag and does
+                        // the kill+respawn itself (it owns the child).
+                        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                        eprintln!("{} Code change in {} — signalling respawn",
+                            icon_eye().yellow(),
+                            file.replace('\\', "/"));
+                        // Don't POST /reload here — main's respawn loop
+                        // does that once the new child is up.
+                        continue;
+                    }
+                    // No respawn handle (tina4js or test) — fall through
+                    // to the POST so the old in-process reload path
+                    // still works.
+                }
+
+                // POST to the framework's reload endpoint (assets path)
                 let body = format!(
                     r#"{{"type":"{}","file":"{}"}}"#,
                     reload_type,
@@ -183,7 +258,9 @@ pub fn watch_and_reload(port: u16) {
 }
 
 /// Simple blocking HTTP POST using std::net (no external HTTP crate needed).
-fn ureq_post(url: &str, body: &str) -> Result<(), String> {
+/// Public so main's respawn loop can use it to fire a /reload signal
+/// after a successful child respawn.
+pub fn ureq_post(url: &str, body: &str) -> Result<(), String> {
     use std::io::{Read, Write};
     use std::net::TcpStream;
 
@@ -217,8 +294,8 @@ pub fn watch_scss(input_dir: &str, output_dir: &str, minify: bool) {
     let (tx, rx) = mpsc::channel();
     let config = Config::default().with_poll_interval(Duration::from_secs(2));
 
-    let mut watcher: RecommendedWatcher =
-        Watcher::new(tx, config).expect("Failed to create watcher");
+    let mut watcher: PollWatcher =
+        PollWatcher::new(tx, config).expect("Failed to create watcher");
 
     let input = Path::new(input_dir);
     if input.exists() {

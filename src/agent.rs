@@ -303,6 +303,19 @@ You are direct, practical, and efficient. You ask only what matters. You never e
 - When executing a plan, give clear progress updates: "Step 2 of 5 done. Moving to the login page..."
 - After completing work, summarize what was built in plain English
 
+## Default to the active file when the user is deictic
+
+If the user message references "this file", "this code", "the current file", "the open file", "what I'm looking at", "this function", "this class", "fix it", "explain it", or any similar pronoun-without-noun, DEFAULT TO THE ACTIVE FILE shown in the "ACTIVE FILE (open in editor)" context at the top of the message. Never ask "which file?" when an active file is in scope.
+
+Examples (with ACTIVE FILE: src/routes/contact.py provided):
+- "explain this file"        → explain src/routes/contact.py
+- "what does this do"        → describe src/routes/contact.py
+- "fix the bug here"         → debug src/routes/contact.py
+- "add error handling"       → modify src/routes/contact.py
+- "rename the function"      → edit a function in src/routes/contact.py
+
+Only ask "which file?" if NO active file is in context, AND the request is ambiguous about which file.
+
 ## CRITICAL: Gather Requirements First
 
 When a developer says they want to build something, DO NOT immediately create a plan. Instead:
@@ -345,9 +358,9 @@ You (WRONG):   {"action": "respond", "message": "Great, I'll set up a contact fo
 When the planner has just produced a plan (the previous turn's reply was a numbered list from the planner), the next user message is almost always a sign-off ("go", "ok", "yes", "looks good", "do it") OR a revision request.
 
 If sign-off: return execute_plan IMMEDIATELY. Do NOT respond with "I'm preparing to..." or "We will set up..." — that's noise. Skip narration, go straight to action:
-  {"action": "execute_plan", "delegate_to": "coder", "context": ".tina4/plans/<the-plan-filename>.md"}
+  {"action": "execute_plan", "delegate_to": "coder", "context": "plan/<the-plan-filename>.md"}
 
-The `context` for execute_plan MUST be the literal path to the plan file (e.g. ".tina4/plans/1779822543-plan.md"), NOT a description of the plan. If you don't know the exact filename, use ".tina4/plans/" (trailing slash) and the system will pick the most recent plan.
+The `context` for execute_plan MUST be the literal path to the plan file (e.g. "plan/1779822543-plan.md"), NOT a description of the plan. If you don't know the exact filename, use "plan/" (trailing slash) and the system will pick the most recent plan.
 
 If revision request: forward to planner via:
   {"action": "plan", "delegate_to": "planner", "context": "<original requirements> + <user's revisions>"}
@@ -363,7 +376,7 @@ You keep the big picture in mind:
 
 ## Rules
 1. Gather requirements before planning
-2. Always plan before coding — create plans in .tina4/plans/
+2. Always plan before coding — create plans in plan/
 3. Never reinvent what the framework provides
 4. Keep questions concise — max 3-4 per round
 5. If the developer provides a detailed spec upfront, skip questions and plan directly
@@ -432,6 +445,21 @@ Example:
 
     ("coder", r#"{"model":"thinking","temperature":0.1,"max_tokens":4096,"tools":["file_read","file_write"],"max_iterations":10}"#,
      r#"You are the Coder agent for Tina4 projects. Write code that follows the plan exactly.
+
+## CRITICAL: Verify your imports — they break the project
+
+After every Python file you write, the framework runs `python3 -c "import <module>"` and returns the result. If the response contains an `import_error` field, the file you just wrote has broken imports / references / class hierarchy. You MUST fix it immediately on your next turn — re-emit the file_write with corrected code. Do NOT proceed to the next file until the current one imports cleanly.
+
+Common hallucinations the verification catches:
+- `from tina4_python.orm import db` → `db` doesn't exist (use `from tina4_python.database import Database`)
+- `from tina4_python.core.validator import Validator` → module doesn't exist
+- `class Foo(model.Model)` → wrong base class (use `from tina4_python.orm import ORM; class Foo(ORM):`)
+- `fields.AutoField(primary_key=True)` → wrong field type (use `IntegerField(primary_key=True, auto_increment=True)`)
+- `from tina4_python import Tina4; app = Tina4()` → no Tina4 class exists (use `from tina4_python.core import run; run()`)
+- `template("foo.twig")` → never imported (use `from tina4_python.frond import Frond` then `Frond.render("foo.twig", data)`)
+- `from tina4_python import get, post` → these ARE re-exported from tina4_python, but the canonical import is `from tina4_python.core.router import get, post`
+
+When the verification returns `import_error: "ImportError: cannot import name 'X' from 'Y'"`, that means X is not in Y. Look it up properly OR call `file_read` on a known-good file in the project (e.g. app.py) to see how the real APIs are shaped before retrying.
 
 ## CRITICAL: File Structure
 
@@ -802,6 +830,178 @@ pub fn load_history(project_dir: &Path) -> Vec<ChatMessage> {
     }
 }
 
+// ── Recent failures context for the supervisor ────────────────────────
+//
+// Until now the supervisor was blind to what was actually breaking in
+// the project. It would ask the developer "what's the error?" when the
+// answer was right there in `.tina4/agent.log` (its OWN past write
+// failures) or `logs/error.log` (the framework's runtime errors). This
+// led to long back-and-forth loops where the supervisor would keep
+// asking diagnostic questions about an issue we already had perfect
+// machine-readable evidence for.
+//
+// `collect_recent_failures` tails both logs, filters to error-ish
+// lines, dedupes consecutive duplicates (a broken route hit 50 times
+// shows up once, not 50 times), and caps the output so it can't
+// blow the supervisor's context window on a project with thousands
+// of stale errors. The result is injected into the supervisor's USER
+// turn (NOT the cached system prompt) so prompt caching stays warm
+// even when the failure content changes call-to-call.
+
+const RECENT_FAILURES_MAX_BYTES: usize = 2048;
+const RECENT_FAILURES_PER_SOURCE: usize = 8;
+const ERROR_LOG_TAIL_LINES: usize = 200;
+
+/// Build a compact "RECENT FAILURES" block for the supervisor. Returns
+/// empty string when nothing interesting is in the recent window.
+///
+/// Sources (in priority order):
+///   - `.tina4/agent.log`   → lines tagged [write.import_failed],
+///                            [write.refused], [write.failed],
+///                            [write.backup_failed]. These are the
+///                            agent's own file-write breakages — most
+///                            actionable, almost always points at the
+///                            file the user was just discussing.
+///   - `logs/error.log`     → lines containing [ERROR. Framework
+///                            runtime errors: failed module loads,
+///                            route 500s, traceback heads.
+///   - `logs/tina4.log`     → fallback when error.log doesn't exist.
+///                            Filtered to [ERROR lines so we don't
+///                            flood with INFO noise.
+pub fn collect_recent_failures(project_dir: &Path) -> String {
+    let mut sections: Vec<String> = Vec::new();
+
+    // Agent-side failures from .tina4/agent.log
+    let agent_log = project_dir.join(".tina4").join("agent.log");
+    if let Ok(contents) = fs::read_to_string(&agent_log) {
+        let failures: Vec<String> = contents.lines()
+            .rev()
+            .filter(|line| {
+                line.contains("[write.import_failed]")
+                    || line.contains("[write.refused]")
+                    || line.contains("[write.failed]")
+                    || line.contains("[write.backup_failed]")
+            })
+            .take(RECENT_FAILURES_PER_SOURCE)
+            .map(|s| s.to_string())
+            .collect();
+        if !failures.is_empty() {
+            // Reverse back to chronological order for readability.
+            let lines: Vec<String> = failures.iter().rev()
+                .map(|l| format!("  [agent] {}", l))
+                .collect();
+            sections.push(format!("Agent file-write issues:\n{}", lines.join("\n")));
+        }
+    }
+
+    // Server-side errors — prefer error.log, fall back to tina4.log.
+    let error_log = project_dir.join("logs").join("error.log");
+    let tina4_log = project_dir.join("logs").join("tina4.log");
+    let log_path = if error_log.is_file() { Some(error_log) }
+                   else if tina4_log.is_file() { Some(tina4_log) }
+                   else { None };
+
+    if let Some(path) = log_path {
+        if let Ok(contents) = fs::read_to_string(&path) {
+            // Tail the file: take last N lines to bound memory + filter cost.
+            let lines: Vec<&str> = contents.lines().collect();
+            let tail_start = lines.len().saturating_sub(ERROR_LOG_TAIL_LINES);
+            let tail: &[&str] = &lines[tail_start..];
+
+            // Walk newest-to-oldest collecting ERROR lines, dedupe by
+            // "fingerprint" so a route blowing up 50 times shows once.
+            //
+            // Fingerprint strips:
+            //   1. Everything up to and including "[ERROR…] " — that's
+            //      the timestamp + level bracket.
+            //   2. An optional leading "[xxxxxxxx] " — Tina4 prepends a
+            //      request id to per-request log lines, and we'd see
+            //      different ids for what's logically the same error.
+            // What remains is the actual error message text — stable
+            // across recurrences, so HashSet dedupes correctly.
+            let mut seen_fingerprints: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut errors: Vec<String> = Vec::new();
+            for line in tail.iter().rev() {
+                if !line.contains("[ERROR") { continue; }
+                let fp = match line.find("[ERROR") {
+                    Some(i) => {
+                        let after = &line[i..];
+                        let body = match after.find("] ") {
+                            Some(j) => &after[j+2..],
+                            None => after,
+                        };
+                        let body = body.trim_start();
+                        // Strip leading "[<request-id>] " if present.
+                        if body.starts_with('[') {
+                            match body.find("] ") {
+                                Some(k) => body[k+2..].to_string(),
+                                None => body.to_string(),
+                            }
+                        } else {
+                            body.to_string()
+                        }
+                    }
+                    None => line.to_string(),
+                };
+                if seen_fingerprints.insert(fp) {
+                    errors.push(line.to_string());
+                    if errors.len() >= RECENT_FAILURES_PER_SOURCE { break; }
+                }
+            }
+            if !errors.is_empty() {
+                let formatted: Vec<String> = errors.iter().rev()
+                    .map(|l| format!("  [server] {}", l))
+                    .collect();
+                sections.push(format!("Server runtime errors:\n{}", formatted.join("\n")));
+            }
+        }
+    }
+
+    if sections.is_empty() {
+        return String::new();
+    }
+
+    let body = sections.join("\n\n");
+    let truncated = if body.len() > RECENT_FAILURES_MAX_BYTES {
+        // Cut at a line boundary so we don't leave a fragmented line.
+        let cut = body[..RECENT_FAILURES_MAX_BYTES].rfind('\n')
+            .unwrap_or(RECENT_FAILURES_MAX_BYTES);
+        format!("{}\n  …(truncated, {} more bytes)", &body[..cut], body.len() - cut)
+    } else {
+        body
+    };
+
+    format!("RECENT FAILURES (latest entries from project logs):\n{}\n", truncated)
+}
+
+/// Static guidance appended to the supervisor's system prompt at call
+/// time, teaching it how to interpret the RECENT FAILURES block.
+///
+/// Kept as a runtime concat so existing projects (which scaffolded
+/// supervisor/system.md before this feature shipped) get the rule
+/// automatically — no need to delete .tina4/agents/supervisor/system.md
+/// to re-scaffold. The result is the same string every call, so prompt
+/// caching still hits.
+pub const SUPERVISOR_LOG_AWARENESS: &str = r#"
+
+## Recent failures context — use it, don't ask about it
+
+Before each turn you may see a block prefixed with `RECENT FAILURES (latest entries from project logs):`. This is real, machine-collected evidence of what's currently broken in the developer's project:
+
+- `[agent]` lines come from `.tina4/agent.log` — your own past file writes that broke. `[write.import_failed]` means Python couldn't import a file you (or the coder) just wrote — almost always a hallucinated framework API. `[write.refused]` means the truncation guard rejected a suspiciously short write.
+- `[server]` lines come from `logs/error.log` or `logs/tina4.log` — framework runtime errors. `Failed to load <file>` = startup import error. `Route error: <name> is not defined` = a missing import inside a route. Tracebacks have the file + line right there.
+
+How to use the block:
+
+1. NEVER ask the user "what's the error?" when the block already contains one. They will be annoyed. The whole point of this context is so you don't have to.
+2. If the user's question relates to a file mentioned in the failures, lead with what you can see: "I can see `src/orm/Contact.py` is failing to load because `tina4_python.orm.model` has no attribute `Model` — let me fix it."
+3. If you're confident the failure is fixable (import wrong, typo, missing decorator) and the user has expressed any frustration or asked you to fix things, delegate to the coder immediately — don't ask for permission for trivial fixes.
+4. If the block is empty or absent, the system is healthy from a logging perspective. Don't fabricate failures.
+5. Same error repeated many times = the user is hitting it over and over. High priority.
+
+The block is INFORMATIONAL CONTEXT, not the user's message. Don't reply to it; reply to the user's actual question, informed by it.
+"#;
+
 // ── Thread persistence ────────────────────────────────────────────────
 
 /// Load thread metadata from `.tina4/chat/threads.json`. Missing file
@@ -957,6 +1157,12 @@ pub struct WriteStats {
     pub old_lines: usize,
     pub new_lines: usize,
     pub backup_path: Option<String>,
+    /// Set when post-write `python3 -c "import <module>"` failed.
+    /// The write itself succeeded (file is on disk) but the module
+    /// can't be imported — usually a hallucinated framework API.
+    /// Surfaced via SSE so the user sees the error AND the next
+    /// supervisor turn has it as context to fix.
+    pub import_error: Option<String>,
 }
 
 /// Append a structured line to `.tina4/agent.log` AND echo to stderr.
@@ -1036,20 +1242,90 @@ pub fn agent_write_file(project_dir: &Path, rel_path: &str, content: &str) -> Re
         msg
     })?;
 
-    let stats = WriteStats {
-        path: rel_path.to_string(),
-        old_size, new_size,
-        old_lines, new_lines,
-        backup_path: backup_path.clone(),
-    };
-
     let bak = backup_path.as_deref().unwrap_or("(no prior file)");
     agent_log(project_dir, "write.ok", &format!(
         "{} ({}B/{}L → {}B/{}L, backup: {})",
         rel_path, old_size, old_lines, new_size, new_lines, bak,
     ));
 
-    Ok(stats)
+    // Post-write import verification — for Python files under src/,
+    // try importing the module. Catches hallucinated framework APIs
+    // immediately instead of letting them propagate to runtime where
+    // they'd surface as a 500 the user only finds by hitting the URL.
+    let import_error = verify_python_import(project_dir, rel_path);
+    if let Some(ref err) = import_error {
+        agent_log(project_dir, "write.import_failed",
+            &format!("{} ({})", rel_path, err));
+    }
+
+    Ok(WriteStats {
+        path: rel_path.to_string(),
+        old_size, new_size,
+        old_lines, new_lines,
+        backup_path,
+        import_error,
+    })
+}
+
+/// Run `python3 -c "import <module>"` against a freshly-written
+/// Python file. Returns Some(error) on import failure, None on
+/// success. Skips non-Python files, files outside src/, and
+/// __init__.py / test_ / conftest.py (different loading patterns).
+fn verify_python_import(project_dir: &Path, rel_path: &str) -> Option<String> {
+    if !rel_path.ends_with(".py") || !rel_path.starts_with("src/") {
+        return None;
+    }
+    let basename = Path::new(rel_path).file_name()?.to_str()?;
+    if matches!(basename, "__init__.py" | "conftest.py") || basename.starts_with("test_") {
+        return None;
+    }
+    let module = rel_path.trim_end_matches(".py").replace('/', ".");
+    let venv_py = project_dir.join(".venv").join("bin").join("python3");
+    if !venv_py.exists() {
+        return None;
+    }
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+    let mut child = Command::new(&venv_py)
+        .args(["-c", &format!("import {}", module)])
+        .current_dir(project_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    // 5-second budget — generous for a single import.
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait().ok()? {
+            Some(status) => {
+                if status.success() { return None; }
+                use std::io::Read;
+                let mut stderr = String::new();
+                if let Some(mut s) = child.stderr.take() {
+                    let _ = s.read_to_string(&mut stderr);
+                }
+                let stderr = stderr.trim();
+                if stderr.is_empty() {
+                    return Some(format!("import failed (exit {:?})", status.code()));
+                }
+                // Last "ErrorType: message" line — that's the actual error.
+                for line in stderr.lines().rev() {
+                    let t = line.trim();
+                    if t.contains(':') && !t.starts_with(char::is_whitespace) {
+                        return Some(t.to_string());
+                    }
+                }
+                return Some(stderr.lines().last().unwrap_or("").trim().to_string());
+            }
+            None => {
+                if start.elapsed() > Duration::from_secs(5) {
+                    let _ = child.kill();
+                    return Some("verification timed out (>5s)".to_string());
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
 }
 
 /// Fetch the first available model from an Ollama-compatible server.
@@ -1852,6 +2128,70 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                     body.len(), body
                 );
                 let _ = stream.write_all(resp.as_bytes()).await;
+            } else if first_line.starts_with("GET /logs") {
+                // Tail recent logs for the SPA. Query params:
+                //   name = "agent" | "error" | "info" | "failures"
+                //       agent    → .tina4/agent.log
+                //       error    → logs/error.log
+                //       info     → logs/tina4.log
+                //       failures → same compact block the supervisor sees
+                //                  (mix of agent + server, deduped, capped)
+                //   lines = number of trailing lines (default 100, max 500)
+                // Defaults: name=failures, lines=100. Empty/missing file
+                // returns 200 with empty `content` — easier for the SPA
+                // than handling a 404 specifically.
+                let query = first_line.split_whitespace().nth(1).unwrap_or("");
+                let mut name = "failures".to_string();
+                let mut lines: usize = 100;
+                if let Some(qpos) = query.find('?') {
+                    for kv in query[qpos+1..].split('&') {
+                        if let Some(eq) = kv.find('=') {
+                            let k = &kv[..eq];
+                            let v = &kv[eq+1..];
+                            match k {
+                                "name" => name = v.to_string(),
+                                "lines" => {
+                                    if let Ok(n) = v.parse::<usize>() {
+                                        lines = n.clamp(1, 500);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+
+                let content = match name.as_str() {
+                    "failures" => collect_recent_failures(&project_dir),
+                    other => {
+                        let path = match other {
+                            "agent" => project_dir.join(".tina4").join("agent.log"),
+                            "error" => project_dir.join("logs").join("error.log"),
+                            "info"  => project_dir.join("logs").join("tina4.log"),
+                            _ => project_dir.join("logs").join("tina4.log"),
+                        };
+                        match fs::read_to_string(&path) {
+                            Ok(s) => {
+                                let all: Vec<&str> = s.lines().collect();
+                                let start = all.len().saturating_sub(lines);
+                                all[start..].join("\n")
+                            }
+                            Err(_) => String::new(),
+                        }
+                    }
+                };
+
+                let payload = serde_json::json!({
+                    "name": name,
+                    "lines": lines,
+                    "content": content,
+                });
+                let body = serde_json::to_string(&payload).unwrap_or_default();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
             } else if first_line.starts_with("GET /thoughts") {
                 let thoughts = load_thoughts(&project_dir);
                 let body = serde_json::to_string(&thoughts).unwrap_or_default();
@@ -1894,12 +2234,27 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
 
                 // Parse request
                 #[derive(Deserialize)]
+                struct ActiveFile {
+                    path: String,
+                    #[serde(default)]
+                    language: String,
+                    #[serde(default)]
+                    content: String,
+                }
+                #[derive(Deserialize)]
                 struct ChatRequest {
                     message: String,
                     #[serde(default)]
                     thread_id: Option<String>,
                     #[serde(default)]
                     settings: Option<ChatSettings>,
+                    /// Currently-open file in the browser editor. When
+                    /// present, lets the supervisor resolve deictic
+                    /// phrases ("this file", "this code", "the current
+                    /// file") without asking. SPA sends path+content
+                    /// (or a placeholder if the file is too large).
+                    #[serde(default)]
+                    active_file: Option<ActiveFile>,
                 }
 
                 let chat_req: ChatRequest = match serde_json::from_str(body_str) {
@@ -1994,8 +2349,22 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                     resolve_agent_model(model_field, settings)
                 }
 
-                // Step 1: Call supervisor with conversation history + project context
-                let supervisor_prompt = supervisor.map(|s| s.system_prompt.as_str()).unwrap_or("");
+                // Step 1: Call supervisor with conversation history + project context.
+                //
+                // The system prompt is the loaded supervisor/system.md PLUS a
+                // static "log awareness" suffix appended at runtime. Suffix
+                // teaches the supervisor how to read the RECENT FAILURES
+                // block we inject below. Doing it at runtime (instead of
+                // editing system.md) means existing projects benefit
+                // immediately on next binary upgrade — no re-scaffold
+                // required. The suffix is deterministic, so prompt
+                // caching still hits across calls.
+                let supervisor_prompt_owned = format!(
+                    "{}{}",
+                    supervisor.map(|s| s.system_prompt.as_str()).unwrap_or(""),
+                    SUPERVISOR_LOG_AWARENESS,
+                );
+                let supervisor_prompt = supervisor_prompt_owned.as_str();
 
                 // Build message history — last 20 messages for context
                 let history = load_history(&project_dir);
@@ -2005,18 +2374,18 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
 
                 let mut msgs: Vec<LlmMessage> = Vec::new();
 
-                // Add project context as first system-like message
-                let plans_dir = project_dir.join(".tina4").join("plans");
-                let latest_plan = if plans_dir.exists() {
-                    fs::read_dir(&plans_dir).ok()
-                        .and_then(|entries| entries
-                            .filter_map(|e| e.ok())
-                            .filter(|e| e.path().extension().map_or(false, |ext| ext == "md"))
-                            .max_by_key(|e| e.metadata().ok().and_then(|m| m.modified().ok())))
-                        .and_then(|entry| fs::read_to_string(entry.path()).ok())
-                } else {
-                    None
-                };
+                // Add project context as first system-like message.
+                // Look in plan/ (canonical) AND plan/ (legacy)
+                // so older projects still surface their plans.
+                let latest_plan = ["plan", ".tina4/plans"]
+                    .iter()
+                    .map(|d| project_dir.join(d))
+                    .filter(|d| d.exists())
+                    .flat_map(|d| fs::read_dir(&d).into_iter().flatten())
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.path().extension().map_or(false, |ext| ext == "md"))
+                    .max_by_key(|e| e.metadata().ok().and_then(|m| m.modified().ok()))
+                    .and_then(|entry| fs::read_to_string(entry.path()).ok());
 
                 if let Some(ref plan) = latest_plan {
                     // Give supervisor awareness of the current plan
@@ -2039,7 +2408,59 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                         content,
                     });
                 }
-                msgs.push(LlmMessage { role: "user".into(), content: chat_req.message.clone() });
+                // Build the user turn — three layers of context above the
+                // user's actual message, in this order (top to bottom):
+                //
+                //   1. RECENT FAILURES block (if any) — what's broken
+                //      right now according to the logs.
+                //   2. ACTIVE FILE block (if SPA sent one) — what file
+                //      is open in the editor, for deictic resolution
+                //      of "this file" / "this code" / etc.
+                //   3. USER MESSAGE — the actual prompt.
+                //
+                // Failures go FIRST because they're the most volatile
+                // and most likely to change the supervisor's response
+                // shape (it might delegate to coder instead of asking).
+                // Active file goes second so the supervisor knows what
+                // the user is looking at when interpreting "fix this".
+                let active_file_block = match &chat_req.active_file {
+                    Some(af) if !af.path.is_empty() => {
+                        // Inline the file content unless it's the
+                        // "too large" placeholder marker (SPA caps
+                        // at 60KB and sends a sentinel instead).
+                        if af.content.starts_with("<too large to inline") {
+                            Some(format!(
+                                "ACTIVE FILE (open in editor): {}\n(file too large to inline — use file_read tool if needed)",
+                                af.path,
+                            ))
+                        } else {
+                            Some(format!(
+                                "ACTIVE FILE (open in editor): {}\n```{}\n{}\n```",
+                                af.path, af.language, af.content,
+                            ))
+                        }
+                    }
+                    _ => None,
+                };
+
+                let failures_block = collect_recent_failures(&project_dir);
+
+                let mut user_turn = String::new();
+                if !failures_block.is_empty() {
+                    user_turn.push_str(&failures_block);
+                    user_turn.push('\n');
+                }
+                if let Some(af) = active_file_block {
+                    user_turn.push_str(&af);
+                    user_turn.push_str("\n\n");
+                }
+                if user_turn.is_empty() {
+                    user_turn = chat_req.message.clone();
+                } else {
+                    user_turn.push_str("USER MESSAGE:\n");
+                    user_turn.push_str(&chat_req.message);
+                }
+                msgs.push(LlmMessage { role: "user".into(), content: user_turn });
 
                 let supervisor_reply = match llm_call(model_settings, supervisor_prompt, &msgs, 2048, 0.3).await {
                     Ok(r) => r,
@@ -2084,20 +2505,29 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
 
                         match llm_call(&planner_model, planner_prompt, &planner_msgs, 4096, 0.2).await {
                             Ok(plan_content) => {
-                                // Save plan to .tina4/plans/
+                                // Save plan to plan/ — canonical user-visible
+                                // location across all Tina4 frameworks. Was
+                                // plan/ historically (parallel to
+                                // chat history + thoughts) but the Python
+                                // framework's list_plans() canonical dir is
+                                // plan/, and putting AI-generated plans
+                                // alongside user-curated ones is the right
+                                // mental model.
                                 let plan_name = format!("{}-plan.md", chrono_now().replace("Z", ""));
-                                let plan_path = project_dir.join(".tina4").join("plans").join(&plan_name);
+                                let plans_dir = project_dir.join("plan");
+                                let _ = fs::create_dir_all(&plans_dir);
+                                let plan_path = plans_dir.join(&plan_name);
                                 let _ = fs::write(&plan_path, &plan_content);
 
                                 sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
-                                    "text": format!("Plan created: .tina4/plans/{}", plan_name),
+                                    "text": format!("Plan created: plan/{}", plan_name),
                                     "agent": "planner"
                                 }))).await;
 
                                 // Send plan content + approval buttons as a single event
                                 let plan_escaped = plan_content.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
                                 sse_event(&mut stream, "plan", &format!(
-                                    "{{\"content\":\"{}\",\"agent\":\"planner\",\"file\":\".tina4/plans/{}\",\"approve\":true}}",
+                                    "{{\"content\":\"{}\",\"agent\":\"planner\",\"file\":\"plan/{}\",\"approve\":true}}",
                                     plan_escaped, plan_name
                                 )).await;
 
@@ -2175,12 +2605,17 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                                         match agent_write_file(&project_dir, file_path, content.trim()) {
                                             Ok(stats) => {
                                                 files_written.push(file_path.to_string());
-                                                sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
-                                                    "text": format!("Written: {} ({}L → {}L)",
-                                                        file_path, stats.old_lines, stats.new_lines),
+                                                let mut payload = serde_json::json!({
+                                                    "text": format!("Written: {} ({}L → {}L){}",
+                                                        file_path, stats.old_lines, stats.new_lines,
+                                                        if stats.import_error.is_some() { " ⚠ import failed" } else { "" }),
                                                     "agent": "coder",
                                                     "backup": stats.backup_path,
-                                                }))).await;
+                                                });
+                                                if let Some(ref err) = stats.import_error {
+                                                    payload["import_error"] = serde_json::Value::String(err.clone());
+                                                }
+                                                sse_event(&mut stream, "status", &sse_json(&payload)).await;
                                             }
                                             Err(reason) => {
                                                 sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
@@ -2225,7 +2660,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                         //
                         // The supervisor SHOULD pass `context` as the
                         // literal plan file path (e.g.
-                        // ".tina4/plans/1779822543-plan.md") but Claude
+                        // "plan/1779822543-plan.md") but Claude
                         // often passes a free-form description instead
                         // ("plan to build a contact form…"). When the
                         // literal lookup fails, fall back to the most
@@ -2237,30 +2672,34 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                         let mut plan_content = fs::read_to_string(&plan_path).unwrap_or_default();
                         let mut resolved_path = plan_path.clone();
                         if plan_content.is_empty() {
-                            // Fallback: scan .tina4/plans/ for the
-                            // newest .md file by mtime.
-                            let plans_dir = project_dir.join(".tina4").join("plans");
-                            if let Ok(entries) = fs::read_dir(&plans_dir) {
-                                let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-                                for entry in entries.flatten() {
-                                    let path = entry.path();
-                                    if path.extension().and_then(|s| s.to_str()) != Some("md") { continue; }
-                                    if let Ok(meta) = entry.metadata() {
-                                        if let Ok(mtime) = meta.modified() {
-                                            if newest.as_ref().map_or(true, |(t, _)| mtime > *t) {
-                                                newest = Some((mtime, path));
+                            // Fallback: scan plan/ (canonical) AND
+                            // plan/ (legacy) for the newest
+                            // .md file by mtime. Older projects may
+                            // still have plans in plan/.
+                            let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+                            for sub in ["plan", ".tina4/plans"] {
+                                let plans_dir = project_dir.join(sub);
+                                if let Ok(entries) = fs::read_dir(&plans_dir) {
+                                    for entry in entries.flatten() {
+                                        let path = entry.path();
+                                        if path.extension().and_then(|s| s.to_str()) != Some("md") { continue; }
+                                        if let Ok(meta) = entry.metadata() {
+                                            if let Ok(mtime) = meta.modified() {
+                                                if newest.as_ref().map_or(true, |(t, _)| mtime > *t) {
+                                                    newest = Some((mtime, path));
+                                                }
                                             }
                                         }
                                     }
                                 }
-                                if let Some((_, path)) = newest {
-                                    if let Ok(content) = fs::read_to_string(&path) {
-                                        plan_content = content;
-                                        resolved_path = path;
-                                        agent_log(&project_dir, "execute_plan.fallback",
-                                            &format!("requested={:?} resolved={}",
-                                                plan_file, resolved_path.display()));
-                                    }
+                            }
+                            if let Some((_, path)) = newest {
+                                if let Ok(content) = fs::read_to_string(&path) {
+                                    plan_content = content;
+                                    resolved_path = path;
+                                    agent_log(&project_dir, "execute_plan.fallback",
+                                        &format!("requested={:?} resolved={}",
+                                            plan_file, resolved_path.display()));
                                 }
                             }
                         }
@@ -4046,5 +4485,114 @@ print('hi')
             }
             Err(e) => panic!("Anthropic call failed: {}", e),
         }
+    }
+
+    // ── collect_recent_failures tests ──────────────────────────────────
+
+    use std::io::Write as _;
+
+    fn make_tmpdir(name: &str) -> std::path::PathBuf {
+        let mut dir = std::env::temp_dir();
+        dir.push(format!("tina4-test-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_file(dir: &Path, rel: &str, body: &str) {
+        let path = dir.join(rel);
+        if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).unwrap(); }
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn failures_empty_when_no_logs() {
+        let dir = make_tmpdir("no-logs");
+        let out = collect_recent_failures(&dir);
+        assert!(out.is_empty(), "expected empty, got: {:?}", out);
+    }
+
+    #[test]
+    fn failures_picks_up_agent_log_import_failed() {
+        let dir = make_tmpdir("agent-log");
+        write_file(&dir, ".tina4/agent.log",
+            "1700000001Z [write.ok] src/routes/contact.py (foo)\n\
+             1700000002Z [write.import_failed] src/orm/Contact.py (AttributeError: module 'tina4_python.orm.model' has no attribute 'Model')\n\
+             1700000003Z [write.refused] src/big.py (would shrink 1000 → 50)\n");
+        let out = collect_recent_failures(&dir);
+        assert!(out.contains("RECENT FAILURES"), "missing header: {}", out);
+        assert!(out.contains("Agent file-write issues"), "missing section: {}", out);
+        assert!(out.contains("import_failed"), "missing import_failed: {}", out);
+        assert!(out.contains("refused"), "missing refused: {}", out);
+        // [write.ok] lines should be excluded — they're not failures.
+        assert!(!out.contains("[write.ok]"), "should not include write.ok: {}", out);
+    }
+
+    #[test]
+    fn failures_picks_up_server_errors_and_dedupes() {
+        let dir = make_tmpdir("server-log");
+        // Same error repeated 5 times with different timestamps + request ids
+        // should appear only once in the output.
+        let mut body = String::new();
+        body.push_str("2026-05-26T21:00:00.000Z [INFO   ] Server started\n");
+        for i in 0..5 {
+            body.push_str(&format!(
+                "2026-05-26T21:0{}:00.000Z [ERROR  ] [reqid{}] Failed to load /a/Contact.py: module 'tina4_python.orm.model' has no attribute 'Model'\n",
+                i, i,
+            ));
+        }
+        body.push_str("2026-05-26T21:10:00.000Z [ERROR  ] [zz] Route error: name 'template' is not defined\n");
+        write_file(&dir, "logs/error.log", &body);
+
+        let out = collect_recent_failures(&dir);
+        assert!(out.contains("Server runtime errors"), "missing section: {}", out);
+        let attribute_hits = out.matches("has no attribute 'Model'").count();
+        assert_eq!(attribute_hits, 1, "expected dedup to 1 copy, got {} in: {}", attribute_hits, out);
+        assert!(out.contains("template"), "missing distinct second error: {}", out);
+    }
+
+    #[test]
+    fn failures_falls_back_to_tina4_log_when_error_log_missing() {
+        let dir = make_tmpdir("info-fallback");
+        write_file(&dir, "logs/tina4.log",
+            "2026-05-26T21:00:00.000Z [INFO   ] Discovered 4 routes\n\
+             2026-05-26T21:01:00.000Z [ERROR  ] Failed to load /x.py: SyntaxError\n");
+        let out = collect_recent_failures(&dir);
+        assert!(out.contains("SyntaxError"), "fallback should pick up ERROR: {}", out);
+        // INFO lines should be filtered out.
+        assert!(!out.contains("Discovered 4 routes"), "INFO leaked: {}", out);
+    }
+
+    #[test]
+    fn failures_block_is_size_capped() {
+        let dir = make_tmpdir("big-log");
+        // Generate way more than RECENT_FAILURES_MAX_BYTES of distinct errors.
+        let mut body = String::new();
+        for i in 0..200 {
+            body.push_str(&format!(
+                "2026-05-26T21:00:{:02}.000Z [ERROR  ] [req{}] error number {} with a longer description so we exceed the cap\n",
+                i % 60, i, i,
+            ));
+        }
+        write_file(&dir, "logs/error.log", &body);
+        let out = collect_recent_failures(&dir);
+        // Should be capped — either by per-source limit (8) or by byte cap.
+        assert!(out.len() < RECENT_FAILURES_MAX_BYTES + 256,
+            "output {} bytes exceeds cap+slack", out.len());
+    }
+}
+
+#[cfg(test)]
+mod smoke_recent_failures {
+    use super::*;
+    #[test]
+    #[ignore] // run with: cargo test --release smoke_against_mytest -- --ignored --nocapture
+    fn smoke_against_mytest() {
+        let p = std::path::Path::new("/Users/andrevanzuydam/IdeaProjects/mytest");
+        if !p.exists() { eprintln!("mytest not present, skipping"); return; }
+        let out = collect_recent_failures(p);
+        eprintln!("=== collected ===\n{}", out);
+        eprintln!("=== {} bytes ===", out.len());
     }
 }

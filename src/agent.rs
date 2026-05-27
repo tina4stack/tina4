@@ -540,6 +540,35 @@ CREATE TABLE IF NOT EXISTS contacts (
 - One route per file, one model per file
 - Return each file as: ## FILE: path/to/file
 
+## CRITICAL: `## FILE:` is ONLY for real file paths — never narration
+
+Each `## FILE:` header MUST be immediately followed by a real filesystem path (e.g. `src/routes/contact.py`). NEVER use `## FILE:` to introduce a sentence, a step description, a plan summary, or any prose. The write tool parses every `## FILE:` line and creates a file at exactly the path you wrote.
+
+Wrong (creates a zero-byte file with a sentence as its filename):
+
+  ## FILE: I'll implement Step 1 by creating the database migration.
+
+  ## FILE: migrations/001_create_contacts.sql
+  ```sql
+  CREATE TABLE ...
+  ```
+
+Right (only real paths, no narration headers):
+
+  ## FILE: migrations/001_create_contacts.sql
+  ```sql
+  CREATE TABLE ...
+  ```
+
+  ## FILE: src/orm/Contact.py
+  ```python
+  ...
+  ```
+
+If you want to narrate what you're doing, write prose BEFORE the first `## FILE:` block — outside any `## FILE:` header. The parser ignores everything before the first `## FILE:`.
+
+The write tool refuses any "path" containing whitespace, punctuation other than `._-`, or segments longer than 80 chars (`write.prose_refused` in agent.log).
+
 ## CRITICAL: File paths MUST start with `src/` (except migrations)
 
 When emitting `## FILE:` headers, the path MUST be canonical:
@@ -1206,6 +1235,51 @@ pub fn agent_log(project_dir: &Path, category: &str, message: &str) {
 ///   3. **Structured log** — every attempt lands in `.tina4/agent.log`
 ///      with old/new size + line count so the user can audit what
 ///      the agent did.
+/// Reject a path that looks like prose rather than a filesystem path.
+/// The coder occasionally emits `## FILE:` followed by an explanation
+/// sentence ("I'll implement Step 1 by creating the database migration
+/// for storing contact form submissions.") — the parser then writes
+/// a zero-byte file with that whole sentence as its name. Files litter
+/// the file tree, the user reasonably assumes the supervisor is
+/// hallucinating, and the actual migrations are buried among them.
+///
+/// Heuristics matching the Python MCP's `_looks_like_prose`:
+///   - Whitespace, em-dashes, backticks, parentheses → not a path
+///   - Question marks, asterisks, pipes, angle brackets → not a path
+///   - Any segment longer than 80 chars → not a path
+///   - Overall length > 300 → not a path
+///   - Segment characters outside `[A-Za-z0-9._-]` → not a path
+///
+/// Returns Some(reason) when the path looks like prose, None otherwise.
+fn looks_like_prose_path(rel_path: &str) -> Option<String> {
+    if rel_path.is_empty() || rel_path.trim().is_empty() {
+        return Some("path is empty".into());
+    }
+    if rel_path.len() > 300 {
+        return Some(format!("path too long ({} chars)", rel_path.len()));
+    }
+    // Tell-tale prose tokens. Order matters — return the first match
+    // so the error message is specific.
+    for bad in &[" ", "\n", "\t", "`", " — ", " (", " [", "?", "*", "<", ">", "|"] {
+        if rel_path.contains(bad) {
+            return Some(format!("contains illegal token {bad:?} — looks like prose, not a filename"));
+        }
+    }
+    for seg in rel_path.split('/') {
+        if seg.is_empty() || seg == "." || seg == ".." { continue; }
+        if seg.len() > 80 {
+            return Some(format!("path segment too long ({} chars): {:?}", seg.len(),
+                &seg.chars().take(60).collect::<String>()));
+        }
+        for c in seg.chars() {
+            if !(c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-') {
+                return Some(format!("segment {seg:?} has disallowed character {c:?} — stick to [A-Za-z0-9._-]"));
+            }
+        }
+    }
+    None
+}
+
 /// Normalize a coder-emitted file path. The coder repeatedly drifts
 /// off the canonical `src/<dir>/` layout under load — "fix it" or
 /// "add a base template" requests come back with paths like
@@ -1254,6 +1328,17 @@ fn normalize_coder_path(rel_path: &str) -> Option<String> {
 }
 
 pub fn agent_write_file(project_dir: &Path, rel_path: &str, content: &str) -> Result<WriteStats, String> {
+    // Prose-path guard — refuse writes whose "path" is actually a
+    // narration sentence (e.g. "I'll implement Step 1 by creating
+    // the database migration..."). See looks_like_prose_path. Done
+    // BEFORE normalization so we don't normalize prose strings.
+    if let Some(reason) = looks_like_prose_path(rel_path) {
+        let msg = format!("REFUSED prose path {:?}: {}",
+            rel_path.chars().take(80).collect::<String>(), reason);
+        agent_log(project_dir, "write.prose_refused", &msg);
+        return Err(msg);
+    }
+
     // Pre-write path normalization — see normalize_coder_path. Logs
     // the rewrite so the user (and the supervisor on the next turn)
     // can see what actually landed where, vs what the coder asked for.
@@ -4612,6 +4697,40 @@ print('hi')
         if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).unwrap(); }
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(body.as_bytes()).unwrap();
+    }
+
+    // ── looks_like_prose_path tests ───────────────────────────────
+
+    #[test]
+    fn prose_path_refuses_sentences() {
+        assert!(looks_like_prose_path("I'll implement Step 1 by creating the database migration").is_some());
+        assert!(looks_like_prose_path("Step 2: Create a contact page").is_some());
+        assert!(looks_like_prose_path("see references/foo.md for details").is_some());
+    }
+
+    #[test]
+    fn prose_path_accepts_real_paths() {
+        assert!(looks_like_prose_path("src/routes/contact.py").is_none());
+        assert!(looks_like_prose_path("migrations/001_create_contacts.sql").is_none());
+        assert!(looks_like_prose_path("app.py").is_none());
+        assert!(looks_like_prose_path("src/templates/base.twig").is_none());
+        assert!(looks_like_prose_path(".env").is_none());
+        assert!(looks_like_prose_path("src/orm/User.py").is_none());
+    }
+
+    #[test]
+    fn prose_path_refuses_punctuation_inside_segment() {
+        assert!(looks_like_prose_path("src/foo?.py").is_some());
+        assert!(looks_like_prose_path("src/foo*.py").is_some());
+        assert!(looks_like_prose_path("src/foo bar.py").is_some());
+    }
+
+    #[test]
+    fn prose_path_refuses_empty_and_huge() {
+        assert!(looks_like_prose_path("").is_some());
+        assert!(looks_like_prose_path("   ").is_some());
+        let huge = "a".repeat(400);
+        assert!(looks_like_prose_path(&huge).is_some());
     }
 
     // ── normalize_coder_path tests ────────────────────────────────

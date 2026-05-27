@@ -539,6 +539,20 @@ CREATE TABLE IF NOT EXISTS contacts (
 - NEVER create app/, Controllers/, Models/, Views/, Database/ folders
 - One route per file, one model per file
 - Return each file as: ## FILE: path/to/file
+
+## CRITICAL: File paths MUST start with `src/` (except migrations)
+
+When emitting `## FILE:` headers, the path MUST be canonical:
+
+  ✓ src/routes/contact.py        ✗ routes/contact.py
+  ✓ src/orm/Contact.py           ✗ orm/Contact.py
+  ✓ src/templates/contact.twig   ✗ templates/contact.twig
+  ✓ src/seeds/seed_contacts.py   ✗ seeds/seed_contacts.py
+  ✓ migrations/001_x.sql         (migrations live at project ROOT — no src/ prefix)
+
+Bare `routes/`, `orm/`, `templates/`, `seeds/` at the project root are NOT picked up by the framework's auto-discovery. A file at `templates/base.twig` is dead — the framework never loads it. The framework's auto-discovery only scans `src/`.
+
+If you forget the `src/` prefix the write-tool will rewrite the path AND log a `write.path_normalized` warning. Your job is to emit the right path the first time so the user sees clean status messages, not a stream of "drifted to src/templates/" warnings.
 "#),
 
     ("vision", r#"{"model":"vision","temperature":0.3,"max_tokens":2048,"tools":[],"max_iterations":1}"#,
@@ -1192,7 +1206,66 @@ pub fn agent_log(project_dir: &Path, category: &str, message: &str) {
 ///   3. **Structured log** — every attempt lands in `.tina4/agent.log`
 ///      with old/new size + line count so the user can audit what
 ///      the agent did.
+/// Normalize a coder-emitted file path. The coder repeatedly drifts
+/// off the canonical `src/<dir>/` layout under load — "fix it" or
+/// "add a base template" requests come back with paths like
+/// `templates/base.twig`, `routes/contact.py`, `orm/Contact.py` at
+/// project root. The framework's auto-discovery only looks under
+/// `src/`, so these writes succeed silently but the route/model/template
+/// is dead code. Worse, the user looking at `src/templates/` sees
+/// nothing new and reports "supervisor lies about creating files."
+///
+/// This rewrites bare top-level paths into their `src/` equivalents
+/// for the directories Tina4 conventionally owns:
+///   - `routes/<x>`     → `src/routes/<x>`
+///   - `orm/<x>`        → `src/orm/<x>`
+///   - `templates/<x>`  → `src/templates/<x>`
+///   - `seeds/<x>`      → `src/seeds/<x>`
+///   - `controllers/<x>`→ `src/controllers/<x>`
+///
+/// `migrations/` is left alone — it lives at project ROOT by design.
+/// Anything else is returned unchanged. `src/`-prefixed paths pass
+/// through untouched.
+///
+/// Returns Some(rewritten) when normalization happened, None otherwise
+/// — caller logs the rewrite so it's visible in agent.log.
+fn normalize_coder_path(rel_path: &str) -> Option<String> {
+    // Already canonical, or living at project root by design — leave alone.
+    if rel_path.starts_with("src/") || rel_path.starts_with("migrations/")
+        || rel_path.starts_with("plan/") || rel_path.starts_with("tests/")
+        || rel_path.starts_with("test/") || rel_path.starts_with(".tina4/")
+        || rel_path == "app.py" || rel_path == "app.ts"
+        || rel_path == "app.rb" || rel_path == "index.php"
+        || rel_path == "composer.json" || rel_path == "package.json"
+        || rel_path == "Gemfile" || rel_path == "pyproject.toml"
+        || rel_path == "requirements.txt" || rel_path == ".env"
+        || rel_path == ".env.example" {
+        return None;
+    }
+
+    // Bare top-level Tina4-conventional dirs that should be src/<dir>/.
+    for dir in &["routes", "orm", "templates", "seeds", "controllers", "models", "middleware"] {
+        let prefix = format!("{}/", dir);
+        if rel_path.starts_with(&prefix) {
+            return Some(format!("src/{}", rel_path));
+        }
+    }
+    None
+}
+
 pub fn agent_write_file(project_dir: &Path, rel_path: &str, content: &str) -> Result<WriteStats, String> {
+    // Pre-write path normalization — see normalize_coder_path. Logs
+    // the rewrite so the user (and the supervisor on the next turn)
+    // can see what actually landed where, vs what the coder asked for.
+    let rel_owned: String = match normalize_coder_path(rel_path) {
+        Some(canonical) => {
+            agent_log(project_dir, "write.path_normalized",
+                &format!("{} → {}", rel_path, canonical));
+            canonical
+        }
+        None => rel_path.to_string(),
+    };
+    let rel_path: &str = rel_owned.as_str();
     let full = project_dir.join(rel_path);
 
     let old_content = fs::read_to_string(&full).ok();
@@ -1422,18 +1495,53 @@ pub async fn llm_call(
     // `cache_control: ephemeral`. The cache key is content-hashed, so
     // identical system prompts across turns hit the cache automatically.
     if settings.provider == "anthropic" {
-        let system = if system_prompt.is_empty() {
-            Vec::new()
-        } else {
-            vec![AnthropicSystemBlock {
+        // Anthropic rejects role:"system" entries inside `messages` —
+        // system content has to live in the top-level `system` field.
+        // Callers occasionally push system-role messages into the
+        // array (e.g. /chat injects "Current project plan:..." that
+        // way for OpenAI compatibility). Strip them here and either
+        // (a) prepend their content to the cached system prompt if
+        //     we have one, OR
+        // (b) demote them to user-role turns when we don't, so the
+        //     model still sees them.
+        //
+        // Doing this in the LLM client means callers can use the same
+        // message-array shape for every provider — Anthropic-specific
+        // shaping stays one concern of one function.
+        let (extracted_system, filtered_messages): (Vec<String>, Vec<LlmMessage>) =
+            messages.iter().fold((Vec::new(), Vec::new()), |(mut sys, mut msgs), m| {
+                if m.role == "system" {
+                    sys.push(m.content.clone());
+                } else {
+                    msgs.push(m.clone());
+                }
+                (sys, msgs)
+            });
+
+        // Build the system field as multiple blocks so caching stays
+        // healthy: the static prompt gets cache_control:ephemeral,
+        // dynamic blocks (extracted system-role messages, e.g. plan
+        // snapshots) follow with cache_control:None so they don't
+        // invalidate the cached prefix. Anthropic concatenates blocks
+        // into the effective system message in order.
+        let mut system: Vec<AnthropicSystemBlock> = Vec::new();
+        if !system_prompt.is_empty() {
+            system.push(AnthropicSystemBlock {
                 ty: "text",
                 text: system_prompt.to_string(),
                 cache_control: Some(CacheControl { ty: "ephemeral" }),
-            }]
-        };
+            });
+        }
+        for s in extracted_system {
+            system.push(AnthropicSystemBlock {
+                ty: "text",
+                text: s,
+                cache_control: None,
+            });
+        }
         let body = AnthropicRequest {
             model: model_name,
-            messages: messages.to_vec(),
+            messages: filtered_messages,
             max_tokens,
             temperature,
             system,
@@ -4505,6 +4613,55 @@ print('hi')
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(body.as_bytes()).unwrap();
     }
+
+    // ── normalize_coder_path tests ────────────────────────────────
+
+    #[test]
+    fn normalize_rewrites_bare_top_level_dirs() {
+        assert_eq!(normalize_coder_path("routes/contact.py").as_deref(),
+                   Some("src/routes/contact.py"));
+        assert_eq!(normalize_coder_path("orm/Contact.py").as_deref(),
+                   Some("src/orm/Contact.py"));
+        assert_eq!(normalize_coder_path("templates/base.twig").as_deref(),
+                   Some("src/templates/base.twig"));
+        assert_eq!(normalize_coder_path("seeds/contacts.py").as_deref(),
+                   Some("src/seeds/contacts.py"));
+        assert_eq!(normalize_coder_path("middleware/auth.py").as_deref(),
+                   Some("src/middleware/auth.py"));
+    }
+
+    #[test]
+    fn normalize_leaves_canonical_paths_alone() {
+        assert!(normalize_coder_path("src/routes/contact.py").is_none());
+        assert!(normalize_coder_path("src/templates/base.twig").is_none());
+        assert!(normalize_coder_path("src/orm/User.py").is_none());
+    }
+
+    #[test]
+    fn normalize_leaves_root_level_files_alone() {
+        // migrations stay at project root by design — NOT rewritten.
+        assert!(normalize_coder_path("migrations/001_create.sql").is_none());
+        // Top-level config / entry files stay put.
+        assert!(normalize_coder_path("app.py").is_none());
+        assert!(normalize_coder_path(".env").is_none());
+        assert!(normalize_coder_path("pyproject.toml").is_none());
+        assert!(normalize_coder_path("composer.json").is_none());
+        // Test directories stay put.
+        assert!(normalize_coder_path("tests/test_x.py").is_none());
+        assert!(normalize_coder_path("test/x_test.py").is_none());
+        // Plans live at project root.
+        assert!(normalize_coder_path("plan/1779-plan.md").is_none());
+    }
+
+    #[test]
+    fn normalize_doesnt_rewrite_unknown_top_level_dirs() {
+        // Don't be too aggressive — only the dirs we know Tina4 owns.
+        assert!(normalize_coder_path("docs/api.md").is_none());
+        assert!(normalize_coder_path("scripts/build.sh").is_none());
+        assert!(normalize_coder_path("public/favicon.ico").is_none());
+    }
+
+    // ── collect_recent_failures tests ──────────────────────────────────
 
     #[test]
     fn failures_empty_when_no_logs() {

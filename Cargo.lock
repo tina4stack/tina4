@@ -1589,7 +1589,7 @@ dependencies = [
 
 [[package]]
 name = "tina4"
-version = "3.8.25"
+version = "3.8.26"
 dependencies = [
  "clap",
  "colored",

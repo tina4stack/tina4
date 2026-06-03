@@ -1,6 +1,6 @@
 [package]
 name = "tina4"
-version = "3.8.27"
+version = "3.8.28"
 edition = "2021"
 description = "Tina4 — Unified CLI for Python, PHP, Ruby, and Node.js frameworks"
 license = "MIT"
@@ -20,7 +20,11 @@ clap = { version = "4", features = ["derive"] }
 colored = "2"
 which = "7"
 ctrlc = "3"
-reqwest = { version = "0.12", features = ["json", "stream"] }
+# rustls-tls keeps the build cross-compilable to aarch64-unknown-linux-gnu
+# without a system OpenSSL install. Default native-tls path pulls
+# openssl-sys which can't find /usr/include/openssl on cross-compile
+# (see v3.8.27 release CI). Pure-Rust TLS works on every target we ship.
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

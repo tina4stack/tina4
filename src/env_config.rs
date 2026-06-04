@@ -4,7 +4,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use crate::console::{icon_fail, icon_info, icon_ok, icon_play, icon_warn};
+use crate::console::{icon_fail, icon_info, icon_ok, icon_warn};
 
 /// Known Tina4 environment variables with defaults and descriptions.
 fn known_vars() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
@@ -462,7 +462,7 @@ pub fn run(sync: bool, example_only: bool, list_only: bool) {
             let engine = prompt_select(
                 "Engine",
                 &feature.options,
-                &current.split("://").next().unwrap_or("sqlite"),
+                current.split("://").next().unwrap_or("sqlite"),
             );
 
             let url = build_database_url(&engine);

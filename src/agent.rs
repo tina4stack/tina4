@@ -1373,7 +1373,7 @@ pub fn agent_write_file(project_dir: &Path, rel_path: &str, content: &str) -> Re
     let backup_path = if old_size > 0 {
         let backup_dir = project_dir.join(".tina4").join("backups");
         let _ = fs::create_dir_all(&backup_dir);
-        let safe_name = rel_path.replace('/', "__").replace('\\', "__");
+        let safe_name = rel_path.replace(['/', '\\'], "__");
         let ts = chrono_now().replace(':', "-");
         let name = format!("{}.{}.bak", safe_name, ts);
         let bp = backup_dir.join(&name);
@@ -1994,7 +1994,7 @@ pub fn scan_project(project_dir: &Path) -> Vec<(String, String, String)> {
     if routes_dir.exists() {
         let route_count = fs::read_dir(&routes_dir)
             .map(|entries| entries.filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().map_or(false, |ext| ext == "py" || ext == "php" || ext == "rb" || ext == "ts"))
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "py" || ext == "php" || ext == "rb" || ext == "ts"))
                 .count())
             .unwrap_or(0);
 
@@ -2061,7 +2061,7 @@ fn verify_escalation_claim(project_dir: &Path, id: &str) -> bool {
             if !routes.exists() { return false; }
             let route_count = fs::read_dir(&routes)
                 .map(|it| it.filter_map(|e| e.ok())
-                    .filter(|e| e.path().extension().map_or(false, |ext|
+                    .filter(|e| e.path().extension().is_some_and(|ext|
                         ext == "py" || ext == "php" || ext == "rb" || ext == "ts"))
                     .count())
                 .unwrap_or(0);
@@ -2269,7 +2269,7 @@ pub fn run(port: u16) {
 }
 
 /// Tiny HTTP server for agent endpoints.
-async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thought_tx: tokio::sync::broadcast::Sender<String>) {
+async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thought_tx: tokio::sync::broadcast::Sender<String>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener as AsyncTcpListener;
 
@@ -2516,7 +2516,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
 
                 // Status: thinking
                 let _ = stream.write_all(
-                    format!("event: status\ndata: {{\"text\":\"Analyzing request...\",\"agent\":\"supervisor\"}}\n\n").as_bytes()
+                    "event: status\ndata: {\"text\":\"Analyzing request...\",\"agent\":\"supervisor\"}\n\n".to_string().as_bytes()
                 ).await;
                 let _ = stream.flush().await;
 
@@ -2576,7 +2576,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                     .filter(|d| d.exists())
                     .flat_map(|d| fs::read_dir(&d).into_iter().flatten())
                     .filter_map(|e| e.ok())
-                    .filter(|e| e.path().extension().map_or(false, |ext| ext == "md"))
+                    .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
                     .max_by_key(|e| e.metadata().ok().and_then(|m| m.modified().ok()))
                     .and_then(|entry| fs::read_to_string(entry.path()).ok());
 
@@ -2878,7 +2878,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                                         if path.extension().and_then(|s| s.to_str()) != Some("md") { continue; }
                                         if let Ok(meta) = entry.metadata() {
                                             if let Ok(mtime) = meta.modified() {
-                                                if newest.as_ref().map_or(true, |(t, _)| mtime > *t) {
+                                                if newest.as_ref().is_none_or(|(t, _)| mtime > *t) {
                                                     newest = Some((mtime, path));
                                                 }
                                             }
@@ -2898,9 +2898,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                         }
 
                         if plan_content.is_empty() {
-                            sse_event(&mut stream, "message", &format!(
-                                "{{\"content\":\"No plan to execute. Tell me what you want to build and I'll create one.\",\"agent\":\"supervisor\"}}"
-                            )).await;
+                            sse_event(&mut stream, "message", "{\"content\":\"No plan to execute. Tell me what you want to build and I'll create one.\",\"agent\":\"supervisor\"}").await;
                         } else {
                             // Surface which plan we actually executed —
                             // helps when fallback picked something other
@@ -2914,7 +2912,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                                 .filter(|line| {
                                     let trimmed = line.trim();
                                     // Match lines starting with a number followed by . or )
-                                    trimmed.len() > 2 && trimmed.chars().next().map_or(false, |c| c.is_ascii_digit())
+                                    trimmed.len() > 2 && trimmed.chars().next().is_some_and(|c| c.is_ascii_digit())
                                         && (trimmed.contains(". ") || trimmed.contains(") "))
                                 })
                                 .map(|line| {
@@ -3160,7 +3158,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], thoug
                                         sse_event(&mut stream, "message", &format!("{{\"content\":\"{}\",\"agent\":\"image-gen\"}}", img_html)).await;
                                     }
                                     Err(_) => {
-                                        let escaped = format!("Image generation returned unexpected response").replace('"', "\\\"");
+                                        let escaped = "Image generation returned unexpected response".to_string().replace('"', "\\\"");
                                         sse_event(&mut stream, "message", &format!("{{\"content\":\"{}\",\"agent\":\"image-gen\"}}", escaped)).await;
                                     }
                                 }

@@ -462,7 +462,7 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
         requested_port
     } else {
         // Default port: kill whatever is on it and take it over
-        if !std::net::TcpListener::bind(("127.0.0.1", requested_port)).is_ok() {
+        if std::net::TcpListener::bind(("127.0.0.1", requested_port)).is_err() {
             println!(
                 "{} Port {} in use — killing existing process...",
                 icon_warn().yellow(),
@@ -953,11 +953,10 @@ fn resolve_cli(info: &detect::ProjectInfo) -> (String, Vec<String>) {
         }
         "python" => {
             // uv projects: run via 'uv run tina4python' so the venv CLI is found
-            if std::path::Path::new("uv.lock").exists() || std::path::Path::new("pyproject.toml").exists() {
-                if which::which("uv").is_ok() {
+            if (std::path::Path::new("uv.lock").exists() || std::path::Path::new("pyproject.toml").exists())
+                && which::which("uv").is_ok() {
                     return ("uv".into(), vec!["run".into(), "tina4python".into()]);
                 }
-            }
             // Fallback: try global tina4python or .venv/Scripts
             let venv_cli = if cfg!(windows) { ".venv/Scripts/tina4python.exe" } else { ".venv/bin/tina4python" };
             if std::path::Path::new(venv_cli).exists() {
@@ -968,20 +967,18 @@ fn resolve_cli(info: &detect::ProjectInfo) -> (String, Vec<String>) {
         }
         "ruby" => {
             // bundler projects: run via 'bundle exec tina4ruby'
-            if std::path::Path::new("Gemfile.lock").exists() {
-                if which::which("bundle").is_ok() {
+            if std::path::Path::new("Gemfile.lock").exists()
+                && which::which("bundle").is_ok() {
                     return ("bundle".into(), vec!["exec".into(), "tina4ruby".into()]);
                 }
-            }
             ("tina4ruby".into(), vec![])
         }
         "nodejs" => {
             // npm projects: run via 'npx tina4nodejs'
-            if std::path::Path::new("node_modules").exists() {
-                if which::which("npx").is_ok() {
+            if std::path::Path::new("node_modules").exists()
+                && which::which("npx").is_ok() {
                     return ("npx".into(), vec!["tina4nodejs".into()]);
                 }
-            }
             ("tina4nodejs".into(), vec![])
         }
         _ => (info.cli_name().into(), vec![]),

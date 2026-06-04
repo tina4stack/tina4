@@ -43,9 +43,17 @@ codegen-units = 1
 # downstream callers (WriteStats, SearchResp.query, compose_commit_message).
 # Everything bug-shaped stays a hard error via `cargo clippy -- -D warnings`
 # in CI — these allow-list entries only mute the noise we've audited.
+# stable-as-of-rust 1.96.0; older clippy doesn't know some of these names
+# (it just ignores unknown lint names so this is portable).
 [lints.clippy]
 doc_overindented_list_items = "allow"
 doc_lazy_continuation = "allow"
+# Style: a single sort_by call with custom logic reads cleaner than
+# sort_by_key + a separate closure for our one-off use in session.rs.
+unnecessary_sort_by = "allow"
+# Style: the match arm contains a guard expression; rewriting as an
+# inner match would split the logic across two structures.
+collapsible_match = "allow"
 
 [lints.rust]
 dead_code = "allow"

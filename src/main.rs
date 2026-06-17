@@ -42,6 +42,9 @@ enum Commands {
         /// Show the menu and plan without installing or scaffolding anything (for testing)
         #[arg(long)]
         dry_run: bool,
+        /// Run the real menu + scaffold + CLAUDE.md, but skip all system installs (safe local test)
+        #[arg(long)]
+        skip_install: bool,
     },
 
     /// Install a language runtime (python, php, ruby, nodejs)
@@ -241,7 +244,7 @@ fn main() {
     match cli.command {
         Commands::Doctor => doctor::run(),
 
-        Commands::Setup { dry_run } => setup::run(dry_run),
+        Commands::Setup { dry_run, skip_install } => setup::run(dry_run, skip_install),
 
         Commands::Install { lang } => install::run(&lang),
 

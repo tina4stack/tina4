@@ -185,6 +185,13 @@ fn init_project(language: &str, path: &str) {
     println!("{} Project created at {}", icon_ok().green(), abs);
     println!();
 
+    // `tina4 setup` drives scaffolding itself and finishes with its own
+    // CLAUDE.md / open-IDE / next-steps, so it suppresses this blocking serve
+    // prompt — otherwise everything after init would wait for the server to stop.
+    if std::env::var("TINA4_INIT_NO_SERVE").is_ok() {
+        return;
+    }
+
     // Ask user if they want to start serving
     use std::io::Write;
     print!("  Start the server now? [Y/n]: ");

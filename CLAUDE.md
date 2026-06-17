@@ -1,6 +1,6 @@
 # Tina4 CLI
 
-Version 3.8.31 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 frameworks.
+Version 3.8.32 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 frameworks.
 
 ## Build & Test
 
@@ -13,9 +13,11 @@ Version 3.8.31 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 framewor
 ## Commands
 
 ```
-tina4 setup                      Guided menu setup: pick language + how you work,
-                                 then installs runtime (+git, +Claude Desktop) and
-                                 scaffolds a ready-to-run project. --dry-run to preview.
+tina4 setup                      Guided menu: language + AI tool + projects folder +
+                                 project name, then installs runtime/git/skills/AI tool
+                                 (via Chocolatey/Homebrew), scaffolds the project with its
+                                 own CLAUDE.md, and opens the tool.
+                                 --dry-run = preview only. --skip-install = scaffold, no installs.
 tina4 init <language> <path>     Scaffold a new project (python, php, ruby, nodejs, tina4js)
 tina4 serve                      Start dev server with file watcher + SCSS + browser open
 tina4 serve --production         Auto-install and use production server

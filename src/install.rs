@@ -275,8 +275,11 @@ fn install_nodejs() {
         println!("  {} npm already installed", icon_ok().green());
     }
 
-    // Install tina4nodejs
-    install_tina4_cli("tina4nodejs", "npm", &["install", "-g", "tina4nodejs"]);
+    // Install the Node framework globally. The published npm package is
+    // `tina4-nodejs` (the monorepo root) — it provides the `tina4nodejs`
+    // binary via its bin field. Installing `tina4nodejs` (no hyphen) 404s:
+    // that name is only the internal cli workspace package, never published.
+    install_tina4_cli("tina4nodejs", "npm", &["install", "-g", "tina4-nodejs"]);
 }
 
 fn install_tina4_js() {

@@ -175,8 +175,8 @@ pub fn run() {
     println!("  {}", "─".repeat(70));
 
     let ports = [
-        (7145u16, "Python"),
-        (7146u16, "PHP"),
+        (7145u16, "PHP"),
+        (7146u16, "Python"),
         (7147u16, "Ruby"),
         (7148u16, "Node.js"),
         (5173u16, "tina4js"),

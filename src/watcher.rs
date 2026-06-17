@@ -13,7 +13,12 @@ use crate::console::{icon_eye, icon_fail};
 /// overlayfs on Podman/distrobox, where `notify` falls back to polling
 /// and re-reports unchanged files as Modify events).
 const IGNORED_SUBSTRINGS: &[&str] = &[
-    "/__pycache__/",
+    // No trailing slash: Python fires a directory-level event on the
+    // `__pycache__` dir itself (path ends `/__pycache__`, no slash) every
+    // time it writes a .pyc, which would otherwise trigger a redundant
+    // reload after every code change. Matching without the trailing slash
+    // covers both the dir event and files inside it.
+    "/__pycache__",
     "/.git/",
     "/.venv/",
     "/venv/",
@@ -38,8 +43,9 @@ const IGNORED_EXTENSIONS: &[&str] = &[
 /// polling mode, which happily re-reports the same file as "modified"
 /// every poll even when no process has touched it. We defend in layers:
 ///
-///   1. Event-kind: only Create / Modify(data) / Remove count.
-///      Metadata and Access events are dropped.
+///   1. Event-kind: Create / Remove / Modify count — including WriteTime
+///      metadata events, which is how PollWatcher reports content changes.
+///      Only Access events are dropped outright.
 ///   2. Path: ignore well-known noise paths (logs, caches, vcs, build).
 ///   3. Extension: ignore transient file types (.log, .db-wal, .pyc).
 ///   4. Real-mtime check (done by caller via `is_actually_modified`).
@@ -51,6 +57,12 @@ fn is_meaningful_event(event: &Event) -> bool {
             | EventKind::Modify(ModifyKind::Data(_))
             | EventKind::Modify(ModifyKind::Name(_))
             | EventKind::Modify(ModifyKind::Any)
+            // PollWatcher (our chosen backend — FSEvents dies when the dev
+            // server is spawned detached) reports content changes as a
+            // WriteTime *metadata* event, so we must let metadata modifies
+            // through. Spurious ones (e.g. chmod, or polling re-reports of an
+            // unchanged file) are dropped by the real-mtime check (Layer 4).
+            | EventKind::Modify(ModifyKind::Metadata(_))
             | EventKind::Any
     );
     if !kind_ok {
@@ -101,7 +113,7 @@ fn is_code_change(file: &str) -> bool {
 /// the child process (main's respawn loop spins up a fresh one). On
 /// asset changes (CSS/SCSS/templates), POST /__dev/api/reload so the
 /// framework signals the browser to soft-reload. Blocks forever.
-pub fn watch_and_reload(port: u16, respawn: Option<RespawnHandle>) {
+pub fn watch_and_reload(port: u16, _respawn: Option<RespawnHandle>) {
     let (tx, rx) = mpsc::channel();
     // Use PollWatcher instead of RecommendedWatcher (FSEvents on macOS)
     // because FSEvents stops delivering events when the parent process
@@ -151,13 +163,8 @@ pub fn watch_and_reload(port: u16, respawn: Option<RespawnHandle>) {
     loop {
         match rx.recv() {
             Ok(Ok(event)) => {
-                // TEMP DEBUG: log every event before filtering
-                eprintln!("[watcher] event kind={:?} paths={:?}",
-                    event.kind,
-                    event.paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>());
                 // Layer 1+2+3: event-kind / path / extension filter
                 if !is_meaningful_event(&event) {
-                    eprintln!("[watcher]   ↳ filtered out as not meaningful");
                     continue;
                 }
 
@@ -215,22 +222,13 @@ pub fn watch_and_reload(port: u16, respawn: Option<RespawnHandle>) {
                     "reload"
                 };
 
-                if is_code {
-                    if let Some(ref flag) = respawn {
-                        // Just signal — main polls the flag and does
-                        // the kill+respawn itself (it owns the child).
-                        flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                        eprintln!("{} Code change in {} — signalling respawn",
-                            icon_eye().yellow(),
-                            file.replace('\\', "/"));
-                        // Don't POST /reload here — main's respawn loop
-                        // does that once the new child is up.
-                        continue;
-                    }
-                    // No respawn handle (tina4js or test) — fall through
-                    // to the POST so the old in-process reload path
-                    // still works.
-                }
+                // Code changes do NOT respawn the worker anymore. The
+                // framework re-imports changed modules in-process on
+                // POST /__dev/api/reload (the server stays up — the dev
+                // dashboard and WebSocket connections survive) and pushes
+                // an instant WebSocket reload to the browser. Everything
+                // falls through to the single POST below. The `_respawn`
+                // handle is retained by main only for crash recovery.
 
                 // POST to the framework's reload endpoint (assets path)
                 let body = format!(
@@ -321,6 +319,10 @@ pub fn watch_scss(input_dir: &str, output_dir: &str, minify: bool) {
                         | EventKind::Modify(ModifyKind::Data(_))
                         | EventKind::Modify(ModifyKind::Name(_))
                         | EventKind::Modify(ModifyKind::Any)
+                        // PollWatcher reports content changes as WriteTime
+                        // metadata events; let them through (mtime check below
+                        // drops spurious ones).
+                        | EventKind::Modify(ModifyKind::Metadata(_))
                         | EventKind::Any
                 );
                 if !kind_ok {
@@ -446,12 +448,16 @@ mod tests {
     }
 
     #[test]
-    fn metadata_only_event_is_ignored() {
+    fn metadata_writetime_event_on_source_is_meaningful() {
+        // PollWatcher (our backend) reports content changes as WriteTime
+        // metadata events, so the kind filter must let them through. Spurious
+        // metadata (chmod, polling re-reports of an unchanged file) is dropped
+        // later by the real-mtime check in the watch loop, not here.
         let e = ev(
-            EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any)),
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::WriteTime)),
             "/project/src/routes/home.py",
         );
-        assert!(!is_meaningful_event(&e));
+        assert!(is_meaningful_event(&e));
     }
 
     #[test]
@@ -477,6 +483,18 @@ mod tests {
         let e = ev(
             EventKind::Modify(ModifyKind::Data(DataChange::Any)),
             "/project/src/routes/__pycache__/home.cpython-313.pyc",
+        );
+        assert!(!is_meaningful_event(&e));
+    }
+
+    #[test]
+    fn pycache_dir_writetime_event_is_ignored() {
+        // Python writing a .pyc fires a WriteTime event on the __pycache__
+        // dir itself (no trailing slash). Must still be ignored, else every
+        // code change would trigger a second, redundant reload.
+        let e = ev(
+            EventKind::Modify(ModifyKind::Metadata(MetadataKind::WriteTime)),
+            "/project/src/routes/__pycache__",
         );
         assert!(!is_meaningful_event(&e));
     }

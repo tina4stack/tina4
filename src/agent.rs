@@ -4426,10 +4426,18 @@ print('hi')
     // ── Defensive file write tests ──
 
     fn tmp_project() -> std::path::PathBuf {
+        // Cargo runs tests in parallel; a bare timestamp can collide when two
+        // tests start within the same clock tick, and one test's end-of-test
+        // remove_dir_all then deletes the other's files mid-run. A per-process
+        // atomic counter guarantees a unique dir regardless of clock resolution.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let tmp = std::env::temp_dir().join(format!(
-            "tina4-write-{}",
+            "tina4-write-{}-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+            n,
         ));
         std::fs::create_dir_all(&tmp).unwrap();
         tmp

@@ -4,6 +4,11 @@ use std::process::Command;
 use crate::console::{self, icon_fail, icon_info, icon_ok, icon_play, icon_warn};
 
 pub fn run(lang: &str) {
+    // Nothing installs without a package manager. Bootstrap Chocolatey
+    // (Windows) / Homebrew (macOS) up front so a fresh machine — the
+    // non-programmer case — has something to install runtimes with.
+    ensure_package_manager();
+
     let lang_norm = lang.to_lowercase();
 
     match lang_norm.as_str() {
@@ -36,6 +41,8 @@ fn install_python() {
         println!("  {} Python already installed", icon_ok().green());
     } else {
         run_install_commands(&[
+            // Windows (Chocolatey)
+            ("choco", &["install", "python", "-y"]),
             // macOS
             ("brew", &["install", "python@3.12"]),
             // Linux fallback
@@ -182,6 +189,7 @@ fn install_php() {
         println!("  {} PHP already installed", icon_ok().green());
     } else {
         run_install_commands(&[
+            ("choco", &["install", "php", "-y"]),
             ("brew", &["install", "php@8.3"]),
             ("sudo", &["apt-get", "install", "-y", "php8.3-cli", "php8.3-mbstring", "php8.3-xml", "php8.3-sqlite3"]),
         ]);
@@ -193,11 +201,8 @@ fn install_php() {
     } else {
         println!("  {} Installing Composer...", icon_play().green());
         if console::is_windows() {
-            // On Windows, direct users to download the installer
-            println!(
-                "  {} Download Composer installer from: https://getcomposer.org/Composer-Setup.exe",
-                icon_info().blue()
-            );
+            // Chocolatey ships a `composer` package (pulls in PHP if needed).
+            run_install_commands(&[("choco", &["install", "composer", "-y"])]);
         } else {
             let script = r#"php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');" && php composer-setup.php --install-dir=/usr/local/bin --filename=composer && php -r "unlink('composer-setup.php');" "#;
             let _ = console::shell_exec(script);
@@ -230,6 +235,7 @@ fn install_ruby() {
         }
     } else {
         run_install_commands(&[
+            ("choco", &["install", "ruby", "-y"]),
             ("brew", &["install", "ruby"]),
             ("sudo", &["apt-get", "install", "-y", "ruby-full"]),
         ]);
@@ -254,13 +260,10 @@ fn install_nodejs() {
 
     if check_exists("node") {
         println!("  {} Node.js already installed", icon_ok().green());
-    } else if console::is_windows() {
-        println!(
-            "  {} Install Node.js from: https://nodejs.org/",
-            icon_info().blue()
-        );
     } else {
         run_install_commands(&[
+            // Windows (Chocolatey) — LTS line.
+            ("choco", &["install", "nodejs-lts", "-y"]),
             ("brew", &["install", "node@22"]),
             // Linux: use NodeSource
             ("sh", &["-c", "curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs"]),
@@ -354,6 +357,103 @@ fn install_tina4_js() {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
+
+/// Make sure the OS package manager exists before we lean on it:
+/// Chocolatey on Windows, Homebrew on macOS. Linux relies on the distro's
+/// apt/dnf (always present), so this is a no-op there. Returns true if a
+/// usable package manager is available afterwards.
+///
+/// Note: the Chocolatey bootstrap *and* every later `choco install` require
+/// an elevated (Administrator) shell. `tina4 setup` relaunches itself
+/// elevated on Windows so this runs with the rights it needs.
+pub fn ensure_package_manager() -> bool {
+    if console::is_windows() {
+        if check_exists("choco") {
+            println!("  {} Chocolatey already installed", icon_ok().green());
+            return true;
+        }
+        println!("  {} Installing Chocolatey (Windows package manager)...", icon_play().green());
+        // Official one-liner from chocolatey.org. TLS 1.2 (3072) is forced so
+        // the download works on older Windows boxes.
+        let bootstrap = "Set-ExecutionPolicy Bypass -Scope Process -Force; \
+            [System.Net.ServicePointManager]::SecurityProtocol = \
+            [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; \
+            iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))";
+        let _ = Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", bootstrap])
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status();
+        refresh_choco_path_windows();
+        if check_exists("choco") {
+            println!("  {} Chocolatey installed", icon_ok().green());
+            true
+        } else {
+            eprintln!(
+                "  {} Chocolatey install failed — re-run this from a terminal opened \
+                 'as Administrator'.",
+                icon_fail().red()
+            );
+            false
+        }
+    } else if cfg!(target_os = "macos") {
+        if check_exists("brew") {
+            println!("  {} Homebrew already installed", icon_ok().green());
+            return true;
+        }
+        println!("  {} Installing Homebrew (macOS package manager)...", icon_play().green());
+        // NONINTERACTIVE so it never stops to wait for an Enter / sudo prompt.
+        let bootstrap = "NONINTERACTIVE=1 /bin/bash -c \"$(curl -fsSL \
+            https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"";
+        let _ = Command::new("sh")
+            .args(["-c", bootstrap])
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status();
+        refresh_brew_path_macos();
+        if check_exists("brew") {
+            println!("  {} Homebrew installed", icon_ok().green());
+            true
+        } else {
+            eprintln!("  {} Homebrew install failed — see https://brew.sh", icon_fail().red());
+            false
+        }
+    } else {
+        // Linux: apt / dnf ship with the distro.
+        true
+    }
+}
+
+/// choco installs its shims to C:\ProgramData\chocolatey\bin. Env-var changes
+/// don't reach a running process, so splice that dir into our PATH to find
+/// `choco` (and packages it installs) without opening a new shell.
+fn refresh_choco_path_windows() {
+    let dir = std::env::var("ChocolateyInstall")
+        .map(|p| format!("{p}\\bin"))
+        .unwrap_or_else(|_| "C:\\ProgramData\\chocolatey\\bin".to_string());
+    if !std::path::Path::new(&dir).exists() {
+        return;
+    }
+    let current = std::env::var("PATH").unwrap_or_default();
+    let mut parts: Vec<String> = current.split(';').map(|s| s.to_string()).collect();
+    if !parts.iter().any(|p| p.eq_ignore_ascii_case(&dir)) {
+        parts.insert(0, dir);
+        std::env::set_var("PATH", parts.join(";"));
+    }
+}
+
+/// Homebrew lives at /opt/homebrew/bin (Apple Silicon) or /usr/local/bin
+/// (Intel). Add whichever exists to PATH for this process.
+fn refresh_brew_path_macos() {
+    let current = std::env::var("PATH").unwrap_or_default();
+    let mut parts: Vec<String> = current.split(':').map(|s| s.to_string()).collect();
+    for dir in ["/opt/homebrew/bin", "/usr/local/bin"] {
+        if std::path::Path::new(dir).exists() && !parts.iter().any(|p| p == dir) {
+            parts.insert(0, dir.to_string());
+        }
+    }
+    std::env::set_var("PATH", parts.join(":"));
+}
 
 fn check_exists(cmd: &str) -> bool {
     which::which(cmd).is_ok()

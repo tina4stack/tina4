@@ -13,6 +13,14 @@ use colored::Colorize;
 pub fn run(dry_run: bool) {
     banner();
 
+    // A real run installs software through Chocolatey, which needs
+    // Administrator rights — relaunch elevated before we ask anything, so the
+    // user answers the menu once (in the elevated window). Dry runs change
+    // nothing, so they never trigger the UAC prompt.
+    if !dry_run {
+        ensure_admin_windows();
+    }
+
     let lang = choose_language();
     let want_ai = choose_ai();
     let name = prompt("Project name", "my-app");
@@ -20,7 +28,12 @@ pub fn run(dry_run: bool) {
     if dry_run {
         println!();
         println!("  {} Dry run — no changes made. This setup would:", icon_info().blue());
-        println!("    - install the {} runtime + package manager (via Chocolatey on Windows, Homebrew on macOS)", lang);
+        if console::is_windows() {
+            println!("    - install Chocolatey if it's missing (relaunching as Administrator)");
+        } else {
+            println!("    - install Homebrew if it's missing");
+        }
+        println!("    - install the {} runtime + tools through it", lang);
         println!("    - install Git if it's missing");
         if want_ai {
             println!("    - install Claude Desktop + wire the tina4 MCP server");
@@ -94,6 +107,57 @@ fn choose_ai() -> bool {
     println!("    2. Just my code editor");
     let choice = prompt("Choose 1-2", "1");
     !choice.trim().starts_with('2')
+}
+
+/// `choco install` needs Administrator rights. If we're not elevated, relaunch
+/// `tina4 setup` through UAC and hand off to that elevated instance. No-op off
+/// Windows and when we're already elevated, so it never loops.
+fn ensure_admin_windows() {
+    if !console::is_windows() || std::env::var("TINA4_SETUP_ELEVATED").is_ok() {
+        return;
+    }
+    if is_admin_windows() {
+        return;
+    }
+
+    println!("  {} Setup needs Administrator rights to install software.", icon_info().blue());
+    println!("  {} Approve the Windows prompt — setup continues in a new window.", icon_info().blue());
+    println!();
+
+    let Ok(exe) = std::env::current_exe() else { return };
+    // Start-Process … -Verb RunAs raises the UAC prompt; the elevated child
+    // re-runs `setup`. TINA4_SETUP_ELEVATED guards against re-elevating.
+    let exe_str = exe.display().to_string().replace('\'', "''");
+    let cmd = format!(
+        "$env:TINA4_SETUP_ELEVATED='1'; \
+         Start-Process -FilePath '{exe_str}' -ArgumentList 'setup' -Verb RunAs"
+    );
+    let launched = Command::new("powershell")
+        .args(["-NoProfile", "-Command", &cmd])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if launched {
+        std::process::exit(0);
+    }
+    println!(
+        "  {} Couldn't elevate automatically. Right-click your terminal, choose \
+         'Run as administrator', then run: tina4 setup",
+        icon_warn().yellow()
+    );
+    std::process::exit(1);
+}
+
+/// True only in an elevated shell. `net session` needs admin and exits non-zero
+/// otherwise — a dependency-free way to detect elevation.
+fn is_admin_windows() -> bool {
+    Command::new("net")
+        .args(["session"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn ensure_git() {

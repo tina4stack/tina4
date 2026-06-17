@@ -45,6 +45,38 @@ fn ensure_dir(dir: &str) {
     }
 }
 
+/// Ensure the directory that will *contain* `path` exists — used so generating
+/// `src/routes/products.py` creates `src/routes/` (and any nested parents),
+/// NOT a spurious empty `src/routes/products/` directory.
+fn ensure_parent_dir(path: &str) {
+    if let Some(parent) = Path::new(path).parent() {
+        if let Some(p) = parent.to_str() {
+            if !p.is_empty() {
+                ensure_dir(p);
+            }
+        }
+    }
+}
+
+/// Turn a free-text name into a filesystem/SQL-safe slug:
+/// "create products" / "Create-Products" → "create_products".
+fn slugify(name: &str) -> String {
+    let mut out = String::new();
+    let mut pending_sep = false;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if pending_sep && !out.is_empty() {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+            pending_sep = false;
+        } else {
+            pending_sep = true;
+        }
+    }
+    out
+}
+
 fn write_file(path: &str, content: &str) {
     if Path::new(path).exists() {
         eprintln!(
@@ -171,9 +203,8 @@ fn generate_route(lang: &str, name: &str) {
 
     match lang {
         "python" => {
-            let dir = format!("src/routes/{}", route_path);
-            ensure_dir(&dir);
-            let path = format!("{}.py", dir.trim_end_matches('/'));
+            let path = format!("src/routes/{}.py", route_path);
+            ensure_parent_dir(&path);
             // Flatten to single file with all CRUD verbs
             let content = format!(
                 r#"from tina4_python import get, post, put, delete
@@ -213,9 +244,8 @@ async def remove(request, response):
             write_file(&path, &content);
         }
         "php" => {
-            let dir = format!("src/routes/{}", route_path);
-            ensure_dir(&dir);
-            let path = format!("{}.php", dir.trim_end_matches('/'));
+            let path = format!("src/routes/{}.php", route_path);
+            ensure_parent_dir(&path);
             let content = format!(
                 r#"<?php
 
@@ -244,9 +274,8 @@ async def remove(request, response):
             write_file(&path, &content);
         }
         "ruby" => {
-            let dir = format!("src/routes/{}", route_path);
-            ensure_dir(&dir);
-            let path = format!("{}.rb", dir.trim_end_matches('/'));
+            let path = format!("src/routes/{}.rb", route_path);
+            ensure_parent_dir(&path);
             let content = format!(
                 r#"Tina4.get "/{route}" do |request, response|
   response.json(data: [])
@@ -348,8 +377,11 @@ fn generate_migration(name: &str) {
     ensure_dir(dir);
 
     let now = chrono_now();
-    let table = to_plural(name.trim_start_matches("create_"));
-    let path = format!("{}/{}_{}.sql", dir, now, name);
+    // Slugify so "create products" → "create_products": no spaces in the
+    // filename, and a valid SQL identifier for the table name below.
+    let slug = slugify(name);
+    let table = to_plural(slug.trim_start_matches("create_"));
+    let path = format!("{}/{}_{}.sql", dir, now, slug);
 
     let content = format!(
         r#"-- Migration: {name}
@@ -546,4 +578,48 @@ fn unsupported(lang: &str) {
         lang.yellow()
     );
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slugify_normalizes_free_text() {
+        // The bug: `tina4 generate migration "create products"` produced a
+        // filename with a space and a "CREATE TABLE create products" with a
+        // space in the identifier. Slugify must collapse to underscores.
+        assert_eq!(slugify("create products"), "create_products");
+        assert_eq!(slugify("Create-Products"), "create_products");
+        assert_eq!(slugify("add users table"), "add_users_table");
+        assert_eq!(slugify("  weird   name  "), "weird_name");
+        assert_eq!(slugify("already_snake"), "already_snake");
+    }
+
+    #[test]
+    fn migration_table_name_is_a_valid_identifier() {
+        // mirrors generate_migration: slug → strip create_ → pluralize.
+        let slug = slugify("create products");
+        let table = to_plural(slug.trim_start_matches("create_"));
+        assert_eq!(table, "products"); // not "create products" / "create productss"
+        assert!(!table.contains(' '));
+    }
+
+    #[test]
+    fn to_snake_splits_camel_case() {
+        assert_eq!(to_snake("RateLimit"), "rate_limit");
+        assert_eq!(to_snake("Product"), "product");
+    }
+
+    #[test]
+    fn to_plural_handles_common_cases() {
+        assert_eq!(to_plural("Product"), "products");
+        assert_eq!(to_plural("Category"), "categories");
+        assert_eq!(to_plural("users"), "users"); // already plural
+    }
+
+    #[test]
+    fn to_camel_from_snake() {
+        assert_eq!(to_camel("rate_limit"), "rateLimit");
+    }
 }

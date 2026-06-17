@@ -345,8 +345,12 @@ fn ensure_claude_desktop() {
     } else {
         println!("  {} Download Claude Desktop: https://claude.ai/download", icon_info().blue());
     }
-    // Next pass: write the tina4 MCP server into claude_desktop_config.json so
-    // Claude can drive this project (24 dev tools). Tracked in the setup spec.
+    // Claude Desktop is installed. Connecting it to a project's live MCP
+    // endpoint (`/__dev/mcp`, served by `tina4 serve`) is a manual step in
+    // Desktop's connector settings — we don't write Desktop's global config
+    // from here because the connector schema varies and Windows stores it
+    // under an MSIX-virtualized path. (Claude Code connects to the same URL
+    // directly.) This is intentionally NOT auto-wired, not a pending TODO.
 }
 
 fn ensure_claude_code() {

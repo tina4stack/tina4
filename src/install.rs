@@ -49,31 +49,45 @@ fn install_python() {
     } else {
         println!("  {} Installing uv...", icon_play().green());
         if console::is_windows() {
-            // CRITICAL: invoke PowerShell directly, NOT through cmd /C.
-            // The previous `shell_exec("powershell -c \"irm ... | iex\"")`
-            // wrapped the whole string in `cmd /C ...`, and cmd.exe's pipe
-            // operator parsed `|` before PowerShell saw it — so PowerShell
-            // only received `irm <url>` (the download), never `| iex` (the
-            // execution). The script downloaded silently, never ran, and
-            // the next `install_tina4_cli` call hit the "uv not found"
-            // path. Each arg here goes as a discrete argv entry, so no
-            // shell parsing breaks the pipe inside the script.
-            let status = Command::new("powershell")
-                .args([
-                    "-ExecutionPolicy", "ByPass",
-                    "-NoProfile",
-                    "-Command", "irm https://astral.sh/uv/install.ps1 | iex",
-                ])
+            // Python is guaranteed present by this point and pip ships with it,
+            // so the most reliable way to get uv on Windows is
+            // `python -m pip install uv`. The astral `irm | iex` script proved
+            // unreliable in the field — it could exit "successfully" without
+            // leaving uv actually callable, so the next `install_tina4_cli`
+            // ("uv tool install …") then failed. pip lands uv as a console
+            // script in Python's Scripts dir; we splice that dir onto PATH so
+            // this same process can find it without opening a new shell.
+            let py = if check_exists("python") { "python" } else { "python3" };
+            let pip_ok = Command::new(py)
+                .args(["-m", "pip", "install", "--upgrade", "uv"])
                 .stdout(std::process::Stdio::inherit())
                 .stderr(std::process::Stdio::inherit())
-                .status();
-            match status {
-                Ok(s) if s.success() => {
-                    println!("  {} uv installed", icon_ok().green());
-                    refresh_uv_path_windows();
-                }
-                Ok(s) => eprintln!("  {} uv installer exited with {}", icon_fail().red(), s),
-                Err(e) => eprintln!("  {} Failed to launch PowerShell: {}", icon_fail().red(), e),
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if pip_ok {
+                add_python_scripts_to_path_windows(py);
+            }
+            // Fallback to the official installer only if pip couldn't deliver uv.
+            if !check_exists("uv") {
+                let _ = Command::new("powershell")
+                    .args([
+                        "-ExecutionPolicy", "ByPass",
+                        "-NoProfile",
+                        "-Command", "irm https://astral.sh/uv/install.ps1 | iex",
+                    ])
+                    .stdout(std::process::Stdio::inherit())
+                    .stderr(std::process::Stdio::inherit())
+                    .status();
+                refresh_uv_path_windows();
+            }
+            if check_exists("uv") {
+                println!("  {} uv installed", icon_ok().green());
+            } else {
+                eprintln!(
+                    "  {} uv not installed — open a new terminal and run: python -m pip install uv",
+                    icon_fail().red()
+                );
             }
         } else {
             let status = Command::new("sh")
@@ -118,6 +132,31 @@ fn refresh_uv_path_windows() {
         }
     }
     std::env::set_var("PATH", parts.join(";"));
+}
+
+/// Ask Python where its console-script shims (e.g. uv.exe from `pip install uv`)
+/// live, and splice that directory into this process's PATH so
+/// `which::which("uv")` resolves it without the user opening a new shell.
+fn add_python_scripts_to_path_windows(py: &str) {
+    let Ok(out) = Command::new(py)
+        .args(["-c", "import sysconfig; print(sysconfig.get_path('scripts'))"])
+        .output()
+    else {
+        return;
+    };
+    if !out.status.success() {
+        return;
+    }
+    let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if dir.is_empty() || !std::path::Path::new(&dir).exists() {
+        return;
+    }
+    let current = std::env::var("PATH").unwrap_or_default();
+    let mut parts: Vec<String> = current.split(';').map(|s| s.to_string()).collect();
+    if !parts.iter().any(|p| p.eq_ignore_ascii_case(&dir)) {
+        parts.insert(0, dir);
+        std::env::set_var("PATH", parts.join(";"));
+    }
 }
 
 /// Splice ~/.local/bin and ~/.cargo/bin into PATH on Unix for the same reason

@@ -15,6 +15,13 @@ enum AiChoice {
     None,
 }
 
+/// What the first run remembered, so later runs can skip straight to
+/// "what type of project, what name".
+struct SetupConfig {
+    projects_dir: PathBuf,
+    ai: AiChoice,
+}
+
 /// Guided, menu-driven setup — the "getting started" one-liner (install.ps1 /
 /// install.sh) ends by calling this. A handful of questions, then it installs
 /// the runtime (+ git, + the chosen AI tool, + the tina4 skills), creates a
@@ -30,6 +37,18 @@ enum AiChoice {
 pub fn run(dry_run: bool, skip_install: bool) {
     banner();
 
+    // First run configures the machine (language, AI tool, projects folder) and
+    // remembers those choices. Every run after that is a fast path: it only asks
+    // the project type + name and builds into the environment already set up.
+    match load_config() {
+        Some(cfg) => run_quick(dry_run, skip_install, cfg),
+        None => run_first(dry_run, skip_install),
+    }
+}
+
+/// First-time setup: ask everything, install the world, scaffold the first
+/// project, and remember the projects folder + AI tool for next time.
+fn run_first(dry_run: bool, skip_install: bool) {
     // A real install goes through Chocolatey, which needs Administrator rights.
     // Preview / scaffold-only modes change no system state, so they never
     // trigger the UAC prompt.
@@ -70,30 +89,86 @@ pub fn run(dry_run: bool, skip_install: bool) {
             AiChoice::ClaudeCode => ensure_claude_code(),
             AiChoice::None => {}
         }
+        // Remember the environment so future `tina4 setup` runs are one-question
+        // quick. Only after a real install — a --skip-install test machine isn't
+        // actually configured.
+        save_config(&projects_dir, ai);
     }
 
-    // 5. Projects folder + scaffold the first project inside it.
-    if let Err(e) = fs::create_dir_all(&projects_dir) {
+    scaffold_into(&projects_dir, &project_path, &lang, ai);
+}
+
+/// Every run after the first: the machine is already set up, so only ask the
+/// project type + name, then build into the saved projects folder.
+fn run_quick(dry_run: bool, skip_install: bool, cfg: SetupConfig) {
+    println!(
+        "  {} Using your saved setup — projects in {}, AI: {}.",
+        icon_info().blue(),
+        cfg.projects_dir.display().to_string().cyan(),
+        ai_label(cfg.ai)
+    );
+    println!("  {}", "(to change these, delete ~/.tina4/setup.conf and run setup again)".dimmed());
+    println!();
+
+    let lang = choose_language();
+    let name = prompt("Name of your new project", "tina4example");
+    let project_path = cfg.projects_dir.join(&name);
+    let need_runtime = !runtime_present(&lang);
+
+    if dry_run {
+        println!();
+        println!("  {} Dry run — no changes made. This would:", icon_info().blue());
+        if need_runtime && !skip_install {
+            println!("    - install the {} runtime (new language for this machine)", lang);
+        }
+        println!("    - scaffold '{}' at {}", name, project_path.display());
+        println!("    - write a CLAUDE.md into the project");
+        if cfg.ai == AiChoice::ClaudeDesktop {
+            println!("    - open Claude Desktop");
+        }
+        println!();
+        return;
+    }
+
+    // Only the package manager / elevation dance if we actually need to install
+    // a runtime the machine doesn't have yet (e.g. a different language).
+    if need_runtime && !skip_install {
+        ensure_admin_windows();
+    }
+
+    println!();
+    println!("{} Building your project...\n", icon_play().green());
+
+    if skip_install {
+        println!("  {} --skip-install: skipping runtime install\n", icon_info().blue());
+    } else if need_runtime {
+        install::run(&lang);
+    } else {
+        println!("  {} {} runtime already installed", icon_ok().green(), pretty_lang(&lang));
+    }
+
+    scaffold_into(&cfg.projects_dir, &project_path, &lang, cfg.ai);
+}
+
+/// Shared tail for both modes: create the projects folder, scaffold the
+/// project inside it, write its CLAUDE.md, open the tool, print next steps.
+fn scaffold_into(projects_dir: &Path, project_path: &Path, lang: &str, ai: AiChoice) {
+    if let Err(e) = fs::create_dir_all(projects_dir) {
         eprintln!("  {} Could not create {}: {}", icon_warn().yellow(), projects_dir.display(), e);
     } else {
         println!("  {} Projects folder: {}", icon_ok().green(), projects_dir.display().to_string().cyan());
     }
-    if let Err(e) = std::env::set_current_dir(&projects_dir) {
+    if let Err(e) = std::env::set_current_dir(projects_dir) {
         eprintln!("  {} Could not enter {}: {}", icon_warn().yellow(), projects_dir.display(), e);
     }
     // Setup owns the ending (CLAUDE.md, open IDE, next steps), so tell init not
     // to grab the terminal with its blocking "start server now?" prompt.
     std::env::set_var("TINA4_INIT_NO_SERVE", "1");
-    init::run(Some(&lang), Some(&name));
+    init::run(Some(lang), project_path.file_name().and_then(|s| s.to_str()));
 
-    // 6. A project CLAUDE.md so the AI tool knows how to work in this project.
-    write_project_claude_md(&project_path, &lang, ai);
-
-    // 7. Open the chosen tool (best effort — never fatal).
+    write_project_claude_md(project_path, lang, ai);
     open_ide(ai);
-
-    // 8. What's next.
-    whats_next(&project_path, ai);
+    whats_next(project_path, ai);
 }
 
 fn banner() {
@@ -279,19 +354,43 @@ fn ensure_claude_code() {
         println!("  {} Claude Code already installed", icon_ok().green());
         return;
     }
-    println!("  {} Installing Claude Code...", icon_play().green());
-    // npm is the reliable cross-platform path when Node is present (it is, if
-    // the user picked Node; otherwise it may not be).
-    let installed = which::which("npm").is_ok()
-        && run_status("npm", &["install", "-g", "@anthropic-ai/claude-code"]);
-    if installed || which::which("claude").is_ok() {
+    println!("  {} Installing Claude Code (no Node required)...", icon_play().green());
+    // Native installer — does NOT depend on Node.js. (npm install -g is only
+    // for users who already have Node and prefer it.)
+    if console::is_windows() {
+        let _ = Command::new("powershell")
+            .args(["-NoProfile", "-Command", "irm https://claude.ai/install.ps1 | iex"])
+            .status();
+    } else {
+        let _ = Command::new("sh")
+            .args(["-c", "curl -fsSL https://claude.ai/install.sh | bash"])
+            .status();
+    }
+    refresh_local_bin_path();
+    if which::which("claude").is_ok() {
         println!("  {} Claude Code installed", icon_ok().green());
     } else {
         println!(
-            "  {} Install Claude Code from {} (needs Node.js, or use the native installer there)",
+            "  {} Claude Code installed — open a new terminal to use `claude` (docs: {})",
             icon_info().blue(),
             "https://docs.claude.com/claude-code".cyan()
         );
+    }
+}
+
+/// The native Claude Code installer (and uv, and many CLI tools) drops binaries
+/// into ~/.local/bin, which a running process won't have on PATH yet. Splice it
+/// in so `which::which("claude")` resolves without opening a new shell.
+fn refresh_local_bin_path() {
+    let bin = home_dir().join(".local").join("bin");
+    if !bin.exists() {
+        return;
+    }
+    let sep = if console::is_windows() { ';' } else { ':' };
+    let current = std::env::var("PATH").unwrap_or_default();
+    let bin_s = bin.display().to_string();
+    if !current.split(sep).any(|p| p == bin_s) {
+        std::env::set_var("PATH", format!("{bin_s}{sep}{current}"));
     }
 }
 
@@ -437,6 +536,73 @@ fn whats_next(project_path: &Path, ai: AiChoice) {
         }
     }
     println!();
+}
+
+// ── config (zero-dep key=value file) ─────────────────────────────
+
+fn config_path() -> PathBuf {
+    home_dir().join(".tina4").join("setup.conf")
+}
+
+/// Load the remembered setup, if the first run has happened. Returns None when
+/// there's no config (→ first run) or the projects folder line is missing.
+fn load_config() -> Option<SetupConfig> {
+    let text = fs::read_to_string(config_path()).ok()?;
+    let mut projects_dir: Option<PathBuf> = None;
+    let mut ai = AiChoice::None;
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("projects_dir=") {
+            projects_dir = Some(PathBuf::from(v.trim()));
+        } else if let Some(v) = line.strip_prefix("ai=") {
+            ai = ai_from_str(v.trim());
+        }
+    }
+    Some(SetupConfig { projects_dir: projects_dir?, ai })
+}
+
+fn save_config(projects_dir: &Path, ai: AiChoice) {
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let body = format!("projects_dir={}\nai={}\n", projects_dir.display(), ai_to_str(ai));
+    let _ = fs::write(path, body);
+}
+
+fn ai_to_str(ai: AiChoice) -> &'static str {
+    match ai {
+        AiChoice::ClaudeDesktop => "claude-desktop",
+        AiChoice::ClaudeCode => "claude-code",
+        AiChoice::None => "none",
+    }
+}
+
+fn ai_from_str(s: &str) -> AiChoice {
+    match s {
+        "claude-desktop" => AiChoice::ClaudeDesktop,
+        "claude-code" => AiChoice::ClaudeCode,
+        _ => AiChoice::None,
+    }
+}
+
+fn ai_label(ai: AiChoice) -> &'static str {
+    match ai {
+        AiChoice::ClaudeDesktop => "Claude Desktop",
+        AiChoice::ClaudeCode => "Claude Code",
+        AiChoice::None => "code editor only",
+    }
+}
+
+/// Is the runtime for this language already on the machine? Lets quick runs
+/// skip the package-manager / elevation dance unless a new language was picked.
+fn runtime_present(lang: &str) -> bool {
+    match lang {
+        "python" => which::which("python3").is_ok() || which::which("python").is_ok(),
+        "nodejs" => which::which("node").is_ok(),
+        "php" => which::which("php").is_ok(),
+        "ruby" => which::which("ruby").is_ok(),
+        _ => false,
+    }
 }
 
 // ── small helpers ────────────────────────────────────────────────

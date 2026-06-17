@@ -11,6 +11,7 @@ mod install;
 mod rag;
 mod scss;
 mod session;
+mod setup;
 mod upgrade;
 mod watcher;
 
@@ -35,6 +36,13 @@ struct Cli {
 enum Commands {
     /// Check installed languages and tools
     Doctor,
+
+    /// Guided, menu-driven setup: install everything + scaffold a ready-to-run project
+    Setup {
+        /// Show the menu and plan without installing or scaffolding anything (for testing)
+        #[arg(long)]
+        dry_run: bool,
+    },
 
     /// Install a language runtime (python, php, ruby, nodejs)
     Install {
@@ -232,6 +240,8 @@ fn main() {
 
     match cli.command {
         Commands::Doctor => doctor::run(),
+
+        Commands::Setup { dry_run } => setup::run(dry_run),
 
         Commands::Install { lang } => install::run(&lang),
 

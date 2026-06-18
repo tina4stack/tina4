@@ -493,7 +493,14 @@ fn ensure_claude_desktop() {
 /// so there's nothing for `which` to find.
 fn claude_desktop_installed() -> bool {
     if console::is_windows() {
-        claude_desktop_exe().is_some()
+        // The AnthropicClaude dir alone is enough of a signal that it's
+        // installed (claude_desktop_target may still be resolving the exact
+        // launch target). Check both so a present-but-unusual layout still
+        // counts as installed and we don't reinstall over it.
+        claude_desktop_target().is_some()
+            || std::env::var("LOCALAPPDATA")
+                .map(|l| Path::new(&l).join("AnthropicClaude").exists())
+                .unwrap_or(false)
     } else if cfg!(target_os = "macos") {
         Path::new("/Applications/Claude.app").exists()
     } else {
@@ -502,40 +509,64 @@ fn claude_desktop_installed() -> bool {
     }
 }
 
-/// Resolve the Claude Desktop launcher .exe on Windows. The app installs under
-/// %LOCALAPPDATA%\AnthropicClaude with a top-level claude.exe launcher plus
-/// versioned app-x.y.z dirs (each with their own claude.exe). It is NOT on PATH
-/// as `claude`, so `start claude` fails with "Windows cannot find 'claude'".
-/// Returns the launcher path, preferring the stable top-level one, else the
-/// newest app-* dir's exe. None on non-Windows or when not installed.
-fn claude_desktop_exe() -> Option<PathBuf> {
+/// Resolve a launchable Claude Desktop target on Windows — an .exe or a Start
+/// Menu .lnk shortcut. Claude Desktop is a GUI app, NOT on PATH as `claude`, so
+/// `start claude` fails with "Windows cannot find 'claude'". Different installers
+/// drop it in different places (the official per-user installer, the Chocolatey
+/// package, MSIX), so we check every known location and also the Start Menu
+/// shortcut, which is location-independent and present for any normal install.
+/// Returns the first target that EXISTS (so callers can `start` it without
+/// risking a missing-file dialog), or None when nothing is found.
+fn claude_desktop_target() -> Option<PathBuf> {
     if !console::is_windows() {
         return None;
     }
-    let root = PathBuf::from(std::env::var("LOCALAPPDATA").ok()?).join("AnthropicClaude");
-    if !root.exists() {
-        return None;
+    let env = |k: &str| std::env::var(k).ok().map(PathBuf::from);
+    let local = env("LOCALAPPDATA");
+    let appdata = env("APPDATA");
+    let programdata = env("PROGRAMDATA");
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // 1. Official per-user install: %LOCALAPPDATA%\AnthropicClaude\claude.exe
+    //    plus newest versioned app-*/claude.exe.
+    if let Some(local) = &local {
+        let root = local.join("AnthropicClaude");
+        candidates.push(root.join("claude.exe"));
+        if let Ok(rd) = std::fs::read_dir(&root) {
+            let mut apps: Vec<PathBuf> = rd
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.is_dir()
+                        && p.file_name()
+                            .and_then(|s| s.to_str())
+                            .map(|n| n.starts_with("app-"))
+                            .unwrap_or(false)
+                })
+                .collect();
+            apps.sort();
+            if let Some(newest) = apps.pop() {
+                candidates.push(newest.join("claude.exe"));
+            }
+        }
+        // 2. Some installers use %LOCALAPPDATA%\Programs\claude\Claude.exe
+        candidates.push(local.join("Programs").join("claude").join("Claude.exe"));
     }
-    // Preferred: the stable launcher at the root.
-    let top = root.join("claude.exe");
-    if top.exists() {
-        return Some(top);
+
+    // 3. Start Menu shortcuts — location-independent; created by every normal
+    //    install. `start ""  <lnk>` launches whatever the shortcut points to.
+    for base in [appdata.as_ref(), programdata.as_ref()].into_iter().flatten() {
+        let sm = base
+            .join("Microsoft")
+            .join("Windows")
+            .join("Start Menu")
+            .join("Programs");
+        candidates.push(sm.join("Claude.lnk"));
+        candidates.push(sm.join("Claude").join("Claude.lnk"));
+        candidates.push(sm.join("Anthropic").join("Claude.lnk"));
     }
-    // Fallback: newest app-*/claude.exe (lexical max — version dirs sort sanely).
-    let mut candidates: Vec<PathBuf> = std::fs::read_dir(&root)
-        .ok()?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| {
-            p.is_dir()
-                && p.file_name()
-                    .and_then(|s| s.to_str())
-                    .map(|n| n.starts_with("app-"))
-                    .unwrap_or(false)
-                && p.join("claude.exe").exists()
-        })
-        .collect();
-    candidates.sort();
-    candidates.pop().map(|d| d.join("claude.exe"))
+
+    candidates.into_iter().find(|p| p.exists())
 }
 
 /// Is Claude Code already on this machine? More thorough than a bare
@@ -902,16 +933,24 @@ fn open_ide(ai: AiChoice) {
     if cfg!(target_os = "macos") {
         let _ = Command::new("open").args(["-a", "Claude"]).status();
     } else if console::is_windows() {
-        // Claude Desktop is NOT on PATH as `claude` (it's a GUI app under
-        // %LOCALAPPDATA%\AnthropicClaude). `start "" claude` therefore popped
-        // "Windows cannot find 'claude'". Launch the resolved launcher instead;
-        // if it isn't installed, skip quietly — the user already has the
-        // commands printed above, and no scary error dialog appears.
-        if let Some(exe) = claude_desktop_exe() {
-            let _ = Command::new("cmd")
-                .args(["/C", "start", ""])
-                .arg(exe)
-                .status();
+        // Claude Desktop is NOT on PATH as `claude` (it's a GUI app), so
+        // `start "" claude` popped "Windows cannot find 'claude'". Launch a
+        // RESOLVED target that we've confirmed exists (an .exe or Start Menu
+        // .lnk) so `start` never raises a missing-file dialog. If nothing is
+        // found, say so plainly and skip — never error out.
+        match claude_desktop_target() {
+            Some(target) => {
+                let _ = Command::new("cmd")
+                    .args(["/C", "start", ""])
+                    .arg(target)
+                    .status();
+            }
+            None => {
+                println!(
+                    "  {} Couldn't find Claude Desktop to open — launch it from the Start menu.",
+                    icon_info().blue()
+                );
+            }
         }
     }
 }

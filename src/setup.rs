@@ -534,9 +534,28 @@ fn write_project_claude_md(project_path: &Path, lang: &str, ai: AiChoice) {
 
 {ai_line}
 
-This is a **Tina4** project: a self-contained backend that also serves a
-[tina4-js](https://github.com/tina4stack/tina4-js) reactive frontend. Zero
-external dependencies, batteries included.
+This is a **Tina4 v3** project — *The Intelligent Native Application 4ramework*.
+Tina4 is **built for AI**: zero third-party dependencies, convention over
+configuration, and a small, consistent API that fits in context. Prefer the
+framework's built-ins (ORM, routing, queues, auth, templates, WebSockets, …)
+over any library, and don't guess API names — they're documented exactly (see
+**Help & source of truth** below).
+
+- Website & docs: **https://tina4.com** — the **"Ask Tina4"** box there is
+  RAG-backed; ask it any framework question and it answers from the live corpus.
+- This running app has a dev dashboard at **`/__dev`** (route inspector, DB
+  runner, logs, AI chat) and a live MCP endpoint at **`/__dev/mcp`** an AI can
+  query for THIS project's real routes, models, and API signatures.
+
+## Help & source of truth (check before guessing)
+
+1. **Installed skills** in `~/.claude/skills/` — **tina4-developer** and
+   **tina4-js**. The authoritative guides for the framework + reactive frontend;
+   use them, they document the real API surface.
+2. **https://tina4.com** — full docs + **Ask Tina4** (RAG search over the live
+   framework corpus).
+3. **`/__dev/mcp`** on the running app — live API reflection (`api_search`,
+   docs + route/model listing) for this exact project and framework version.
 
 ## How to run
 
@@ -544,8 +563,9 @@ external dependencies, batteries included.
 tina4 serve
 ```
 
-This starts the dev server, watches your files, and hot-reloads the browser on
-every change. The URL is printed when it starts.
+Starts the dev server, watches your files, hot-reloads the browser, and opens
+the app **and** the `/__dev` dashboard in a second tab. The URL is printed when
+it starts.
 
 > Dev runs two ports: the **base** port hot-reloads (for you), and **base+1000**
 > is a stable port that does NOT reload — use that one when an AI is driving the
@@ -561,17 +581,15 @@ every change. The URL is printed when it starts.
 | Add a page template     | `src/templates/`                    | (Twig-style templates)               |
 | Frontend behaviour      | served at `/js/tina4js.min.js`      | tina4-js signals + html templates    |
 
-## Skills
-
-The **tina4-developer** and **tina4-js** skills are installed globally. Use
-them — they are the source of truth for tina4 patterns. Don't guess API names;
-the framework is small and consistent, and the skills document it exactly.
-
 ## Golden rules
 
-- Keep it simple. Tina4 is zero-dependency — reach for the framework before a library.
+- **Use Tina4 v3 built-ins first** — it's zero-dependency; reach for the
+  framework (and the skills) before any library or hand-rolled code.
+- Don't guess API names — check the skills, **Ask Tina4** at https://tina4.com,
+  or the live `/__dev/mcp` tools.
 - Routes return data; `response()` auto-serializes models and lists to JSON.
 - Env vars are read from `.env` (already created). `TINA4_DEBUG=true` is on for dev.
+- All links and references should point to **https://tina4.com**.
 
 ## A good first prompt
 

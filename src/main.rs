@@ -633,6 +633,15 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
     } else {
         console::open_browser(&url);
         println!("{} Browser opened: {}", icon_ok().green(), url.cyan());
+        // Also open the dev dashboard in a second tab — the route inspector, DB
+        // runner, logs, AI chat and live tools, right next to the running app.
+        // Dev only: `/__dev` doesn't exist in a production server.
+        if !force_production {
+            let dashboard = format!("{}/__dev", url);
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            console::open_browser(&dashboard);
+            println!("{} Dashboard:      {}", icon_ok().green(), dashboard.cyan());
+        }
     }
 
     // File watcher — the Rust CLI owns all file watching. On change it:

@@ -608,7 +608,9 @@ fn whats_next(project_path: &Path, ai: AiChoice) {
     println!();
     println!("  {} Your project is ready: {}", icon_ok().green(), p.to_string().cyan());
     println!();
-    println!("  Start it:");
+    // Always print the commands first — the fallback if anything below is
+    // skipped or interrupted.
+    println!("  Start it any time:");
     println!("    cd {}", p);
     println!("    tina4 serve        {}", "# opens your app in the browser".dimmed());
     println!();
@@ -629,6 +631,31 @@ fn whats_next(project_path: &Path, ai: AiChoice) {
         }
     }
     println!();
+
+    // Offer to launch it right now — cd into the project and `tina4 serve`,
+    // which opens the browser on the running app. Skipped in the elevated
+    // Windows install window (the user serves from their own console there;
+    // the printed command above is the fallback).
+    if std::env::var("TINA4_SETUP_ELEVATED").is_ok() {
+        return;
+    }
+    let ans = prompt("Start it now and open it in your browser? [Y/n]", "y");
+    if matches!(ans.trim().to_lowercase().as_str(), "" | "y" | "yes") {
+        let label = project_path.file_name().and_then(|s| s.to_str()).unwrap_or("your app");
+        println!();
+        println!(
+            "  {} Starting {} — your browser will open. Press Ctrl+C to stop.",
+            icon_play().green(),
+            label.cyan()
+        );
+        println!();
+        // Re-exec ourselves as `tina4 serve` inside the project so it picks up
+        // app.py/index.php/app.rb/app.ts and serves THIS project.
+        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("tina4"));
+        let _ = Command::new(exe).arg("serve").current_dir(project_path).status();
+    } else {
+        println!("  {} No problem — run {} when you're ready.", icon_info().blue(), "tina4 serve".cyan());
+    }
 }
 
 // ── config (zero-dep key=value file) ─────────────────────────────

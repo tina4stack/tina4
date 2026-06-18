@@ -1,6 +1,6 @@
 # Tina4 CLI
 
-Version 3.8.37 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 frameworks.
+Version 3.8.38 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 frameworks.
 
 ## Build & Test
 
@@ -16,7 +16,8 @@ Version 3.8.37 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 framewor
 tina4 setup                      Guided menu: language + AI tool + projects folder +
                                  project name, then installs runtime/git/skills/AI tool
                                  (via Chocolatey/Homebrew), scaffolds the project with its
-                                 own CLAUDE.md, and opens the tool.
+                                 own CLAUDE.md, opens the tool, and offers to start the
+                                 project right away (`tina4 serve` → opens the browser).
                                  --dry-run = preview only. --skip-install = scaffold, no installs.
 tina4 init <language> <path>     Scaffold a new project (python, php, ruby, nodejs, tina4js)
 tina4 serve                      Start dev server with file watcher + SCSS + browser open
@@ -49,7 +50,7 @@ via `Start-Process -Verb RunAs`, exiting the original console → looks like it
 "just dropped to the prompt", and the menu is stranded in a window you may not
 see (or the relaunch was declined/failed).
 
-**What's already done (v3.8.37, in `src/setup.rs`):**
+**What's already done (v3.8.38, in `src/setup.rs`):**
 - The menu (`choose_language`/`choose_ai`/`choose_projects_dir`/name) now runs
   **in the user's console first** — `elevate_for_install()` is called only
   *after* the answers are collected (was `ensure_admin_windows()` up front).
@@ -65,7 +66,7 @@ see (or the relaunch was declined/failed).
 
 **Still to confirm / likely finish on a real Windows box:**
 1. Does `tina4 setup` (non-admin) now show the menu in-console before any UAC?
-   Run `tina4 --version` first to be sure you're on **3.8.37** (a stale
+   Run `tina4 --version` first to be sure you're on **3.8.38** (a stale
    `tina4` earlier on PATH was a prime suspect).
 2. `is_admin_windows()` uses `net session` — confirm it correctly reports
    non-admin on the user's box (Wine false-positives admin).

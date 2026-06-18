@@ -33,6 +33,55 @@ tina4 ai                         Detect AI tools and install context
 tina4 update                     Self-update the binary
 ```
 
+## ⚠ Windows `tina4 setup` — handoff (work in progress, finish ON Windows)
+
+**macOS is the reference flow and works end-to-end** (verified): `tina4 setup`
+asks the menu in-console → scaffolds the project → `uv sync` → `tina4 serve`
+returns HTTP 200. Mac never elevates, so it all happens in one console. Match
+this single-console experience on Windows.
+
+**The Windows symptom (reported by Andre):** `tina4 setup` prints "Starting
+setup…" then **drops straight back to the prompt** — the wizard never appears.
+
+**Root cause:** `choco install` needs Administrator. The old code elevated
+*before* the menu and relaunched the whole wizard into a **new elevated window**
+via `Start-Process -Verb RunAs`, exiting the original console → looks like it
+"just dropped to the prompt", and the menu is stranded in a window you may not
+see (or the relaunch was declined/failed).
+
+**What's already done (v3.8.37, in `src/setup.rs`):**
+- The menu (`choose_language`/`choose_ai`/`choose_projects_dir`/name) now runs
+  **in the user's console first** — `elevate_for_install()` is called only
+  *after* the answers are collected (was `ensure_admin_windows()` up front).
+- Elevation passes the answers to the elevated re-run via env
+  (`TINA4_SETUP_ELEVATED` + `TINA4_SETUP_LANG`/`_AI`/`_DIR`/`_NAME`); the
+  elevated instance reads them in `elevated_answers()` and skips the menu.
+  `pause_if_elevated()` holds the elevated window open at the end.
+- Installers (`install.ps1`/`install.sh`) print the `tina4 setup` command list
+  before launching setup + a "run tina4 setup again" hint on non-zero exit.
+- Verified under Wine: `--dry-run` shows the menu; the elevated re-run
+  (env answers set) skips the menu and uses the passed lang/dir/name. **Wine
+  can't exercise real UAC, so the actual elevation path is UNVERIFIED.**
+
+**Still to confirm / likely finish on a real Windows box:**
+1. Does `tina4 setup` (non-admin) now show the menu in-console before any UAC?
+   Run `tina4 --version` first to be sure you're on **3.8.37** (a stale
+   `tina4` earlier on PATH was a prime suspect).
+2. `is_admin_windows()` uses `net session` — confirm it correctly reports
+   non-admin on the user's box (Wine false-positives admin).
+3. Preferred design (mirror Mac's single console): instead of relaunching the
+   whole wizard elevated, keep the **wizard + scaffold in the user's console**
+   and elevate **only the Chocolatey install** as a short `Start-Process
+   -Verb RunAs -Wait` sub-step that returns control to the original console.
+4. Test paths: `tina4 setup --dry-run`, `tina4 setup --skip-install` (both skip
+   elevation), then the real `tina4 setup`.
+
+**Related next-step (Andre asked):** for `AiChoice::ClaudeCode`, end setup by
+opening a Claude Code session in the project with the first prompt pre-filled —
+`claude "<first-prompt>"` in the project dir — instead of just printing "open
+the tool and paste the prompt". See `open_ide()` / `whats_next()` / the
+first-prompt text (~line 487).
+
 ## Key Architecture
 
 - Auto-detects project language from app.py/index.php/app.rb/app.ts

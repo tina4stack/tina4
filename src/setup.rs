@@ -125,12 +125,15 @@ fn run_first(dry_run: bool, skip_install: bool) {
     // A real install goes through Chocolatey, which needs Administrator rights.
     // Now that we have the answers, hand off to an elevated window that runs
     // the install + scaffold without re-asking — answers are passed on argv.
-    // No-op when already admin / off Windows — we just continue in-process.
-    if !skip_install {
-        elevate_for_install(&lang, ai, &projects_dir, &name);
-    }
+    // When already admin / off Windows this returns true (install in-process);
+    // when we couldn't get admin it returns false (scaffold only, no installs).
+    let install_here = if skip_install {
+        false
+    } else {
+        elevate_for_install(&lang, ai, &projects_dir, &name)
+    };
 
-    run_first_install(&lang, ai, &projects_dir, &project_path, skip_install, false);
+    run_first_install(&lang, ai, &projects_dir, &project_path, skip_install || !install_here, false);
 }
 
 /// The install + scaffold tail of first-time setup. Runs either in-process
@@ -210,18 +213,24 @@ fn run_quick(dry_run: bool, skip_install: bool, cfg: SetupConfig) {
 
     // Only the elevation dance if we actually need to install a runtime the
     // machine doesn't have yet. Pass the answers so the elevated window runs
-    // straight through without re-asking.
-    if need_runtime && !skip_install {
-        elevate_for_install(&lang, cfg.ai, &cfg.projects_dir, &name);
-    }
+    // straight through without re-asking. Returns false (scaffold only) if we
+    // need to install but couldn't get admin.
+    let install_here = if need_runtime && !skip_install {
+        elevate_for_install(&lang, cfg.ai, &cfg.projects_dir, &name)
+    } else {
+        true
+    };
 
     println!();
     println!("{} Building your project...\n", icon_play().green());
 
     if skip_install {
         println!("  {} --skip-install: skipping runtime install\n", icon_info().blue());
-    } else if need_runtime {
+    } else if need_runtime && install_here {
         install::run(&lang);
+    } else if need_runtime {
+        // No admin: skip the install (guidance was already printed), scaffold anyway.
+        println!("  {} Skipping the {} runtime install (no admin) — scaffolding your project.\n", icon_warn().yellow(), pretty_lang(&lang));
     } else {
         println!("  {} {} runtime already installed", icon_ok().green(), pretty_lang(&lang));
     }
@@ -360,12 +369,18 @@ fn print_plan(
 /// Called AFTER the menu so the questions always run in the user's own console;
 /// elevating first would relaunch into a new window and leave the original
 /// looking like it just exited.
-fn elevate_for_install(lang: &str, ai: AiChoice, projects_dir: &Path, name: &str) {
+/// Returns true if system installs should run in THIS process (we're on
+/// macOS/Linux, or already admin on Windows). Returns false when we're on
+/// Windows without admin and couldn't elevate — the caller then scaffolds the
+/// project but skips the system installs, with honest guidance, instead of
+/// dead-ending. When elevation succeeds the elevated child takes over and this
+/// process exits.
+fn elevate_for_install(lang: &str, ai: AiChoice, projects_dir: &Path, name: &str) -> bool {
     if !console::is_windows() {
-        return;
+        return true;
     }
     if is_admin_windows() {
-        return;
+        return true;
     }
 
     println!();
@@ -373,7 +388,7 @@ fn elevate_for_install(lang: &str, ai: AiChoice, projects_dir: &Path, name: &str
     println!("  {} Approve the Windows prompt — a new window will finish the install.", icon_info().blue());
     println!();
 
-    let Ok(exe) = std::env::current_exe() else { return };
+    let Ok(exe) = std::env::current_exe() else { return false };
     // Start-Process … -Verb RunAs raises the UAC prompt and launches the elevated
     // child. Environment variables do NOT cross that boundary — the elevated
     // process gets a fresh environment — so the answers ride on ARGV instead
@@ -402,12 +417,46 @@ fn elevate_for_install(lang: &str, ai: AiChoice, projects_dir: &Path, name: &str
         println!("  {} Continuing in the elevated window...", icon_ok().green());
         std::process::exit(0);
     }
+    // No admin — either the UAC prompt was declined, or this is a standard
+    // account with no admin credentials to satisfy it. Don't dead-end: carry on
+    // and scaffold the project without the system installs, and tell the user
+    // exactly how to get the runtime WITHOUT admin (the Python path needs none).
     println!(
-        "  {} Couldn't elevate automatically. Right-click your terminal, choose \
-         'Run as administrator', then run: tina4 setup",
+        "  {} No Administrator rights — skipping the system installs and just \
+         setting up your project.",
         icon_warn().yellow()
     );
-    std::process::exit(1);
+    println!(
+        "  {} To get the {} runtime without admin:",
+        icon_info().blue(),
+        pretty_lang(lang)
+    );
+    match lang {
+        // uv installs to the user profile (no admin) and can even fetch Python
+        // itself — so a Python project needs no Administrator at all.
+        "python" => {
+            println!("       powershell -c \"irm https://astral.sh/uv/install.ps1 | iex\"");
+            println!("       uv python install 3.12");
+        }
+        "nodejs" => {
+            println!("       Install Node for your user from https://nodejs.org (per-user, no admin),");
+            println!("       or use a user-level manager like fnm / nvm-windows.");
+        }
+        "php" => {
+            println!("       Download the PHP zip from https://windows.php.net/download/ and add it to your PATH,");
+            println!("       or ask an administrator to run: choco install php");
+        }
+        "ruby" => {
+            println!("       Install RubyInstaller from https://rubyinstaller.org (per-user, no admin).");
+        }
+        _ => {}
+    }
+    println!(
+        "  {} Claude Code (terminal) and Claude Desktop both install per-user, no admin needed.",
+        icon_info().blue()
+    );
+    println!();
+    false
 }
 
 /// The elevated re-run receives the menu answers on ARGV (env vars don't survive

@@ -1,6 +1,6 @@
 # Tina4 CLI
 
-Version 3.8.43 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 frameworks.
+Version 3.8.44 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 frameworks.
 
 ## Build & Test
 
@@ -16,9 +16,10 @@ Version 3.8.43 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 framewor
 tina4 setup                      Guided menu: language + AI tool + projects folder +
                                  project name, then installs runtime/git/skills/AI tool
                                  (via Chocolatey/Homebrew), scaffolds the project with its
-                                 own CLAUDE.md + .mcp.json. Claude Code (the default) opens a
-                                 real seeded session in the project; Claude Desktop/none get a
-                                 "start it now?" prompt (`tina4 serve` → opens app + /__dev).
+                                 own CLAUDE.md + .mcp.json. Claude Desktop (the default) and
+                                 "none" get a "start it now?" prompt (`tina4 serve` → opens app
+                                 + /__dev, and launches Desktop); Claude Code opens a real
+                                 seeded session in the project.
                                  --dry-run = preview only. --skip-install = scaffold, no installs.
 tina4 init <language> <path>     Scaffold a new project (python, php, ruby, nodejs, tina4js)
 tina4 serve [project]            Start dev server (file watcher + SCSS + browser). With a
@@ -106,14 +107,16 @@ see (or the relaunch was declined/failed).
 4. Test paths: `tina4 setup --dry-run`, `tina4 setup --skip-install` (both skip
    elevation), then the real `tina4 setup`.
 
-**Implemented in 3.8.39 (verified on macOS, needs a real-Windows pass):**
-- **Claude Code is the default AI pick** and ends setup by launching a real
-  seeded session: `claude "<FIRST_PROMPT>"` in the project dir (`whats_next()`).
-  The launch resolves the binary via `which::which("claude")` and — because on
-  Windows `claude` is a `.cmd`/`.ps1` shim that `Command::new` can't spawn
-  directly — runs it through `cmd /C <resolved-path> "<prompt>"` on Windows,
-  bare path elsewhere. **Confirm on a real Windows box** that the session opens
-  in the project (not just the fallback "cd … && claude" print).
+**AI default (3.8.43+): Claude Desktop.** The guided setup targets new /
+non-terminal users, so the menu defaults to Claude Desktop (option 1); Claude
+Code is option 2. The Desktop/none path ends with a "Start it now?" prompt that
+runs `tina4 serve` and opens Desktop via its resolved launcher
+(`claude_desktop_exe()` — %LOCALAPPDATA%\AnthropicClaude\claude.exe, never bare
+`claude` on PATH). The Claude Code path still launches a seeded session:
+`claude "<FIRST_PROMPT>"` in the project dir (`whats_next()`), resolving the
+binary via `which::which("claude")` and — because on Windows `claude` is a
+`.cmd`/`.ps1` shim `Command::new` can't spawn directly — running it through
+`cmd /C <resolved-path> "<prompt>"` on Windows, bare path elsewhere.
 - **`open_ide()` is opened AFTER the "Start it now?" prompt** (Desktop/none
   path) so the GUI no longer steals terminal focus before the prompt prints.
 - **Per-project `.mcp.json`** (`write_project_mcp_json`) wires Claude Code to the

@@ -281,14 +281,14 @@ fn choose_language() -> String {
 fn choose_ai() -> AiChoice {
     println!();
     println!("  Which AI tool do you want to build with?");
-    println!("    1. {}  {}", "Claude Code".bold(), "(default) — AI in your terminal, opens a real coding session in your project".dimmed());
-    println!("    2. {}  {}", "Claude Desktop".bold(), "— chat app".dimmed());
+    println!("    1. {}  {}", "Claude Desktop".bold(), "(default) — the chat app; opens your project ready to build".dimmed());
+    println!("    2. {}  {}", "Claude Code".bold(), "— AI in your terminal, opens a real coding session in your project".dimmed());
     println!("    3. {}  {}", "Just my code editor".bold(), "— no AI".dimmed());
     let choice = prompt("Choose 1-3", "1");
     match choice.trim() {
-        "2" => AiChoice::ClaudeDesktop,
+        "2" => AiChoice::ClaudeCode,
         "3" => AiChoice::None,
-        _ => AiChoice::ClaudeCode,
+        _ => AiChoice::ClaudeDesktop,
     }
 }
 

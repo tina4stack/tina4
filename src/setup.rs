@@ -7,6 +7,10 @@ use crate::console::{self, icon_info, icon_ok, icon_play, icon_warn};
 use crate::{init, install};
 use colored::Colorize;
 
+/// The first prompt we seed a Claude Code session with (and show in CLAUDE.md)
+/// so a brand-new project has an obvious, end-to-end thing to build.
+const FIRST_PROMPT: &str = "Add a `/products` page backed by a `Product` model (name, price, image_url), seed three rows, and render them as cards using a tina4-js component.";
+
 /// Which AI tool the developer wants to build with.
 #[derive(Clone, Copy, PartialEq)]
 enum AiChoice {
@@ -203,7 +207,11 @@ fn scaffold_into(projects_dir: &Path, project_path: &Path, lang: &str, ai: AiCho
     init::run(Some(lang), project_path.file_name().and_then(|s| s.to_str()));
 
     write_project_claude_md(project_path, lang, ai);
-    open_ide(ai);
+    let name = project_path.file_name().and_then(|s| s.to_str()).unwrap_or("app");
+    write_project_mcp_json(project_path, lang, name);
+    // The AI tool is opened from INSIDE whats_next, AFTER the "Start it now?"
+    // prompt — opening it here (e.g. `open -a Claude`) steals terminal focus
+    // before the user can answer, so the prompt goes unseen and nothing starts.
     whats_next(project_path, ai);
 }
 
@@ -243,14 +251,14 @@ fn choose_language() -> String {
 fn choose_ai() -> AiChoice {
     println!();
     println!("  Which AI tool do you want to build with?");
-    println!("    1. {}  {}", "Claude Desktop".bold(), "(default) — chat app, best for non-coders".dimmed());
-    println!("    2. {}  {}", "Claude Code".bold(), "— AI in your terminal".dimmed());
+    println!("    1. {}  {}", "Claude Code".bold(), "(default) — AI in your terminal, opens a real coding session in your project".dimmed());
+    println!("    2. {}  {}", "Claude Desktop".bold(), "— chat app".dimmed());
     println!("    3. {}  {}", "Just my code editor".bold(), "— no AI".dimmed());
     let choice = prompt("Choose 1-3", "1");
     match choice.trim() {
-        "2" => AiChoice::ClaudeCode,
+        "2" => AiChoice::ClaudeDesktop,
         "3" => AiChoice::None,
-        _ => AiChoice::ClaudeDesktop,
+        _ => AiChoice::ClaudeCode,
     }
 }
 
@@ -516,6 +524,46 @@ fn install_skills_global() {
     }
 }
 
+/// Write a per-project `.mcp.json` that wires Claude Code to the project's live
+/// MCP tools (`/__dev/mcp`, served by `tina4 serve`). Won't clobber an existing
+/// one. The dev-server port is per-language (python:7146, php:7145, ruby:7147,
+/// nodejs:7148).
+fn write_project_mcp_json(project_path: &Path, lang: &str, name: &str) {
+    let file = project_path.join(".mcp.json");
+    if file.exists() {
+        println!("  {} .mcp.json already present — left as-is", icon_info().blue());
+        return;
+    }
+    let port = match lang {
+        "php" => 7145,
+        "ruby" => 7147,
+        "nodejs" => 7148,
+        _ => 7146, // python + default
+    };
+    // Build the literal JSON without format! so the braces don't need escaping.
+    let url = "http://localhost:".to_string() + &port.to_string() + "/__dev/mcp/sse";
+    let mut content = String::new();
+    content.push_str("{\n");
+    content.push_str("  \"mcpServers\": {\n");
+    content.push_str("    \"");
+    content.push_str(name);
+    content.push_str("\": {\n");
+    content.push_str("      \"type\": \"sse\",\n");
+    content.push_str("      \"url\": \"");
+    content.push_str(&url);
+    content.push_str("\"\n");
+    content.push_str("    }\n");
+    content.push_str("  }\n");
+    content.push_str("}\n");
+    match fs::write(&file, content) {
+        Ok(_) => println!(
+            "  {} Wrote .mcp.json (Claude Code → live tina4 tools at /__dev/mcp)",
+            icon_ok().green()
+        ),
+        Err(e) => eprintln!("  {} Could not write .mcp.json: {}", icon_warn().yellow(), e),
+    }
+}
+
 /// Write a project-level CLAUDE.md so the chosen AI tool has clear, accurate
 /// instructions for working in THIS tina4 project. Won't clobber an existing one.
 fn write_project_claude_md(project_path: &Path, lang: &str, ai: AiChoice) {
@@ -524,90 +572,219 @@ fn write_project_claude_md(project_path: &Path, lang: &str, ai: AiChoice) {
         println!("  {} CLAUDE.md already present — left as-is", icon_info().blue());
         return;
     }
+    let name = project_path.file_name().and_then(|s| s.to_str()).unwrap_or("app");
     let ai_line = match ai {
-        AiChoice::ClaudeDesktop => "You are working through **Claude Desktop**.",
-        AiChoice::ClaudeCode => "You are working through **Claude Code** (terminal).",
+        AiChoice::ClaudeCode => "You're working in **Claude Code** — you have this project's CLAUDE.md and (via .mcp.json) its live `/__dev/mcp` tools.",
+        AiChoice::ClaudeDesktop => "You're working in **Claude Desktop**.",
         AiChoice::None => "This project is set up for AI-assisted development.",
     };
-    let content = format!(
-        r#"# {name} — Tina4 {lang} project
 
-{ai_line}
+    // Built with String + push_str of RAW literals because the route / Frond
+    // snippets contain `{` `}` `{{ }}` `{% %}` that format! would try to parse.
+    let mut s = String::new();
 
-This is a **Tina4 v3** project — *The Intelligent Native Application 4ramework*.
-Tina4 is **built for AI**: zero third-party dependencies, convention over
-configuration, and a small, consistent API that fits in context. Prefer the
-framework's built-ins (ORM, routing, queues, auth, templates, WebSockets, …)
-over any library, and don't guess API names — they're documented exactly (see
-**Help & source of truth** below).
+    // Title + ai_line (no literal braces — safe to format).
+    s.push_str(&format!("# {} — Tina4 {} project\n\n", name, pretty_lang(lang)));
+    s.push_str(ai_line);
+    s.push('\n');
 
-- Website & docs: **https://tina4.com** — the **"Ask Tina4"** box there is
-  RAG-backed; ask it any framework question and it answers from the live corpus.
-- This running app has a dev dashboard at **`/__dev`** (route inspector, DB
-  runner, logs, AI chat) and a live MCP endpoint at **`/__dev/mcp`** an AI can
-  query for THIS project's real routes, models, and API signatures.
+    s.push_str(r#"
+**Tina4 v3** — *The Intelligent Native Application 4ramework*. Built for AI:
+zero third-party dependencies, convention over configuration, one small
+consistent API. Use the framework's built-ins (routing, ORM, migrations, Frond
+templates, auth/JWT, queues, cache, sessions, WebSockets, GraphQL) before any
+library or hand-rolled code.
 
-## Help & source of truth (check before guessing)
+## Source of truth — check before you guess
 
-1. **Installed skills** in `~/.claude/skills/` — **tina4-developer** and
-   **tina4-js**. The authoritative guides for the framework + reactive frontend;
-   use them, they document the real API surface.
-2. **https://tina4.com** — full docs + **Ask Tina4** (RAG search over the live
-   framework corpus).
-3. **`/__dev/mcp`** on the running app — live API reflection (`api_search`,
-   docs + route/model listing) for this exact project and framework version.
+1. **Skills** in `~/.claude/skills/` — **tina4-developer** (+ **tina4-js** for
+   the reactive frontend). These document the real API surface.
+2. **https://tina4.com** — docs + the **Ask Tina4** RAG box (ask it any
+   framework question; it answers from the live corpus).
+3. **`/__dev/mcp`** live tools (wired via the `.mcp.json` in this folder) —
+   query for real routes, models, and signatures when the dev server is running.
 
-## How to run
+## Environment (.env)
+
+```bash
+TINA4_DEBUG=true                              # dev mode: hot-reload, error overlay, /__dev
+TINA4_SECRET=change-me                        # JWT signing secret
+TINA4_DATABASE_URL=sqlite:///data/app.db      # driver://host:port/db
+TINA4_DATABASE_USERNAME=                       # db user (blank for sqlite)
+TINA4_DATABASE_PASSWORD=                       # db password
+TINA4_LOG_LEVEL=INFO                          # ALL | DEBUG | INFO | WARNING | ERROR
+TINA4_API_KEY=                                 # optional static bearer token
+TINA4_CACHE_BACKEND=memory                    # memory | file | redis | valkey | memcached | mongodb | database
+TINA4_SESSION_BACKEND=file                    # session store
+TINA4_NO_BROWSER=false                        # set true to never auto-open the browser
+```
+
+"#);
+
+    // ── Database & drivers (per language) ──────────────────────────
+    s.push_str("## Database & drivers\n\n");
+    s.push_str("SQLite works out of the box:\n\n");
+    s.push_str("```bash\n");
+    match lang {
+        "php" => s.push_str("TINA4_DATABASE_URL=sqlite:///data/app.db\n"),
+        "ruby" => s.push_str("TINA4_DATABASE_URL=sqlite:///data/app.db\n"),
+        "nodejs" => s.push_str("TINA4_DATABASE_URL=sqlite://./data/app.db   # SQLite is built in via node:sqlite — no install\n"),
+        _ => s.push_str("TINA4_DATABASE_URL=sqlite:///data/app.db   # three slashes = relative to cwd\n"),
+    }
+    s.push_str("```\n\n");
+    s.push_str("Connection URLs are `driver://host:port/database` (sqlite / postgres / postgresql / mysql / mssql / firebird).\n\n");
+    s.push_str("Add a Postgres or MySQL driver:\n\n");
+    match lang {
+        "php" => {
+            s.push_str("- **Postgres**: enable the PDO PostgreSQL extension (no Composer pkg — Tina4 v3 has zero runtime deps). macOS `brew install php` ships it, or `pecl install pdo_pgsql`; Debian/Ubuntu `sudo apt-get install php-pgsql`. Verify: `php -m | grep pdo_pgsql`.\n");
+            s.push_str("- **MySQL**: enable the PDO MySQL extension (`sudo apt-get install php-mysql`, or bundled with Homebrew PHP / `pecl install pdo_mysql`). Verify: `php -m | grep pdo_mysql`.\n\n");
+            s.push_str("```bash\nTINA4_DATABASE_URL=postgres://user:pass@localhost:5432/mydb\n```\n\n");
+        }
+        "ruby" => {
+            s.push_str("```bash\nbundle add pg        # Postgres\nbundle add mysql2    # MySQL\n```\n\n");
+            s.push_str("```bash\nTINA4_DATABASE_URL=postgres://localhost:5432/mydb   # + TINA4_DATABASE_USERNAME / TINA4_DATABASE_PASSWORD\n```\n\n");
+        }
+        "nodejs" => {
+            s.push_str("```bash\nnpm i pg        # Postgres\nnpm i mysql2    # MySQL\n```\n\n");
+            s.push_str("```bash\nTINA4_DATABASE_URL=postgres://localhost:5432/mydb\n```\n\n");
+        }
+        _ => {
+            s.push_str("```bash\nuv add psycopg2-binary           # Postgres\nuv add mysql-connector-python    # MySQL\n```\n\n");
+            s.push_str("```bash\nTINA4_DATABASE_URL=postgresql://localhost:5432/mydb   # + TINA4_DATABASE_USERNAME / TINA4_DATABASE_PASSWORD\n```\n\n");
+        }
+    }
+
+    // ── Add a route (per language) ─────────────────────────────────
+    s.push_str("## Add a route\n\n");
+    match lang {
+        "php" => {
+            s.push_str("`src/routes/hello.php` (auto-discovered; one resource/verb per file):\n\n");
+            s.push_str("```php\n");
+            s.push_str(r#"<?php
+\Tina4\Router::get("/hello", function ($request, $response) {
+    return $response->json(["message" => "Hello from Tina4"]);
+});
+"#);
+            s.push_str("```\n\n");
+        }
+        "ruby" => {
+            s.push_str("`src/routes/hello.rb` (auto-discovered):\n\n");
+            s.push_str("```ruby\n");
+            s.push_str(r#"require "tina4"
+
+Tina4.get "/hello" do |request, response|
+  response.json({ message: "Hello from Tina4" }, Tina4::HTTP_OK)
+end
+"#);
+            s.push_str("```\n\n");
+        }
+        "nodejs" => {
+            s.push_str("`src/routes/hello/get.ts` — **file-based**: the directory is the URL path, the FILENAME is the HTTP method (`get.ts` = `GET /hello`):\n\n");
+            s.push_str("```ts\n");
+            s.push_str(r#"import type { Tina4Request, Tina4Response } from "@tina4/core";
+
+export default async function (req: Tina4Request, res: Tina4Response) {
+  return res.json({ message: "Hello from Tina4" });
+}
+"#);
+            s.push_str("```\n\n");
+        }
+        _ => {
+            s.push_str("`src/routes/hello.py` (auto-discovered; one resource per file):\n\n");
+            s.push_str("```python\n");
+            s.push_str(r#"from tina4_python.core.router import get
+
+
+@get("/hello")
+async def hello(request, response):
+    return response({"message": "Hello from Tina4"})
+"#);
+            s.push_str("```\n\n");
+        }
+    }
+
+    // ── Templates (Frond) ──────────────────────────────────────────
+    s.push_str("## Templates (Frond)\n\n");
+    s.push_str("Frond is the built-in zero-dep Twig-compatible engine; templates live in `src/templates/` (`.twig`). Common syntax:\n\n");
+    s.push_str("```twig\n");
+    s.push_str(r#"{% extends "base.twig" %}
+{% block content %}
+  <h1>{{ title }}</h1>
+  <ul>
+    {% for x in items %}
+      <li>{{ x.name | upper }}</li>
+    {% endfor %}
+  </ul>
+{% endblock %}
+"#);
+    s.push_str("```\n\n");
+    s.push_str("Render it from a route:\n\n");
+    match lang {
+        "php" => s.push_str("```php\nreturn $response->render(\"dashboard.twig\", [\"title\" => \"Dashboard\"]);\n```\n\n"),
+        "ruby" => s.push_str("```ruby\nhtml = Tina4::Template.render(\"index.twig\", { title: \"Home\" })\nresponse.html(html)\n```\n\n"),
+        "nodejs" => s.push_str("```ts\nreturn res.render(\"page.twig\", { title: \"Home\" });\n```\n\n"),
+        _ => s.push_str("```python\nreturn response.render(\"hello.twig\", {\"name\": \"Tina4\"})\n```\n\n"),
+    }
+
+    // ── How to run ─────────────────────────────────────────────────
+    s.push_str(r#"## How to run
 
 ```bash
 tina4 serve
 ```
 
-Starts the dev server, watches your files, hot-reloads the browser, and opens
-the app **and** the `/__dev` dashboard in a second tab. The URL is printed when
-it starts.
+Dev server: watches files, hot-reloads, opens the app + the `/__dev` dashboard.
 
-> Dev runs two ports: the **base** port hot-reloads (for you), and **base+1000**
-> is a stable port that does NOT reload — use that one when an AI is driving the
-> browser so a reload doesn't interrupt it.
+> Dev runs two ports: the **base** port hot-reloads (for you); **base+1000** is
+> stable and does NOT reload — use that one when an AI is driving the browser so
+> a reload doesn't interrupt it.
 
 ## Where things go
 
-| You want to…            | Put it in…                          | Make it with                         |
-|-------------------------|-------------------------------------|--------------------------------------|
-| Add a page or API route | `src/routes/`                       | `tina4 generate route <name>`        |
-| Add a database model    | `src/orm/`                          | `tina4 generate model <Name>`        |
-| Change the schema       | `migrations/`                       | `tina4 generate migration <name>` then `tina4 migrate` |
-| Add a page template     | `src/templates/`                    | (Twig-style templates)               |
-| Frontend behaviour      | served at `/js/tina4js.min.js`      | tina4-js signals + html templates    |
+| You want to…            | Put it in…                     | Make it with                                           |
+|-------------------------|--------------------------------|--------------------------------------------------------|
+| Add a page or API route | `src/routes/`                  | `tina4 generate route <name>`                          |
+| Add a database model    | `src/orm/`                     | `tina4 generate model <Name>`                          |
+| Change the schema       | `migrations/`                  | `tina4 generate migration <name>` then `tina4 migrate` |
+| Add a page template     | `src/templates/`               | Frond (`.twig`)                                        |
+| Frontend behaviour      | `tina4-js`                     | tina4-js signals + html templates                      |
 
 ## Golden rules
 
-- **Use Tina4 v3 built-ins first** — it's zero-dependency; reach for the
-  framework (and the skills) before any library or hand-rolled code.
-- Don't guess API names — check the skills, **Ask Tina4** at https://tina4.com,
-  or the live `/__dev/mcp` tools.
-- Routes return data; `response()` auto-serializes models and lists to JSON.
-- Env vars are read from `.env` (already created). `TINA4_DEBUG=true` is on for dev.
-- All links and references should point to **https://tina4.com**.
+- **Use built-ins first** — Tina4 is zero-dep; reach for the framework before any library or hand-rolled code.
+- **Don't guess API names** — check the skills / **Ask Tina4** at https://tina4.com / the live `/__dev/mcp` tools.
+- Routes return data; **`response()`** (called, not `response.json`) auto-serializes models, lists, and `DatabaseResult` to JSON.
+- **One resource per file** in `src/routes/` and `src/orm/`.
+- All schema changes go through migrations (`tina4 generate migration` → `tina4 migrate`) — never raw DDL in routes.
+- No inline styles / no hardcoded hex — use tina4-css classes + SCSS in `src/scss/`.
+- Env comes from `.env`; `TINA4_DEBUG=true` in dev.
+- All links point to **https://tina4.com**.
+"#);
 
-## A good first prompt
+    // Per-language gotcha (one sharp line).
+    match lang {
+        "php" => s.push_str("- **PHP gotcha:** `return $response(...)` (callable) and `$response->json(...)` both emit JSON and auto-serialize models/arrays/`DatabaseResult`. Route files of pure `Router::*()` calls hot-reload; files declaring top-level functions/classes need a server restart.\n"),
+        "ruby" => s.push_str("- **Ruby gotcha:** the handler block is `|request, response|`; pass an HTTP status like `Tina4::HTTP_OK` to `response.json`. The `sqlite3` gem ships by default; `pg`/`mysql2` are add-ons.\n"),
+        "nodejs" => s.push_str("- **Node.js gotcha:** the route filename = HTTP method (`get.ts`/`post.ts`/…); dirs map to the path (`[id]` → `{id}`). Use `.js` extensions in import paths. `res.json(model | model[] | DatabaseResult)` auto-serializes.\n"),
+        _ => s.push_str("- **Python gotcha:** route decorators (`@get`/`@post`/…) must be INNERMOST (closest to `def`); `@noauth`/`@secured`/`@description` go above. GET is public; POST/PUT/PATCH/DELETE need auth unless `@noauth()`. Use `response(...)`, not `response.json()`.\n"),
+    }
 
-> "Add a `/products` page backed by a `Product` model (name, price, image_url),
-> seed three rows, and render them as cards using a tina4-js component."
-"#,
-        name = project_path.file_name().and_then(|s| s.to_str()).unwrap_or("app"),
-        lang = pretty_lang(lang),
-        ai_line = ai_line,
-    );
-    match fs::write(&file, content) {
+    // ── First prompt ───────────────────────────────────────────────
+    s.push_str("\n## A good first prompt\n\n");
+    s.push_str("> ");
+    s.push_str(FIRST_PROMPT);
+    s.push('\n');
+
+    match fs::write(&file, s) {
         Ok(_) => println!("  {} Wrote {}", icon_ok().green(), "CLAUDE.md".cyan()),
         Err(e) => eprintln!("  {} Could not write CLAUDE.md: {}", icon_warn().yellow(), e),
     }
 }
 
-/// Best-effort: bring the chosen AI tool to the foreground. Never fatal —
-/// whats_next() always prints the manual command too.
+/// Best-effort: bring Claude Desktop to the foreground. Never fatal —
+/// whats_next() always prints the manual command too. Only handles
+/// AiChoice::ClaudeDesktop; Claude Code opens its own session inline in
+/// whats_next, and AiChoice::None has nothing to open.
 fn open_ide(ai: AiChoice) {
     if ai != AiChoice::ClaudeDesktop {
         return;
@@ -632,47 +809,78 @@ fn whats_next(project_path: &Path, ai: AiChoice) {
     println!("    cd {}", p);
     println!("    tina4 serve        {}", "# opens your app in the browser".dimmed());
     println!();
-    match ai {
-        AiChoice::ClaudeDesktop => {
-            println!(
-                "  Then open {} and paste the first-prompt idea from {}.",
-                "Claude Desktop".bold(),
-                "CLAUDE.md".cyan()
-            );
-        }
-        AiChoice::ClaudeCode => {
-            println!("  Then start AI in your project:");
-            println!("    cd {} && claude", p);
-        }
-        AiChoice::None => {
-            println!("  Open the project in your editor and read {}.", "CLAUDE.md".cyan());
-        }
-    }
-    println!();
 
-    // Offer to launch it right now — cd into the project and `tina4 serve`,
-    // which opens the browser on the running app. Skipped in the elevated
-    // Windows install window (the user serves from their own console there;
-    // the printed command above is the fallback).
+    // In the elevated Windows install window the user serves from their own
+    // console; the printed commands above are the fallback. Nothing to open.
     if std::env::var("TINA4_SETUP_ELEVATED").is_ok() {
         return;
     }
-    let ans = prompt("Start it now and open it in your browser? [Y/n]", "y");
-    if matches!(ans.trim().to_lowercase().as_str(), "" | "y" | "yes") {
-        let label = project_path.file_name().and_then(|s| s.to_str()).unwrap_or("your app");
-        println!();
-        println!(
-            "  {} Starting {} — your browser will open. Press Ctrl+C to stop.",
-            icon_play().green(),
-            label.cyan()
-        );
-        println!();
-        // Re-exec ourselves as `tina4 serve` inside the project so it picks up
-        // app.py/index.php/app.rb/app.ts and serves THIS project.
-        let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("tina4"));
-        let _ = Command::new(exe).arg("serve").current_dir(project_path).status();
-    } else {
-        println!("  {} No problem — run {} when you're ready.", icon_info().blue(), "tina4 serve".cyan());
+
+    match ai {
+        AiChoice::ClaudeCode => {
+            // The hands-off path: open a real Claude Code session in the
+            // project, seeded with the first prompt. The session owns the
+            // terminal and can run `tina4 serve` itself (CLAUDE.md tells it),
+            // so we do NOT also prompt-to-serve here.
+            println!(
+                "  {} Opening Claude Code in your project (it has your CLAUDE.md + live tools)…",
+                icon_play().green()
+            );
+            match which::which("claude") {
+                Ok(claude) => {
+                    // Launch the resolved binary so this works on macOS AND
+                    // Windows. On Windows `claude` is a .cmd/.ps1 shim that
+                    // Command::new cannot spawn directly — run it through
+                    // cmd.exe with its full resolved path.
+                    let status = if console::is_windows() {
+                        Command::new("cmd")
+                            .arg("/C")
+                            .arg(&claude)
+                            .arg(FIRST_PROMPT)
+                            .current_dir(project_path)
+                            .status()
+                    } else {
+                        Command::new(&claude)
+                            .arg(FIRST_PROMPT)
+                            .current_dir(project_path)
+                            .status()
+                    };
+                    if status.is_err() {
+                        println!("  {} Couldn't launch Claude Code automatically.", icon_info().blue());
+                        println!("  Start a session:  {} && {}", format!("cd {}", p).cyan(), "claude".cyan());
+                        println!("  First prompt: {}", FIRST_PROMPT);
+                    }
+                }
+                Err(_) => {
+                    println!("  Start a session:  {} && {}", format!("cd {}", p).cyan(), "claude".cyan());
+                    println!("  First prompt: {}", FIRST_PROMPT);
+                }
+            }
+        }
+        AiChoice::ClaudeDesktop | AiChoice::None => {
+            // Offer to launch it right now — cd into the project and
+            // `tina4 serve`, which opens the browser on the running app.
+            let ans = prompt("Start it now and open it in your browser?", "y");
+            // Open the GUI tool AFTER reading the answer — opening it before
+            // the prompt steals terminal focus so the prompt goes unseen.
+            open_ide(ai);
+            if matches!(ans.trim().to_lowercase().as_str(), "" | "y" | "yes") {
+                let label = project_path.file_name().and_then(|s| s.to_str()).unwrap_or("your app");
+                println!();
+                println!(
+                    "  {} Starting {} — your browser will open. Press Ctrl+C to stop.",
+                    icon_play().green(),
+                    label.cyan()
+                );
+                println!();
+                // Re-exec ourselves as `tina4 serve` inside the project so it
+                // picks up app.py/index.php/app.rb/app.ts and serves THIS project.
+                let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("tina4"));
+                let _ = Command::new(exe).arg("serve").current_dir(project_path).status();
+            } else {
+                println!("  {} No problem — run {} when you're ready.", icon_info().blue(), "tina4 serve".cyan());
+            }
+        }
     }
 }
 
@@ -680,6 +888,20 @@ fn whats_next(project_path: &Path, ai: AiChoice) {
 
 fn config_path() -> PathBuf {
     home_dir().join(".tina4").join("setup.conf")
+}
+
+/// Read the configured projects folder from ~/.tina4/setup.conf, if it exists.
+/// Used by `tina4 serve <name>` to resolve a project by name when it isn't in
+/// the current folder. Returns None when there's no config or no projects_dir
+/// line.
+pub fn configured_projects_dir() -> Option<PathBuf> {
+    let text = fs::read_to_string(config_path()).ok()?;
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("projects_dir=") {
+            return Some(PathBuf::from(v.trim()));
+        }
+    }
+    None
 }
 
 /// Load the remembered setup, if the first run has happened. Returns None when

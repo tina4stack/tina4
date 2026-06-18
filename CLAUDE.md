@@ -1,6 +1,6 @@
 # Tina4 CLI
 
-Version 3.8.38 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 frameworks.
+Version 3.8.39 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 frameworks.
 
 ## Build & Test
 
@@ -16,11 +16,14 @@ Version 3.8.38 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 framewor
 tina4 setup                      Guided menu: language + AI tool + projects folder +
                                  project name, then installs runtime/git/skills/AI tool
                                  (via Chocolatey/Homebrew), scaffolds the project with its
-                                 own CLAUDE.md, opens the tool, and offers to start the
-                                 project right away (`tina4 serve` → opens the browser).
+                                 own CLAUDE.md + .mcp.json. Claude Code (the default) opens a
+                                 real seeded session in the project; Claude Desktop/none get a
+                                 "start it now?" prompt (`tina4 serve` → opens app + /__dev).
                                  --dry-run = preview only. --skip-install = scaffold, no installs.
 tina4 init <language> <path>     Scaffold a new project (python, php, ruby, nodejs, tina4js)
-tina4 serve                      Start dev server with file watcher + SCSS + browser open
+tina4 serve [project]            Start dev server (file watcher + SCSS + browser). With a
+                                 project name, cd into ./<name> (then the configured projects
+                                 folder) and serve that project.
 tina4 serve --production         Auto-install and use production server
 tina4 serve --no-browser         Don't open browser on startup
 tina4 doctor                     Check installed languages and tools
@@ -77,11 +80,20 @@ see (or the relaunch was declined/failed).
 4. Test paths: `tina4 setup --dry-run`, `tina4 setup --skip-install` (both skip
    elevation), then the real `tina4 setup`.
 
-**Related next-step (Andre asked):** for `AiChoice::ClaudeCode`, end setup by
-opening a Claude Code session in the project with the first prompt pre-filled —
-`claude "<first-prompt>"` in the project dir — instead of just printing "open
-the tool and paste the prompt". See `open_ide()` / `whats_next()` / the
-first-prompt text (~line 487).
+**Implemented in 3.8.39 (verified on macOS, needs a real-Windows pass):**
+- **Claude Code is the default AI pick** and ends setup by launching a real
+  seeded session: `claude "<FIRST_PROMPT>"` in the project dir (`whats_next()`).
+  The launch resolves the binary via `which::which("claude")` and — because on
+  Windows `claude` is a `.cmd`/`.ps1` shim that `Command::new` can't spawn
+  directly — runs it through `cmd /C <resolved-path> "<prompt>"` on Windows,
+  bare path elsewhere. **Confirm on a real Windows box** that the session opens
+  in the project (not just the fallback "cd … && claude" print).
+- **`open_ide()` is opened AFTER the "Start it now?" prompt** (Desktop/none
+  path) so the GUI no longer steals terminal focus before the prompt prints.
+- **Per-project `.mcp.json`** (`write_project_mcp_json`) wires Claude Code to the
+  project's live `/__dev/mcp` tools (port per language).
+- **`tina4 serve <project>`** resolves `./<name>` then the configured projects
+  folder, `cd`s in, and serves.
 
 ## Key Architecture
 

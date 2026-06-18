@@ -64,6 +64,11 @@ enum Commands {
     /// Start the server with file watcher and SCSS compilation.
     /// Production servers are auto-detected; use --dev to force the dev server.
     Serve {
+        /// Optional project name — resolved against the current folder, then
+        /// your configured projects folder, and cd'd into before serving.
+        #[arg(value_name = "PROJECT")]
+        project: Option<String>,
+
         /// Port number (default: auto per framework — php:7145, python:7146, ruby:7147, nodejs:7148)
         #[arg(short, long)]
         port: Option<u16>,
@@ -250,7 +255,47 @@ fn main() {
 
         Commands::Init { lang, path } => init::run(lang.as_deref(), path.as_deref()),
 
-        Commands::Serve { port, host, dev, production, no_browser, no_reload } => {
+        Commands::Serve { project, port, host, dev, production, no_browser, no_reload } => {
+            // `tina4 serve <projectname>` — resolve the named project and
+            // change into it before serving. Look in the current folder
+            // first (./<name>), then the configured projects folder.
+            if let Some(name) = project {
+                let cwd_candidate = std::env::current_dir()
+                    .map(|d| d.join(&name))
+                    .ok()
+                    .filter(|p| p.is_dir());
+                let resolved = cwd_candidate.or_else(|| {
+                    crate::setup::configured_projects_dir()
+                        .map(|d| d.join(&name))
+                        .filter(|p| p.is_dir())
+                });
+                match resolved {
+                    Some(path) => {
+                        if let Err(e) = std::env::set_current_dir(&path) {
+                            eprintln!(
+                                "{} Could not enter {}: {}",
+                                icon_fail().red(),
+                                path.display(),
+                                e
+                            );
+                            std::process::exit(1);
+                        }
+                        println!("{} Serving {}", icon_play().green(), path.display().to_string().cyan());
+                    }
+                    None => {
+                        let dir = crate::setup::configured_projects_dir()
+                            .map(|d| d.display().to_string())
+                            .unwrap_or_else(|| "(none configured)".to_string());
+                        eprintln!(
+                            "{} Project '{}' not found in the current folder or your projects folder ({})",
+                            icon_fail().red(),
+                            name,
+                            dir
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
             // --no-reload is the flag form of TINA4_NO_RELOAD=true.
             // Set it in the environment before handing off to the
             // server bootstrap so the watcher and language CLI both

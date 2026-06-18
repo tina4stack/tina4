@@ -45,6 +45,24 @@ enum Commands {
         /// Run the real menu + scaffold + CLAUDE.md, but skip all system installs (safe local test)
         #[arg(long)]
         skip_install: bool,
+        /// Internal: this is the elevated (Administrator) re-run. Skips the menu
+        /// and takes answers from the flags below. Set by the UAC relaunch —
+        /// env vars do NOT survive Start-Process -Verb RunAs, so answers ride
+        /// on argv instead. (hidden from --help)
+        #[arg(long, hide = true)]
+        elevated: bool,
+        /// Internal: pre-selected language for the elevated re-run.
+        #[arg(long, hide = true)]
+        lang: Option<String>,
+        /// Internal: pre-selected AI tool (desktop|code|none) for the elevated re-run.
+        #[arg(long = "ai", hide = true)]
+        ai: Option<String>,
+        /// Internal: projects folder for the elevated re-run.
+        #[arg(long = "projects-dir", hide = true)]
+        projects_dir: Option<String>,
+        /// Internal: project name for the elevated re-run.
+        #[arg(long = "name", hide = true)]
+        name: Option<String>,
     },
 
     /// Install a language runtime (python, php, ruby, nodejs)
@@ -249,7 +267,17 @@ fn main() {
     match cli.command {
         Commands::Doctor => doctor::run(),
 
-        Commands::Setup { dry_run, skip_install } => setup::run(dry_run, skip_install),
+        Commands::Setup { dry_run, skip_install, elevated, lang, ai, projects_dir, name } => {
+            setup::run(setup::SetupArgs {
+                dry_run,
+                skip_install,
+                elevated,
+                lang,
+                ai,
+                projects_dir,
+                name,
+            })
+        }
 
         Commands::Install { lang } => install::run(&lang),
 

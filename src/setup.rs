@@ -38,8 +38,35 @@ struct SetupConfig {
 /// Test safely before touching a real machine:
 ///   tina4 setup --dry-run       prints every step, changes nothing
 ///   tina4 setup --skip-install  real menu + scaffold + CLAUDE.md, no system installs
-pub fn run(dry_run: bool, skip_install: bool) {
+/// Answers + flags for `tina4 setup`. The `elevated`/`lang`/`ai`/`projects_dir`/
+/// `name` fields carry the menu answers across the UAC boundary on Windows —
+/// they ride on argv (set by the elevated relaunch) because environment
+/// variables do NOT survive `Start-Process -Verb RunAs`.
+pub struct SetupArgs {
+    pub dry_run: bool,
+    pub skip_install: bool,
+    pub elevated: bool,
+    pub lang: Option<String>,
+    pub ai: Option<String>,
+    pub projects_dir: Option<String>,
+    pub name: Option<String>,
+}
+
+pub fn run(args: SetupArgs) {
+    let dry_run = args.dry_run;
+    let skip_install = args.skip_install;
     banner();
+
+    // The elevated (Administrator) re-run hands its answers on argv — env vars
+    // do NOT survive `Start-Process -Verb RunAs`. Detect it FIRST, before the
+    // TTY guard and before load_config: an elevated re-run must skip every menu
+    // regardless of whether a saved config exists, or the user would be asked
+    // the questions a second time in the elevated window.
+    if let Some((lang, ai, projects_dir, name)) = elevated_answers(&args) {
+        let project_path = projects_dir.join(&name);
+        run_first_install(&lang, ai, &projects_dir, &project_path, skip_install, true);
+        return;
+    }
 
     // Setup is an interactive wizard — it reads a menu from stdin. When stdin is
     // not a terminal (the classic case: `irm https://tina4.com/install.ps1 | iex`,
@@ -47,13 +74,9 @@ pub fn run(dry_run: bool, skip_install: bool) {
     // EOF), every prompt would silently default and then a UAC elevation would
     // fire from a non-interactive context and fail. That looked like setup
     // "dropping straight back to the prompt". Refuse cleanly instead, and tell the
-    // user to run it in a real terminal. The elevated re-run is exempt — it gets
-    // its answers from the environment, not stdin (see elevated_answers).
+    // user to run it in a real terminal.
     // --dry-run / --skip-install are non-interactive test paths and stay allowed.
-    if !dry_run
-        && std::env::var("TINA4_SETUP_ELEVATED").is_err()
-        && !io::stdin().is_terminal()
-    {
+    if !dry_run && !io::stdin().is_terminal() {
         println!();
         println!(
             "  {} Setup is interactive and needs a real terminal.",
@@ -81,17 +104,9 @@ pub fn run(dry_run: bool, skip_install: bool) {
 }
 
 /// First-time setup: ask everything, install the world, scaffold the first
-/// project, and remember the projects folder + AI tool for next time.
+/// project, and remember the projects folder + AI tool for next time. (The
+/// elevated re-run is handled in `run()` before this is ever reached.)
 fn run_first(dry_run: bool, skip_install: bool) {
-    // If this is the elevated re-run, the answers were handed to us through the
-    // environment — the menu already ran in the user's own console, so skip
-    // straight to installing + scaffolding (no second round of questions).
-    if let Some((lang, ai, projects_dir, name)) = elevated_answers() {
-        let project_path = projects_dir.join(&name);
-        run_first_install(&lang, ai, &projects_dir, &project_path, skip_install);
-        return;
-    }
-
     // Ask everything up front, in the user's current console — answering
     // questions needs no Administrator rights, so this must happen BEFORE any
     // elevation. (Elevating first would relaunch into a new window and leave
@@ -109,13 +124,13 @@ fn run_first(dry_run: bool, skip_install: bool) {
 
     // A real install goes through Chocolatey, which needs Administrator rights.
     // Now that we have the answers, hand off to an elevated window that runs
-    // the install + scaffold without re-asking. No-op when already elevated /
-    // already admin / off Windows — we just continue in-process below.
+    // the install + scaffold without re-asking — answers are passed on argv.
+    // No-op when already admin / off Windows — we just continue in-process.
     if !skip_install {
         elevate_for_install(&lang, ai, &projects_dir, &name);
     }
 
-    run_first_install(&lang, ai, &projects_dir, &project_path, skip_install);
+    run_first_install(&lang, ai, &projects_dir, &project_path, skip_install, false);
 }
 
 /// The install + scaffold tail of first-time setup. Runs either in-process
@@ -127,6 +142,7 @@ fn run_first_install(
     projects_dir: &Path,
     project_path: &Path,
     skip_install: bool,
+    elevated: bool,
 ) {
     println!();
     println!("{} Setting up — this can take a few minutes...\n", icon_play().green());
@@ -156,30 +172,24 @@ fn run_first_install(
         save_config(projects_dir, ai);
     }
 
-    scaffold_into(projects_dir, project_path, lang, ai);
-    pause_if_elevated();
+    scaffold_into(projects_dir, project_path, lang, ai, elevated);
+    pause_if_elevated(elevated);
 }
 
 /// Every run after the first: the machine is already set up, so only ask the
-/// project type + name, then build into the saved projects folder.
+/// project type + name, then build into the saved projects folder. (The elevated
+/// re-run is handled in `run()` before this is reached.)
 fn run_quick(dry_run: bool, skip_install: bool, cfg: SetupConfig) {
-    // Elevated re-run: reuse the answers passed through the environment instead
-    // of asking again in the new window.
-    let (lang, name) = if let Some((lang, _ai, _dir, name)) = elevated_answers() {
-        (lang, name)
-    } else {
-        println!(
-            "  {} Using your saved setup — projects in {}, AI: {}.",
-            icon_info().blue(),
-            cfg.projects_dir.display().to_string().cyan(),
-            ai_label(cfg.ai)
-        );
-        println!("  {}", "(to change these, delete ~/.tina4/setup.conf and run setup again)".dimmed());
-        println!();
-        let lang = choose_language();
-        let name = prompt("Name of your new project", "tina4example");
-        (lang, name)
-    };
+    println!(
+        "  {} Using your saved setup — projects in {}, AI: {}.",
+        icon_info().blue(),
+        cfg.projects_dir.display().to_string().cyan(),
+        ai_label(cfg.ai)
+    );
+    println!("  {}", "(to change these, delete ~/.tina4/setup.conf and run setup again)".dimmed());
+    println!();
+    let lang = choose_language();
+    let name = prompt("Name of your new project", "tina4example");
     let project_path = cfg.projects_dir.join(&name);
     let need_runtime = !runtime_present(&lang);
 
@@ -216,13 +226,13 @@ fn run_quick(dry_run: bool, skip_install: bool, cfg: SetupConfig) {
         println!("  {} {} runtime already installed", icon_ok().green(), pretty_lang(&lang));
     }
 
-    scaffold_into(&cfg.projects_dir, &project_path, &lang, cfg.ai);
-    pause_if_elevated();
+    scaffold_into(&cfg.projects_dir, &project_path, &lang, cfg.ai, false);
+    pause_if_elevated(false);
 }
 
 /// Shared tail for both modes: create the projects folder, scaffold the
 /// project inside it, write its CLAUDE.md, open the tool, print next steps.
-fn scaffold_into(projects_dir: &Path, project_path: &Path, lang: &str, ai: AiChoice) {
+fn scaffold_into(projects_dir: &Path, project_path: &Path, lang: &str, ai: AiChoice, elevated: bool) {
     if let Err(e) = fs::create_dir_all(projects_dir) {
         eprintln!("  {} Could not create {}: {}", icon_warn().yellow(), projects_dir.display(), e);
     } else {
@@ -242,7 +252,7 @@ fn scaffold_into(projects_dir: &Path, project_path: &Path, lang: &str, ai: AiCho
     // The AI tool is opened from INSIDE whats_next, AFTER the "Start it now?"
     // prompt — opening it here (e.g. `open -a Claude`) steals terminal focus
     // before the user can answer, so the prompt goes unseen and nothing starts.
-    whats_next(project_path, ai);
+    whats_next(project_path, ai, elevated);
 }
 
 fn banner() {
@@ -342,15 +352,16 @@ fn print_plan(
 
 /// `choco install` needs Administrator rights. If we're not elevated, relaunch
 /// `tina4 setup` through UAC and hand off to that elevated instance — passing
-/// the already-collected answers via the environment so the elevated window
-/// runs straight through without asking the questions again. No-op off Windows,
-/// when already elevated, or when already admin (caller continues in-process).
+/// the already-collected answers on ARGV so the elevated window runs straight
+/// through without asking the questions again. No-op off Windows or when already
+/// admin (caller continues in-process). The elevated re-run never reaches here —
+/// run() intercepts it via --elevated before any menu or elevation.
 ///
 /// Called AFTER the menu so the questions always run in the user's own console;
 /// elevating first would relaunch into a new window and leave the original
 /// looking like it just exited.
 fn elevate_for_install(lang: &str, ai: AiChoice, projects_dir: &Path, name: &str) {
-    if !console::is_windows() || std::env::var("TINA4_SETUP_ELEVATED").is_ok() {
+    if !console::is_windows() {
         return;
     }
     if is_admin_windows() {
@@ -363,21 +374,23 @@ fn elevate_for_install(lang: &str, ai: AiChoice, projects_dir: &Path, name: &str
     println!();
 
     let Ok(exe) = std::env::current_exe() else { return };
-    // Start-Process … -Verb RunAs raises the UAC prompt; the elevated child
-    // re-runs `setup` with the answers in its environment (so it skips the
-    // menu). TINA4_SETUP_ELEVATED guards against re-elevating.
+    // Start-Process … -Verb RunAs raises the UAC prompt and launches the elevated
+    // child. Environment variables do NOT cross that boundary — the elevated
+    // process gets a fresh environment — so the answers ride on ARGV instead
+    // (the --elevated/--lang/--ai/--projects-dir/--name flags). The elevated
+    // re-run reads them in elevated_answers() and skips the menu; --elevated
+    // also guards against re-elevating.
     let q = |s: &str| s.replace('\'', "''");
-    let cmd = format!(
-        "$env:TINA4_SETUP_ELEVATED='1'; \
-         $env:TINA4_SETUP_LANG='{lang}'; \
-         $env:TINA4_SETUP_AI='{ai}'; \
-         $env:TINA4_SETUP_DIR='{dir}'; \
-         $env:TINA4_SETUP_NAME='{name}'; \
-         Start-Process -FilePath '{exe}' -ArgumentList 'setup' -Verb RunAs",
+    // PowerShell single-quoted argument list; each answer individually quoted.
+    let arglist = format!(
+        "'setup','--elevated','--lang','{lang}','--ai','{ai}','--projects-dir','{dir}','--name','{name}'",
         lang = q(lang),
         ai = ai_env(ai),
         dir = q(&projects_dir.display().to_string()),
         name = q(name),
+    );
+    let cmd = format!(
+        "Start-Process -FilePath '{exe}' -ArgumentList {arglist} -Verb RunAs",
         exe = q(&exe.display().to_string()),
     );
     let launched = Command::new("powershell")
@@ -397,21 +410,21 @@ fn elevate_for_install(lang: &str, ai: AiChoice, projects_dir: &Path, name: &str
     std::process::exit(1);
 }
 
-/// The elevated re-run receives the menu answers through the environment so it
-/// doesn't ask them again in its new window. Returns them only when we ARE that
-/// elevated re-run (TINA4_SETUP_ELEVATED set + the answers present).
-fn elevated_answers() -> Option<(String, AiChoice, PathBuf, String)> {
-    if std::env::var("TINA4_SETUP_ELEVATED").is_err() {
+/// The elevated re-run receives the menu answers on ARGV (env vars don't survive
+/// the UAC boundary). Returns them only when this IS the elevated re-run
+/// (`--elevated` plus the answer flags present).
+fn elevated_answers(args: &SetupArgs) -> Option<(String, AiChoice, PathBuf, String)> {
+    if !args.elevated {
         return None;
     }
-    let lang = std::env::var("TINA4_SETUP_LANG").ok()?;
-    let ai = match std::env::var("TINA4_SETUP_AI").ok()?.as_str() {
+    let lang = args.lang.clone()?;
+    let ai = match args.ai.as_deref()? {
         "code" => AiChoice::ClaudeCode,
         "none" => AiChoice::None,
         _ => AiChoice::ClaudeDesktop,
     };
-    let dir = PathBuf::from(std::env::var("TINA4_SETUP_DIR").ok()?);
-    let name = std::env::var("TINA4_SETUP_NAME").ok()?;
+    let dir = PathBuf::from(args.projects_dir.clone()?);
+    let name = args.name.clone()?;
     Some((lang, ai, dir, name))
 }
 
@@ -426,8 +439,8 @@ fn ai_env(ai: AiChoice) -> &'static str {
 
 /// In the elevated re-run the new window closes the instant setup returns —
 /// hold it open so the user can read the result.
-fn pause_if_elevated() {
-    if std::env::var("TINA4_SETUP_ELEVATED").is_ok() {
+fn pause_if_elevated(elevated: bool) {
+    if elevated {
         let _ = prompt("\n  Setup finished — press Enter to close this window", "");
     }
 }
@@ -955,7 +968,7 @@ fn open_ide(ai: AiChoice) {
     }
 }
 
-fn whats_next(project_path: &Path, ai: AiChoice) {
+fn whats_next(project_path: &Path, ai: AiChoice, elevated: bool) {
     let p = project_path.display();
     println!();
     println!("  {} Your project is ready: {}", icon_ok().green(), p.to_string().cyan());
@@ -969,7 +982,7 @@ fn whats_next(project_path: &Path, ai: AiChoice) {
 
     // In the elevated Windows install window the user serves from their own
     // console; the printed commands above are the fallback. Nothing to open.
-    if std::env::var("TINA4_SETUP_ELEVATED").is_ok() {
+    if elevated {
         return;
     }
 

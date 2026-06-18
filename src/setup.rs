@@ -493,19 +493,49 @@ fn ensure_claude_desktop() {
 /// so there's nothing for `which` to find.
 fn claude_desktop_installed() -> bool {
     if console::is_windows() {
-        // Both the official installer and the Chocolatey package land under
-        // %LOCALAPPDATA%\AnthropicClaude (versioned app-* dirs + a claude.exe
-        // launcher). The directory's presence is enough of a signal.
-        if let Ok(local) = std::env::var("LOCALAPPDATA") {
-            return Path::new(&local).join("AnthropicClaude").exists();
-        }
-        false
+        claude_desktop_exe().is_some()
     } else if cfg!(target_os = "macos") {
         Path::new("/Applications/Claude.app").exists()
     } else {
         // No official Linux build; nothing reliable to detect.
         false
     }
+}
+
+/// Resolve the Claude Desktop launcher .exe on Windows. The app installs under
+/// %LOCALAPPDATA%\AnthropicClaude with a top-level claude.exe launcher plus
+/// versioned app-x.y.z dirs (each with their own claude.exe). It is NOT on PATH
+/// as `claude`, so `start claude` fails with "Windows cannot find 'claude'".
+/// Returns the launcher path, preferring the stable top-level one, else the
+/// newest app-* dir's exe. None on non-Windows or when not installed.
+fn claude_desktop_exe() -> Option<PathBuf> {
+    if !console::is_windows() {
+        return None;
+    }
+    let root = PathBuf::from(std::env::var("LOCALAPPDATA").ok()?).join("AnthropicClaude");
+    if !root.exists() {
+        return None;
+    }
+    // Preferred: the stable launcher at the root.
+    let top = root.join("claude.exe");
+    if top.exists() {
+        return Some(top);
+    }
+    // Fallback: newest app-*/claude.exe (lexical max — version dirs sort sanely).
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(&root)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .and_then(|s| s.to_str())
+                    .map(|n| n.starts_with("app-"))
+                    .unwrap_or(false)
+                && p.join("claude.exe").exists()
+        })
+        .collect();
+    candidates.sort();
+    candidates.pop().map(|d| d.join("claude.exe"))
 }
 
 /// Is Claude Code already on this machine? More thorough than a bare
@@ -869,13 +899,21 @@ fn open_ide(ai: AiChoice) {
     if ai != AiChoice::ClaudeDesktop {
         return;
     }
-    let _ = if cfg!(target_os = "macos") {
-        Command::new("open").args(["-a", "Claude"]).status()
+    if cfg!(target_os = "macos") {
+        let _ = Command::new("open").args(["-a", "Claude"]).status();
     } else if console::is_windows() {
-        Command::new("cmd").args(["/C", "start", "", "claude"]).status()
-    } else {
-        return;
-    };
+        // Claude Desktop is NOT on PATH as `claude` (it's a GUI app under
+        // %LOCALAPPDATA%\AnthropicClaude). `start "" claude` therefore popped
+        // "Windows cannot find 'claude'". Launch the resolved launcher instead;
+        // if it isn't installed, skip quietly — the user already has the
+        // commands printed above, and no scary error dialog appears.
+        if let Some(exe) = claude_desktop_exe() {
+            let _ = Command::new("cmd")
+                .args(["/C", "start", ""])
+                .arg(exe)
+                .status();
+        }
+    }
 }
 
 fn whats_next(project_path: &Path, ai: AiChoice) {

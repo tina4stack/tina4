@@ -1,0 +1,14 @@
+# Statically link the MSVC C runtime into the Windows binary.
+#
+# Without this, tina4.exe dynamically links VCRUNTIME140.dll + the Universal
+# CRT (api-ms-win-crt-*.dll). A fresh Windows 10 box without the Visual C++
+# Redistributable installed then fails to launch the exe at all:
+#   "The code execution cannot proceed because VCRUNTIME140.dll was not found."
+# Every `tina4` command died with that dialog and dropped to the prompt.
+# (Windows 11 ships the runtime, which is why it appeared to work there.)
+#
+# +crt-static folds the runtime into the exe so it has no external CRT
+# dependency and runs on any clean Windows. Scoped to the MSVC target only —
+# Linux/macOS builds are unaffected.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

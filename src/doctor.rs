@@ -169,6 +169,39 @@ pub fn run() {
         println!("  {} {:<16} {:<12} {}", icon, cli.name, cli.lang, status_text);
     }
 
+    // --- macOS build tools (Xcode Command Line Tools) ---
+    // Homebrew, git, and the PHP/Ruby/Node runtimes need these; Python (uv) does
+    // not. On a fresh Mac they're the usual reason `tina4 setup` can't install.
+    if cfg!(target_os = "macos") {
+        println!();
+        println!("  {}", "Build tools (macOS)".bold());
+        println!("  {}", "─".repeat(70));
+        let clt = std::process::Command::new("xcode-select")
+            .arg("-p")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if clt {
+            println!(
+                "  {} {:<28} {}",
+                icon_ok().green(),
+                "Xcode Command Line Tools",
+                "installed".cyan()
+            );
+        } else {
+            println!(
+                "  {} {:<28} {}  {}  {}",
+                icon_fail().red(),
+                "Xcode Command Line Tools",
+                "not installed".dimmed(),
+                "→".dimmed(),
+                "needed for Homebrew/git/PHP/Ruby/Node — run: xcode-select --install (Python needs none)".yellow()
+            );
+        }
+    }
+
     // --- Port availability ---
     println!();
     println!("  {}", "Ports".bold());

@@ -4,12 +4,22 @@ use std::process::Command;
 use crate::console::{self, icon_fail, icon_info, icon_ok, icon_play, icon_warn};
 
 pub fn run(lang: &str) {
-    // Nothing installs without a package manager. Bootstrap Chocolatey
-    // (Windows) / Homebrew (macOS) up front so a fresh machine — the
-    // non-programmer case — has something to install runtimes with.
-    ensure_package_manager();
-
     let lang_norm = lang.to_lowercase();
+
+    // Python is the toolchain-free path: uv installs uv + Python + tina4-python
+    // into the user profile with no package manager and (on macOS) no Xcode
+    // Command Line Tools. Every other runtime installs via Homebrew (macOS) /
+    // Chocolatey (Windows) — and on macOS Homebrew, git, and the runtimes
+    // themselves all need the Command Line Tools. So for the non-Python
+    // languages: make sure the CLT are present first (kicking off their
+    // installer + bailing cleanly if not), then bootstrap the package manager.
+    // Python skips both, so a bare Mac with no Xcode can still build.
+    if !matches!(lang_norm.as_str(), "python" | "py") {
+        if !ensure_macos_build_tools() {
+            return; // CLT installer launched + guidance printed — user re-runs.
+        }
+        ensure_package_manager();
+    }
 
     match lang_norm.as_str() {
         "python" | "py" => install_python(),
@@ -60,40 +70,65 @@ fn install_python() {
         return;
     }
 
-    if check_exists("python3") || check_exists("python") {
-        println!("  {} Python already installed", icon_ok().green());
+    // Get a usable Python WITHOUT pulling in the Xcode Command Line Tools on
+    // macOS. uv is a prebuilt static binary and `uv python install` downloads a
+    // standalone Python — both user-level, no compiler, no CLT. We deliberately
+    // skip Homebrew and the system /usr/bin/python3 (a fresh Mac's python3 is
+    // only a CLT stub that prompts to install the tools the moment it runs).
+    if cfg!(target_os = "macos") {
+        ensure_uv_unix();
+        if check_exists("uv") {
+            println!(
+                "  {} Installing a managed Python via uv (no Xcode tools needed)...",
+                icon_play().green()
+            );
+            let _ = Command::new("uv")
+                .args(["python", "install", "3.12"])
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .status();
+        }
     } else {
-        run_install_commands(&[
-            // macOS
-            ("brew", &["install", "python@3.12"]),
-            // Linux fallback
-            ("sudo", &["apt-get", "install", "-y", "python3.12", "python3.12-venv"]),
-        ]);
+        // Linux: the distro's Python (apt), then uv on top.
+        if check_exists("python3") || check_exists("python") {
+            println!("  {} Python already installed", icon_ok().green());
+        } else {
+            run_install_commands(&[(
+                "sudo",
+                &["apt-get", "install", "-y", "python3.12", "python3.12-venv"],
+            )]);
+        }
+        ensure_uv_unix();
     }
 
-    // Install uv (Python package manager) — non-Windows. (Windows is handled
-    // admin-free above via install_uv_windows + an early return.)
+    // Install tina4python (user-level uv tool — pure Python, no build step).
+    install_tina4_cli("tina4python", "uv", &["tool", "install", "tina4-python"]);
+}
+
+/// Install uv (the Python package manager) on macOS/Linux via the official
+/// installer. uv ships as a prebuilt static binary dropped into the user
+/// profile (`~/.local/bin`) — no compiler and no Xcode Command Line Tools — then
+/// spliced onto PATH for this process so the following `uv` calls resolve
+/// without opening a new shell.
+fn ensure_uv_unix() {
     if check_exists("uv") {
         println!("  {} uv already installed", icon_ok().green());
-    } else {
-        println!("  {} Installing uv...", icon_play().green());
-        let status = Command::new("sh")
-            .args(["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"])
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .status();
-        match status {
-            Ok(s) if s.success() => {
-                println!("  {} uv installed", icon_ok().green());
-                refresh_uv_path_unix();
-            }
-            Ok(s) => eprintln!("  {} uv installer exited with {}", icon_fail().red(), s),
-            Err(e) => eprintln!("  {} Failed to launch shell: {}", icon_fail().red(), e),
-        }
+        return;
     }
-
-    // Install tina4python
-    install_tina4_cli("tina4python", "uv", &["tool", "install", "tina4-python"]);
+    println!("  {} Installing uv...", icon_play().green());
+    let status = Command::new("sh")
+        .args(["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"])
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            println!("  {} uv installed", icon_ok().green());
+            refresh_uv_path_unix();
+        }
+        Ok(s) => eprintln!("  {} uv installer exited with {}", icon_fail().red(), s),
+        Err(e) => eprintln!("  {} Failed to launch shell: {}", icon_fail().red(), e),
+    }
 }
 
 /// Install uv on Windows with NO Administrator rights. The official installer
@@ -448,6 +483,56 @@ pub fn ensure_package_manager() -> bool {
         // Linux: apt / dnf ship with the distro.
         true
     }
+}
+
+/// macOS only: Homebrew, `git`, and the PHP/Ruby/Node runtimes all require the
+/// Xcode Command Line Tools. On a fresh Mac they're absent, and the Homebrew
+/// bootstrap then fails opaquely — its NONINTERACTIVE mode needs passwordless
+/// sudo to install the CLT, which a vanilla machine doesn't have. So detect them
+/// up front: if missing, kick off Apple's `xcode-select --install` GUI installer,
+/// tell the user what's happening, and return false so the caller stops cleanly
+/// (they re-run `tina4 setup` once it finishes). Python never calls this — it's
+/// toolchain-free via uv. Returns true when the tools are present, or off macOS.
+pub fn ensure_macos_build_tools() -> bool {
+    if !cfg!(target_os = "macos") {
+        return true;
+    }
+    // `xcode-select -p` prints the active developer directory and exits 0 only
+    // when the Command Line Tools (or full Xcode) are installed.
+    let present = Command::new("xcode-select")
+        .arg("-p")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if present {
+        return true;
+    }
+    println!();
+    println!(
+        "  {} macOS needs the Xcode Command Line Tools before this step.",
+        icon_warn().yellow()
+    );
+    println!("    Homebrew, git, and the PHP/Ruby/Node runtimes all depend on them.");
+    println!(
+        "    {} Python needs none of this — re-run setup and pick Python to skip it entirely.",
+        "Tip:".bold()
+    );
+    println!();
+    println!(
+        "  {} Opening Apple's Command Line Tools installer...",
+        icon_play().green()
+    );
+    let _ = Command::new("xcode-select").arg("--install").status();
+    println!();
+    println!(
+        "  {} A system dialog is installing the tools (a few minutes).",
+        icon_info().blue()
+    );
+    println!("    When it finishes, run {} again.", "tina4 setup".bold());
+    println!();
+    false
 }
 
 /// choco installs its shims to C:\ProgramData\chocolatey\bin. Env-var changes

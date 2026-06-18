@@ -164,10 +164,25 @@ fn run_first_install(
     println!();
     println!("{} Setting up — this can take a few minutes...\n", icon_play().green());
 
+    // macOS: Homebrew, git, and the PHP/Ruby/Node runtimes all need the Xcode
+    // Command Line Tools; Python is toolchain-free (uv). If a non-Python language
+    // is chosen and the tools are missing, ensure_macos_build_tools() launches
+    // their installer and prints guidance — we then skip the installs but STILL
+    // scaffold the project so it's ready, and the user re-runs once the tools
+    // finish. (Returns true / no-op on non-macOS and for Python.)
+    let clt_blocked = !skip_install
+        && !matches!(lang, "python" | "py")
+        && !install::ensure_macos_build_tools();
+
     if skip_install {
         println!(
             "  {} --skip-install: skipping runtime / git / AI / skills installs\n",
             icon_info().blue()
+        );
+    } else if clt_blocked {
+        println!(
+            "  {} Skipping installs until the Command Line Tools are ready — scaffolding your project so it's waiting for you.\n",
+            icon_warn().yellow()
         );
     } else {
         // 1. Language runtime + package manager (Chocolatey/Homebrew/uv under the hood).
@@ -351,10 +366,18 @@ fn print_plan(
     } else {
         if console::is_windows() {
             println!("    - install Chocolatey if missing (relaunching as Administrator)");
+            println!("    - install the {} runtime + tools through it", lang);
+        } else if matches!(lang, "python" | "py") {
+            // Toolchain-free: uv installs uv + Python + tina4-python — no
+            // Homebrew, and on macOS no Xcode Command Line Tools.
+            println!("    - install Python + tina4-python via uv (no Homebrew / Xcode tools)");
         } else {
+            if cfg!(target_os = "macos") {
+                println!("    - ensure the Xcode Command Line Tools (install if missing)");
+            }
             println!("    - install Homebrew if missing");
+            println!("    - install the {} runtime + tools through it", lang);
         }
-        println!("    - install the {} runtime + tools through it", lang);
         println!("    - install Git if missing");
         println!("    - install the tina4 AI skills globally (~/.claude/skills)");
         match ai {

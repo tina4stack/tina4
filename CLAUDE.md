@@ -1,6 +1,6 @@
 # Tina4 CLI
 
-Version 3.8.39 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 frameworks.
+Version 3.8.40 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 frameworks.
 
 ## Build & Test
 
@@ -37,7 +37,30 @@ tina4 ai                         Detect AI tools and install context
 tina4 update                     Self-update the binary
 ```
 
-## ⚠ Windows `tina4 setup` — handoff (work in progress, finish ON Windows)
+## Windows `tina4 setup` — the "drops to the prompt" symptom (RESOLVED in 3.8.40)
+
+**Root cause (confirmed from a real Windows screenshot, 3.8.39):** the installer
+is run as `irm https://tina4.com/install.ps1 | iex`. That makes the PowerShell
+host's stdin the *download pipe* — already at EOF. `install.ps1` then chained
+straight into `& "$dest" setup`, an interactive wizard. With stdin dead, every
+prompt silently defaulted and then the UAC elevation fired from a
+non-interactive context and failed → `exit 1` → install.ps1's catch printed
+"Setup didn't finish." No menu ever appeared.
+
+**Fix (3.8.40), two parts:**
+1. **`install.ps1` / docs-site copy** no longer auto-launch setup. It installs
+   the binary and prints `Next step — run: tina4 setup`. The user runs it in
+   their own fresh terminal, where stdin is a real console.
+2. **`setup.rs` has a stdin-TTY guard** (`io::stdin().is_terminal()`): a
+   non-interactive stdin prints "Setup is interactive — open a new terminal and
+   run: tina4 setup" and exits **0** (not a scary failure). The elevated re-run
+   (`TINA4_SETUP_ELEVATED`) and `--dry-run` / `--skip-install` are exempt.
+
+`install.sh` was already correct — it runs `tina4 setup < /dev/tty`, so the Mac
+`curl | sh` flow keeps its single-console auto-launch. The TTY guard passes
+there because `/dev/tty` is a terminal.
+
+**Historical handoff detail (the elevation design, still in place):**
 
 **macOS is the reference flow and works end-to-end** (verified): `tina4 setup`
 asks the menu in-console → scaffolds the project → `uv sync` → `tina4 serve`

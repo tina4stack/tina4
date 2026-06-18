@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -40,6 +40,36 @@ struct SetupConfig {
 ///   tina4 setup --skip-install  real menu + scaffold + CLAUDE.md, no system installs
 pub fn run(dry_run: bool, skip_install: bool) {
     banner();
+
+    // Setup is an interactive wizard — it reads a menu from stdin. When stdin is
+    // not a terminal (the classic case: `irm https://tina4.com/install.ps1 | iex`,
+    // where the PowerShell host's stdin IS the consumed download pipe, already at
+    // EOF), every prompt would silently default and then a UAC elevation would
+    // fire from a non-interactive context and fail. That looked like setup
+    // "dropping straight back to the prompt". Refuse cleanly instead, and tell the
+    // user to run it in a real terminal. The elevated re-run is exempt — it gets
+    // its answers from the environment, not stdin (see elevated_answers).
+    // --dry-run / --skip-install are non-interactive test paths and stay allowed.
+    if !dry_run
+        && std::env::var("TINA4_SETUP_ELEVATED").is_err()
+        && !io::stdin().is_terminal()
+    {
+        println!();
+        println!(
+            "  {} Setup is interactive and needs a real terminal.",
+            icon_info().blue()
+        );
+        println!(
+            "  {} Open a new terminal and run:  {}",
+            icon_play().green(),
+            "tina4 setup".bold()
+        );
+        println!();
+        // Exit 0 — this is expected guidance, not a failure. install.ps1 keys its
+        // "Setup didn't finish" warning off a non-zero code; a clean exit avoids
+        // that scary (and, here, misleading) message.
+        return;
+    }
 
     // First run configures the machine (language, AI tool, projects folder) and
     // remembers those choices. Every run after that is a fast path: it only asks
@@ -433,6 +463,14 @@ fn ensure_git() {
 }
 
 fn ensure_claude_desktop() {
+    // Claude Desktop isn't a CLI on PATH, so `which` can't see it — check its
+    // known install location and skip the (re)install if it's already there.
+    // Without this, `choco install` / `brew install --cask` would reinstall on
+    // top of an existing app on every `tina4 setup` run.
+    if claude_desktop_installed() {
+        println!("  {} Claude Desktop already installed", icon_ok().green());
+        return;
+    }
     if console::is_windows() {
         println!("  {} Installing Claude Desktop...", icon_play().green());
         run_status("choco", &["install", "claude", "-y"]);
@@ -448,6 +486,26 @@ fn ensure_claude_desktop() {
     // from here because the connector schema varies and Windows stores it
     // under an MSIX-virtualized path. (Claude Code connects to the same URL
     // directly.) This is intentionally NOT auto-wired, not a pending TODO.
+}
+
+/// Best-effort detection of an existing Claude Desktop install. Checks the
+/// default install locations per platform — the app is a GUI, not a PATH binary,
+/// so there's nothing for `which` to find.
+fn claude_desktop_installed() -> bool {
+    if console::is_windows() {
+        // Both the official installer and the Chocolatey package land under
+        // %LOCALAPPDATA%\AnthropicClaude (versioned app-* dirs + a claude.exe
+        // launcher). The directory's presence is enough of a signal.
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            return Path::new(&local).join("AnthropicClaude").exists();
+        }
+        false
+    } else if cfg!(target_os = "macos") {
+        Path::new("/Applications/Claude.app").exists()
+    } else {
+        // No official Linux build; nothing reliable to detect.
+        false
+    }
 }
 
 fn ensure_claude_code() {

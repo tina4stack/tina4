@@ -148,6 +148,13 @@ enum Commands {
     /// List registered routes (delegates to language CLI)
     Routes,
 
+    /// Report code-health metrics — top offenders (delegates to language CLI)
+    Metrics {
+        /// Passthrough flags: --top N, --json, --fail-on warn|error, --path DIR
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
     /// Generate scaffolding: model, route, migration, middleware
     Generate {
         /// What to generate: model, route, migration, middleware
@@ -442,6 +449,12 @@ fn main() {
         Commands::Test => delegate_command(vec!["test".into()]),
 
         Commands::Routes => delegate_command(vec!["routes".into()]),
+
+        Commands::Metrics { args } => {
+            let mut a = vec!["metrics".to_string()];
+            a.extend(args);
+            delegate_command(a);
+        }
 
         Commands::Generate { what, name } => generate::run(&what, &name),
 

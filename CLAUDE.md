@@ -36,6 +36,10 @@ tina4 generate <what> <name>     Generate model, route, migration, middleware
 tina4 migrate                    Run database migrations
 tina4 test                       Run tests
 tina4 routes                     List registered routes
+tina4 metrics                    Report code-health top offenders (complexity, large files,
+                                 low maintainability, untested). Flags: --top N, --json,
+                                 --fail-on warn|error (CI gate), --path DIR. Delegates to the
+                                 language CLI; scans the app's src/ (or the framework itself).
 tina4 scss                       Compile SCSS files
 tina4 ai                         Detect AI tools and install context
 tina4 update                     Self-update the binary

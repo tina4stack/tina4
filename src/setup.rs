@@ -122,18 +122,32 @@ fn run_first(dry_run: bool, skip_install: bool) {
         return;
     }
 
-    // A real install goes through Chocolatey, which needs Administrator rights.
-    // Now that we have the answers, hand off to an elevated window that runs
-    // the install + scaffold without re-asking — answers are passed on argv.
-    // When already admin / off Windows this returns true (install in-process);
-    // when we couldn't get admin it returns false (scaffold only, no installs).
+    // Decide whether we even need Administrator. Python installs fully
+    // admin-free (uv manages uv + Python + tina4python in the user profile), so
+    // we DON'T elevate for it — elevating would relaunch into a separate admin
+    // window and land everything in the admin's profile, which broke the run
+    // step. Other languages still use Chocolatey (machine-wide → needs admin).
     let install_here = if skip_install {
         false
+    } else if !needs_admin_to_install(&lang) {
+        true // run installs right here in the user's console, no elevation
     } else {
         elevate_for_install(&lang, ai, &projects_dir, &name)
     };
 
     run_first_install(&lang, ai, &projects_dir, &project_path, skip_install || !install_here, false);
+}
+
+/// Does installing this language's runtime need Administrator on Windows?
+/// Python does NOT — uv installs it (and itself, and tina4python) into the user
+/// profile with no admin and no Chocolatey. The others currently install via
+/// Chocolatey, which writes machine-wide and needs admin. (Non-Windows never
+/// needs admin here — Homebrew/apt handle their own privileges.)
+fn needs_admin_to_install(lang: &str) -> bool {
+    if !console::is_windows() {
+        return false;
+    }
+    !matches!(lang, "python")
 }
 
 /// The install + scaffold tail of first-time setup. Runs either in-process
@@ -212,10 +226,11 @@ fn run_quick(dry_run: bool, skip_install: bool, cfg: SetupConfig) {
     }
 
     // Only the elevation dance if we actually need to install a runtime the
-    // machine doesn't have yet. Pass the answers so the elevated window runs
-    // straight through without re-asking. Returns false (scaffold only) if we
-    // need to install but couldn't get admin.
-    let install_here = if need_runtime && !skip_install {
+    // machine doesn't have yet AND that runtime needs admin (Python via uv does
+    // not — see needs_admin_to_install). Pass the answers so the elevated window
+    // runs straight through without re-asking. Returns false (scaffold only) if
+    // we need to install but couldn't get admin.
+    let install_here = if need_runtime && !skip_install && needs_admin_to_install(&lang) {
         elevate_for_install(&lang, cfg.ai, &cfg.projects_dir, &name)
     } else {
         true

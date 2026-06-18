@@ -37,12 +37,33 @@ pub fn run(lang: &str) {
 fn install_python() {
     println!("\n{} Installing Python...", icon_play().green());
 
+    // Windows: go fully admin-free. uv installs to the user profile with no
+    // Administrator and can install Python ITSELF (`uv python install`), so we
+    // do NOT use Chocolatey for Python here — choco's python package writes
+    // machine-wide and needs admin, which is exactly what broke the elevated
+    // setup flow (installs landed in the admin profile, not the user's).
+    if console::is_windows() {
+        install_uv_windows();
+        if check_exists("python3") || check_exists("python") {
+            println!("  {} Python already installed", icon_ok().green());
+        } else if check_exists("uv") {
+            // uv-managed Python — downloaded into the user profile, no admin.
+            println!("  {} Installing Python via uv (no admin needed)...", icon_play().green());
+            let _ = Command::new("uv")
+                .args(["python", "install", "3.12"])
+                .stdout(std::process::Stdio::inherit())
+                .stderr(std::process::Stdio::inherit())
+                .status();
+        }
+        // tina4python via uv tool — also user-level.
+        install_tina4_cli("tina4python", "uv", &["tool", "install", "tina4-python"]);
+        return;
+    }
+
     if check_exists("python3") || check_exists("python") {
         println!("  {} Python already installed", icon_ok().green());
     } else {
         run_install_commands(&[
-            // Windows (Chocolatey)
-            ("choco", &["install", "python", "-y"]),
             // macOS
             ("brew", &["install", "python@3.12"]),
             // Linux fallback
@@ -50,71 +71,73 @@ fn install_python() {
         ]);
     }
 
-    // Install uv (Python package manager)
+    // Install uv (Python package manager) — non-Windows. (Windows is handled
+    // admin-free above via install_uv_windows + an early return.)
     if check_exists("uv") {
         println!("  {} uv already installed", icon_ok().green());
     } else {
         println!("  {} Installing uv...", icon_play().green());
-        if console::is_windows() {
-            // Python is guaranteed present by this point and pip ships with it,
-            // so the most reliable way to get uv on Windows is
-            // `python -m pip install uv`. The astral `irm | iex` script proved
-            // unreliable in the field — it could exit "successfully" without
-            // leaving uv actually callable, so the next `install_tina4_cli`
-            // ("uv tool install …") then failed. pip lands uv as a console
-            // script in Python's Scripts dir; we splice that dir onto PATH so
-            // this same process can find it without opening a new shell.
-            let py = if check_exists("python") { "python" } else { "python3" };
-            let pip_ok = Command::new(py)
-                .args(["-m", "pip", "install", "--upgrade", "uv"])
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if pip_ok {
-                add_python_scripts_to_path_windows(py);
-            }
-            // Fallback to the official installer only if pip couldn't deliver uv.
-            if !check_exists("uv") {
-                let _ = Command::new("powershell")
-                    .args([
-                        "-ExecutionPolicy", "ByPass",
-                        "-NoProfile",
-                        "-Command", "irm https://astral.sh/uv/install.ps1 | iex",
-                    ])
-                    .stdout(std::process::Stdio::inherit())
-                    .stderr(std::process::Stdio::inherit())
-                    .status();
-                refresh_uv_path_windows();
-            }
-            if check_exists("uv") {
+        let status = Command::new("sh")
+            .args(["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"])
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status();
+        match status {
+            Ok(s) if s.success() => {
                 println!("  {} uv installed", icon_ok().green());
-            } else {
-                eprintln!(
-                    "  {} uv not installed — open a new terminal and run: python -m pip install uv",
-                    icon_fail().red()
-                );
+                refresh_uv_path_unix();
             }
-        } else {
-            let status = Command::new("sh")
-                .args(["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"])
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit())
-                .status();
-            match status {
-                Ok(s) if s.success() => {
-                    println!("  {} uv installed", icon_ok().green());
-                    refresh_uv_path_unix();
-                }
-                Ok(s) => eprintln!("  {} uv installer exited with {}", icon_fail().red(), s),
-                Err(e) => eprintln!("  {} Failed to launch shell: {}", icon_fail().red(), e),
-            }
+            Ok(s) => eprintln!("  {} uv installer exited with {}", icon_fail().red(), s),
+            Err(e) => eprintln!("  {} Failed to launch shell: {}", icon_fail().red(), e),
         }
     }
 
     // Install tina4python
     install_tina4_cli("tina4python", "uv", &["tool", "install", "tina4-python"]);
+}
+
+/// Install uv on Windows with NO Administrator rights. The official installer
+/// (`irm https://astral.sh/uv/install.ps1 | iex`) drops uv into the user profile
+/// (~/.local/bin) — no admin, no Chocolatey. On a vanilla box (no Python yet)
+/// this is the only viable route; when Python already exists, `pip install uv`
+/// is a fast fallback. Either way uv ends up callable in THIS process via a
+/// PATH splice, so the following `uv python install` / `uv tool install` work
+/// without opening a new shell.
+fn install_uv_windows() {
+    if check_exists("uv") {
+        println!("  {} uv already installed", icon_ok().green());
+        return;
+    }
+    println!("  {} Installing uv (no admin needed)...", icon_play().green());
+    // Primary: the official user-level installer (works with no Python present).
+    let _ = Command::new("powershell")
+        .args([
+            "-ExecutionPolicy", "ByPass",
+            "-NoProfile",
+            "-Command", "irm https://astral.sh/uv/install.ps1 | iex",
+        ])
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status();
+    refresh_uv_path_windows();
+    // Fallback: if Python is already around, pip can deliver uv too.
+    if !check_exists("uv") && (check_exists("python") || check_exists("python3")) {
+        let py = if check_exists("python") { "python" } else { "python3" };
+        let _ = Command::new(py)
+            .args(["-m", "pip", "install", "--upgrade", "uv"])
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit())
+            .status();
+        add_python_scripts_to_path_windows(py);
+    }
+    if check_exists("uv") {
+        println!("  {} uv installed", icon_ok().green());
+    } else {
+        eprintln!(
+            "  {} uv not installed — open a new terminal and run: irm https://astral.sh/uv/install.ps1 | iex",
+            icon_fail().red()
+        );
+    }
 }
 
 /// Splice uv's known install directory into the current process's PATH on

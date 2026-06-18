@@ -295,6 +295,61 @@ fn main() {
                         std::process::exit(1);
                     }
                 }
+            } else if detect::detect_language().is_none() {
+                // Bare `tina4 serve` and the current folder is NOT a Tina4
+                // project. Fall back to the configured projects folder: if it
+                // holds exactly one project, cd into it and serve; if several,
+                // list them and ask the user to name one; if none, guide them.
+                if let Some(projects_dir) = crate::setup::configured_projects_dir() {
+                    let mut found: Vec<std::path::PathBuf> = std::fs::read_dir(&projects_dir)
+                        .map(|rd| {
+                            rd.filter_map(|e| e.ok().map(|e| e.path()))
+                                .filter(|p| p.is_dir() && detect::dir_is_tina4_project(p))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    found.sort();
+                    match found.len() {
+                        1 => {
+                            let path = &found[0];
+                            if let Err(e) = std::env::set_current_dir(path) {
+                                eprintln!("{} Could not enter {}: {}", icon_fail().red(), path.display(), e);
+                                std::process::exit(1);
+                            }
+                            println!("{} Serving {}", icon_play().green(), path.display().to_string().cyan());
+                        }
+                        0 => {
+                            eprintln!(
+                                "{} Not in a Tina4 project, and no projects found in {}.",
+                                icon_fail().red(),
+                                projects_dir.display()
+                            );
+                            eprintln!("  Run {} to scaffold one, or cd into a project first.", "tina4 setup".cyan());
+                            std::process::exit(1);
+                        }
+                        _ => {
+                            eprintln!(
+                                "{} Not in a Tina4 project. Projects in {}:",
+                                icon_info().blue(),
+                                projects_dir.display()
+                            );
+                            for p in &found {
+                                if let Some(n) = p.file_name().and_then(|s| s.to_str()) {
+                                    eprintln!("    {}", n.cyan());
+                                }
+                            }
+                            eprintln!("  Run {} to serve one.", "tina4 serve <name>".cyan());
+                            std::process::exit(1);
+                        }
+                    }
+                } else {
+                    eprintln!(
+                        "{} Not in a Tina4 project (no app.py / index.php / app.rb / app.ts here).",
+                        icon_fail().red()
+                    );
+                    eprintln!("  cd into a project, or run {} first.", "tina4 setup".cyan());
+                    std::process::exit(1);
+                }
             }
             // --no-reload is the flag form of TINA4_NO_RELOAD=true.
             // Set it in the environment before handing off to the

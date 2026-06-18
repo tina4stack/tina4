@@ -146,6 +146,29 @@ pub fn detect_language() -> Option<ProjectInfo> {
     None
 }
 
+/// Does `dir` look like a Tina4 project? Path-aware sibling of
+/// `detect_language` (which only inspects the current directory). Used by
+/// `tina4 serve` to find a project to launch in the configured projects folder.
+/// Checks the same entry-point markers detect_language relies on.
+pub fn dir_is_tina4_project(dir: &Path) -> bool {
+    // Language entry points — any one is enough.
+    for entry in ["app.py", "app.ts", "app.js", "app.rb", "index.php"] {
+        if dir.join(entry).exists() {
+            return true;
+        }
+    }
+    // Python via pyproject.toml that mentions tina4.
+    let pyproject = dir.join("pyproject.toml");
+    if pyproject.exists() {
+        if let Ok(content) = std::fs::read_to_string(&pyproject) {
+            if content.contains("tina4") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn extract_version_toml(content: &str) -> Option<String> {
     for line in content.lines() {
         let trimmed = line.trim();

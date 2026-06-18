@@ -1,6 +1,6 @@
 # Tina4 CLI
 
-Version 3.8.40 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 frameworks.
+Version 3.8.41 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 frameworks.
 
 ## Build & Test
 
@@ -23,7 +23,10 @@ tina4 setup                      Guided menu: language + AI tool + projects fold
 tina4 init <language> <path>     Scaffold a new project (python, php, ruby, nodejs, tina4js)
 tina4 serve [project]            Start dev server (file watcher + SCSS + browser). With a
                                  project name, cd into ./<name> (then the configured projects
-                                 folder) and serve that project.
+                                 folder) and serve that project. Bare `tina4 serve` outside a
+                                 project falls back to the configured projects folder: one
+                                 project there → cd in + serve it; several → list them; none →
+                                 guidance. cd into the resolved project happens automatically.
 tina4 serve --production         Auto-install and use production server
 tina4 serve --no-browser         Don't open browser on startup
 tina4 doctor                     Check installed languages and tools

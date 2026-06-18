@@ -508,8 +508,30 @@ fn claude_desktop_installed() -> bool {
     }
 }
 
-fn ensure_claude_code() {
+/// Is Claude Code already on this machine? More thorough than a bare
+/// `which("claude")`: in a freshly-elevated Windows window (or right after a
+/// native install) the `claude` shim lives in ~/.local/bin or an npm-global dir
+/// that isn't on PATH yet, so `which` alone reports a false negative. Splice
+/// ~/.local/bin onto PATH first, then check PATH AND the known install
+/// locations. This stops `tina4 setup` from reinstalling Claude Code on top of
+/// an existing install (which clobbers the user's running sessions).
+fn claude_code_installed() -> bool {
+    refresh_local_bin_path();
     if which::which("claude").is_ok() {
+        return true;
+    }
+    // Native installer drops the launcher in ~/.local/bin.
+    let local_bin = home_dir().join(".local").join("bin");
+    let candidates: &[&str] = if console::is_windows() {
+        &["claude.exe", "claude.cmd", "claude.ps1", "claude"]
+    } else {
+        &["claude"]
+    };
+    candidates.iter().any(|c| local_bin.join(c).exists())
+}
+
+fn ensure_claude_code() {
+    if claude_code_installed() {
         println!("  {} Claude Code already installed", icon_ok().green());
         return;
     }
@@ -881,9 +903,12 @@ fn whats_next(project_path: &Path, ai: AiChoice) {
             // terminal and can run `tina4 serve` itself (CLAUDE.md tells it),
             // so we do NOT also prompt-to-serve here.
             println!(
-                "  {} Opening Claude Code in your project (it has your CLAUDE.md + live tools)…",
+                "  {} Opening Claude Code in your project (it has your CLAUDE.md + live tools)...",
                 icon_play().green()
             );
+            // Splice ~/.local/bin onto PATH so a just-installed claude resolves
+            // without opening a new shell (mirrors claude_code_installed).
+            refresh_local_bin_path();
             match which::which("claude") {
                 Ok(claude) => {
                     // Launch the resolved binary so this works on macOS AND

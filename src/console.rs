@@ -1,13 +1,27 @@
 //! Cross-platform console helpers — Unicode icons with ASCII fallbacks for old Windows terminals.
 
-/// Enable ANSI escape codes on Windows (virtual terminal processing).
-/// Call once at startup. No-op on non-Windows platforms.
+/// Enable ANSI escape codes on Windows (virtual terminal processing) and switch
+/// the console to UTF-8 output. Call once at startup. No-op on non-Windows.
 pub fn enable_ansi() {
     #[cfg(target_os = "windows")]
     {
         // The `colored` crate calls this internally, but doing it explicitly
         // ensures it runs before any output. Safe to call multiple times.
         let _ = colored::control::set_virtual_terminal(true);
+
+        // Switch the console to UTF-8 (code page 65001). Rust writes UTF-8 to
+        // stdout, but a default US Windows console is cp437/cp850, so any
+        // non-ASCII byte (an em dash, ellipsis, or Unicode icon) renders as
+        // mojibake — the reported "Text is messed up" garbage. Setting the
+        // output code page makes the console interpret our bytes correctly.
+        // Raw kernel32 FFI keeps this dependency-free.
+        extern "system" {
+            fn SetConsoleOutputCP(wCodePageID: u32) -> i32;
+        }
+        const CP_UTF8: u32 = 65001;
+        unsafe {
+            let _ = SetConsoleOutputCP(CP_UTF8);
+        }
     }
 }
 

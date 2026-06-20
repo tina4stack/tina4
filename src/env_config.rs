@@ -9,90 +9,201 @@ use crate::console::{icon_fail, icon_info, icon_ok, icon_warn};
 /// Known Tina4 environment variables with defaults and descriptions.
 fn known_vars() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
     // (name, default, description, group)
+    // Canonical manifest — Tina4 v3 uniformity sweep. Order = group order in
+    // the shared spec (DECISIONS.txt); write_env_example iterates this list in
+    // order, so this order is also the .env.example output order.
     vec![
         // Server
-        ("TINA4_DEBUG", "true", "Enable debug mode (dev toolbar, error overlay, hot-reload)", "Server"),
-        ("TINA4_LOG_LEVEL", "ALL", "Log level: ALL, DEBUG, INFO, WARNING, ERROR", "Server"),
-        ("TINA4_PORT", "", "Server port (default: auto-detected by framework)", "Server"),
-        ("TINA4_NO_BROWSER", "false", "Don't open browser on startup", "Server"),
+        ("TINA4_DEBUG", "false", "Enable debug mode (dev toolbar, error overlay, hot-reload)", "Server"),
+        ("TINA4_ENV", "development", "Application environment: development, production", "Server"),
+        ("HOST", "0.0.0.0", "Legacy bare bind host (precedence varies; prefer TINA4_HOST)", "Server"),
+        ("TINA4_HOST", "0.0.0.0", "Preferred server bind host", "Server"),
+        ("PORT", "7146", "Legacy bare server port (prefer TINA4_PORT)", "Server"),
+        ("TINA4_PORT", "7146", "Server port (per-framework default: PHP 7145, Python 7146, Ruby 7147, Node 7148)", "Server"),
+        ("TINA4_HOST_NAME", "", "Host:port used for localhost detection (default: localhost:<port>)", "Server"),
+        ("CI", "", "Set in CI environments; suppresses dev-secret minting (default: unset)", "Server"),
+        ("TINA4_SUPPRESS", "false", "Suppress the startup banner", "Server"),
         ("TINA4_NO_RELOAD", "false", "Disable hot-reload (useful for AI-assisted development)", "Server"),
-        ("TINA4_NO_AI_PORT", "false", "Disable test port (port+1000)", "Server"),
+        ("TINA4_NO_AI_PORT", "false", "Disable the secondary stable AI port (port+1000)", "Server"),
+        ("TINA4_NO_BROWSER", "false", "Don't open browser on startup", "Server"),
+        ("TINA4_OVERRIDE_CLIENT", "", "Set 'true' to run without the Rust CLI supervisor, e.g. Docker (default: unset)", "Server"),
+        ("TINA4_ALLOW_LEGACY_ENV", "false", "Bypass the legacy bare-env boot guard", "Server"),
+        ("TINA4_TRAILING_SLASH_REDIRECT", "false", "301 redirect to the canonical (trailing-slash) path", "Server"),
+        ("TINA4_TEMPLATE_ROUTING", "on", "Automatic template-based routing", "Server"),
+        ("TINA4_TEMPLATE_CACHE_TTL", "0", "Frond compiled-template cache TTL in seconds (0 = no caching)", "Server"),
+        ("TINA4_HEALTH_PATH", "/__health", "Health-check endpoint path", "Server"),
+        ("TINA4_PUBLIC_DIR", "", "Override the static public directory (default: framework public dir)", "Server"),
+        ("TINA4_ENV_FILE", ".env", "Path to the .env file to load", "Server"),
+        ("TINA4_MAX_UPLOAD_SIZE", "10485760", "Maximum upload size in bytes (10MB)", "Server"),
+        ("TINA4_DEV_POLL_INTERVAL", "3000", "Dev-reload client poll fallback interval in milliseconds", "Server"),
+        ("TINA4_SSE_HEARTBEAT", "15", "Server-sent events keep-alive interval in seconds", "Server"),
 
-        // Database — v3.12 renamed these to TINA4_* (boot guard refuses
-        // to start with bare DATABASE_URL set).
+        // Logging
+        ("TINA4_LOG_LEVEL", "INFO", "Log level: DEBUG, INFO, WARNING, ERROR", "Logging"),
+        ("TINA4_LOG_REQUESTS", "", "Log each request (default: inherits TINA4_DEBUG)", "Logging"),
+        ("TINA4_LOG_OUTPUT", "stdout", "Log sink: stdout, file, both", "Logging"),
+        ("TINA4_LOG_FORMAT", "text", "Log format: text or json", "Logging"),
+        ("TINA4_LOG_ROTATE_SIZE", "10485760", "Bytes before a log file rotates (10MB)", "Logging"),
+        ("TINA4_LOG_ROTATE_KEEP", "5", "Number of rotated log files to keep", "Logging"),
+        ("TINA4_LOG_MAX_SIZE", "", "Legacy alias for TINA4_LOG_ROTATE_SIZE (default: unset)", "Logging"),
+        ("TINA4_LOG_KEEP", "5", "Legacy alias for TINA4_LOG_ROTATE_KEEP", "Logging"),
+        ("TINA4_LOG_FILE", "", "Explicit log file path; forces file output (default: empty)", "Logging"),
+        ("TINA4_LOG_DIR", "logs", "Log directory", "Logging"),
+        ("TINA4_LOG_FUNC", "", "Include the caller function name in log lines", "Logging"),
+        ("TINA4_LOG_STRICT", "false", "Raise on log-write failure instead of swallowing it", "Logging"),
+
+        // Database
         ("TINA4_DATABASE_URL", "sqlite:///data/app.db", "Database connection string", "Database"),
         ("TINA4_DATABASE_USERNAME", "", "Database username (if not in URL)", "Database"),
         ("TINA4_DATABASE_PASSWORD", "", "Database password (if not in URL)", "Database"),
-        ("TINA4_AUTOCOMMIT", "false", "Auto-commit database transactions", "Database"),
-        ("TINA4_DB_CACHE", "false", "Enable query result caching", "Database"),
-        ("TINA4_DB_CACHE_TTL", "300", "Query cache TTL in seconds", "Database"),
+        ("TINA4_DB_POOL", "0", "Connection pool size (0 = single connection)", "Database"),
+        ("TINA4_AUTOCOMMIT", "true", "Auto-commit standalone writes (pool-safe)", "Database"),
+        ("TINA4_DATABASE_FIREBIRD_PATH", "", "Firebird database file path override (default: unset)", "Database"),
+        ("TINA4_ORM_PLURAL_TABLE_NAMES", "false", "Pluralize ORM table names", "Database"),
+
+        // Cache
+        ("TINA4_DB_CACHE", "false", "Enable the persistent cross-request query cache", "Cache"),
+        ("TINA4_AUTO_CACHING", "false", "Enable request-scoped query caching", "Cache"),
+        ("TINA4_DB_CACHE_TTL", "30", "Persistent DB query cache TTL in seconds", "Cache"),
+        ("TINA4_AUTO_CACHING_TTL", "5", "Request-scoped cache TTL in seconds", "Cache"),
+        ("TINA4_DB_CACHE_BACKEND", "memory", "Persistent DB cache backend: memory, redis, file", "Cache"),
+        ("TINA4_DB_CACHE_URL", "", "Persistent DB cache backend URL (default: unset)", "Cache"),
+        ("TINA4_CACHE_BACKEND", "memory", "Response/KV cache backend: memory, redis, file", "Cache"),
+        ("TINA4_CACHE_URL", "", "Cache backend URL (default varies by backend)", "Cache"),
+        ("TINA4_CACHE_USERNAME", "", "Cache backend username", "Cache"),
+        ("TINA4_CACHE_PASSWORD", "", "Cache backend password", "Cache"),
+        ("TINA4_CACHE_TTL", "60", "Default response cache TTL in seconds", "Cache"),
+        ("TINA4_CACHE_MAX_ENTRIES", "1000", "Maximum cached entries", "Cache"),
+        ("TINA4_CACHE_DIR", "data/cache", "Cache directory (file backend)", "Cache"),
 
         // Auth
-        ("TINA4_TOKEN_LIMIT", "60", "JWT token expiry in minutes", "Auth"),
-        ("TINA4_TOKEN_EXPIRES_IN", "60", "JWT token expiry (alias)", "Auth"),
-        ("TINA4_API_KEY", "", "API key for key-based authentication", "Auth"),
+        ("TINA4_SECRET", "", "JWT/signing secret (default: dev auto-mints to .env.local; set in production)", "Auth"),
+        ("TINA4_API_KEY", "", "Static bearer API key; unset disables key auth", "Auth"),
+        ("TINA4_TOKEN_LIMIT", "60", "JWT/form-token lifetime in minutes", "Auth"),
+        ("TINA4_JWT_ALGORITHM", "HS256", "JWT signing algorithm", "Auth"),
 
         // Session
         ("TINA4_SESSION_BACKEND", "file", "Session backend: file, redis, valkey, mongodb, database", "Session"),
-        ("TINA4_SESSION_TTL", "3600", "Session TTL in seconds", "Session"),
-        ("TINA4_SESSION_SAMESITE", "Lax", "Cookie SameSite attribute: Strict, Lax, None", "Session"),
+        ("TINA4_SESSION_TTL", "3600", "Session lifetime in seconds", "Session"),
         ("TINA4_SESSION_PATH", "data/sessions", "File session storage path", "Session"),
+        ("TINA4_SESSION_STRICT", "false", "Re-raise on session-backend failure instead of degrading", "Session"),
+        ("TINA4_SESSION_NAME", "tina4_session", "Session cookie name", "Session"),
+        ("TINA4_SESSION_SAMESITE", "Lax", "Cookie SameSite attribute: Strict, Lax, None", "Session"),
+        ("TINA4_SESSION_HTTPONLY", "true", "HttpOnly flag on the session cookie", "Session"),
+        ("TINA4_SESSION_SECURE", "false", "Secure flag on the session cookie (auto-forced true when SameSite=None)", "Session"),
         ("TINA4_SESSION_REDIS_HOST", "localhost", "Redis host for session storage", "Session"),
         ("TINA4_SESSION_REDIS_PORT", "6379", "Redis port for session storage", "Session"),
-        ("TINA4_SESSION_REDIS_PASSWORD", "", "Redis password", "Session"),
-        ("TINA4_SESSION_REDIS_DB", "0", "Redis database number", "Session"),
+        ("TINA4_SESSION_REDIS_PASSWORD", "", "Redis session password (default: unset)", "Session"),
+        ("TINA4_SESSION_REDIS_DB", "0", "Redis session database index", "Session"),
+        ("TINA4_SESSION_VALKEY_HOST", "localhost", "Valkey host for session storage", "Session"),
+        ("TINA4_SESSION_VALKEY_PORT", "6379", "Valkey port for session storage", "Session"),
+        ("TINA4_SESSION_VALKEY_PASSWORD", "", "Valkey session password (default: unset)", "Session"),
+        ("TINA4_SESSION_VALKEY_DB", "0", "Valkey session database index", "Session"),
+        ("TINA4_SESSION_VALKEY_PREFIX", "tina4:session:", "Valkey session key prefix", "Session"),
+        ("TINA4_SESSION_MONGO_URL", "mongodb://localhost:27017", "MongoDB session connection URL", "Session"),
+        ("TINA4_SESSION_MONGO_DB", "tina4", "MongoDB session database", "Session"),
+        ("TINA4_SESSION_MONGO_COLLECTION", "sessions", "MongoDB session collection", "Session"),
 
         // CORS
         ("TINA4_CORS_ORIGINS", "*", "Allowed CORS origins (comma-separated or *)", "CORS"),
-        ("TINA4_CORS_METHODS", "GET,POST,PUT,PATCH,DELETE,OPTIONS", "Allowed HTTP methods", "CORS"),
-        ("TINA4_CORS_HEADERS", "Content-Type,Authorization", "Allowed headers", "CORS"),
-        ("TINA4_CORS_CREDENTIALS", "false", "Allow credentials", "CORS"),
-        ("TINA4_CORS_MAX_AGE", "86400", "Preflight cache duration (seconds)", "CORS"),
+        ("TINA4_CORS_METHODS", "GET, POST, PUT, DELETE, PATCH, OPTIONS", "Allowed HTTP methods", "CORS"),
+        ("TINA4_CORS_HEADERS", "Content-Type,Authorization,X-Request-ID", "Allowed request headers", "CORS"),
+        ("TINA4_CORS_MAX_AGE", "86400", "Preflight cache duration in seconds", "CORS"),
+        ("TINA4_CORS_CREDENTIALS", "false", "Allow credentials in CORS requests", "CORS"),
 
-        // Security Headers
-        ("TINA4_CSP", "default-src 'self'", "Content Security Policy", "Security"),
-        ("TINA4_HSTS", "", "Strict-Transport-Security max-age (empty = disabled)", "Security"),
+        // Security
         ("TINA4_FRAME_OPTIONS", "SAMEORIGIN", "X-Frame-Options header", "Security"),
+        ("TINA4_HSTS", "", "Strict-Transport-Security max-age (empty = header omitted)", "Security"),
+        ("TINA4_CSP", "default-src 'self'", "Content-Security-Policy header", "Security"),
         ("TINA4_REFERRER_POLICY", "strict-origin-when-cross-origin", "Referrer-Policy header", "Security"),
         ("TINA4_PERMISSIONS_POLICY", "camera=(), microphone=(), geolocation=()", "Permissions-Policy header", "Security"),
-
-        // Cache
-        ("TINA4_CACHE_BACKEND", "memory", "Cache backend: memory, redis, file", "Cache"),
-        ("TINA4_CACHE_TTL", "60", "Response cache TTL in seconds", "Cache"),
-        ("TINA4_CACHE_MAX_ENTRIES", "1000", "Maximum cached entries", "Cache"),
-        ("TINA4_CACHE_URL", "", "Cache backend URL (for redis)", "Cache"),
-        ("TINA4_CACHE_DIR", "data/cache", "Cache directory (for file backend)", "Cache"),
-
-        // Mail
-        ("TINA4_MAIL_HOST", "", "SMTP server host", "Mail"),
-        ("TINA4_MAIL_PORT", "587", "SMTP port", "Mail"),
-        ("TINA4_MAIL_USERNAME", "", "SMTP username", "Mail"),
-        ("TINA4_MAIL_PASSWORD", "", "SMTP password", "Mail"),
-        ("TINA4_MAIL_FROM", "", "Default from email address", "Mail"),
-        ("TINA4_MAIL_FROM_NAME", "", "Default from name", "Mail"),
-        ("TINA4_MAIL_ENCRYPTION", "tls", "Encryption: none, tls, ssl", "Mail"),
-
-        // Queue
-        ("TINA4_QUEUE_BACKEND", "file", "Queue backend: file, rabbitmq, kafka, mongodb", "Queue"),
-        ("TINA4_QUEUE_PATH", "data/queue", "Queue storage path (file backend)", "Queue"),
-        ("TINA4_QUEUE_URL", "", "Queue backend URL", "Queue"),
-        ("TINA4_RABBITMQ_HOST", "localhost", "RabbitMQ host", "Queue"),
-        ("TINA4_RABBITMQ_PORT", "5672", "RabbitMQ port", "Queue"),
-        ("TINA4_RABBITMQ_USERNAME", "guest", "RabbitMQ username", "Queue"),
-        ("TINA4_RABBITMQ_PASSWORD", "guest", "RabbitMQ password", "Queue"),
+        ("TINA4_CSRF", "true", "CSRF protection (off only when set to false/0/no)", "Security"),
+        ("TINA4_RATE_LIMIT", "100", "Requests allowed per window", "Security"),
+        ("TINA4_RATE_WINDOW", "60", "Rate-limit window in seconds", "Security"),
 
         // Localization
         ("TINA4_LOCALE", "en", "Default locale", "Localization"),
         ("TINA4_LOCALE_DIR", "src/locales", "Locale files directory", "Localization"),
 
-        // WebSocket
-        ("TINA4_WS_BACKPLANE", "", "WebSocket backplane: redis or nats", "WebSocket"),
-        ("TINA4_WS_BACKPLANE_URL", "", "Backplane connection URL", "WebSocket"),
-        ("TINA4_WS_MAX_CONNECTIONS", "1000", "Maximum concurrent WebSocket connections", "WebSocket"),
+        // Mail
+        ("TINA4_MAIL_HOST", "localhost", "SMTP server host", "Mail"),
+        ("TINA4_MAIL_PORT", "587", "SMTP port", "Mail"),
+        ("TINA4_MAIL_USERNAME", "", "SMTP username", "Mail"),
+        ("TINA4_MAIL_PASSWORD", "", "SMTP password", "Mail"),
+        ("TINA4_MAIL_FROM", "", "Default from address (default: inherits username or noreply@localhost)", "Mail"),
+        ("TINA4_MAIL_FROM_NAME", "", "Default from display name", "Mail"),
+        ("TINA4_MAIL_ENCRYPTION", "tls", "SMTP encryption: none, tls, ssl", "Mail"),
+        ("TINA4_MAIL_IMAP_HOST", "", "IMAP server host (default: empty)", "Mail"),
+        ("TINA4_MAIL_IMAP_PORT", "993", "IMAP port", "Mail"),
+        ("TINA4_MAIL_IMAP_USERNAME", "", "IMAP username (default: inherits TINA4_MAIL_USERNAME)", "Mail"),
+        ("TINA4_MAIL_IMAP_PASSWORD", "", "IMAP password (default: inherits TINA4_MAIL_PASSWORD)", "Mail"),
+        ("TINA4_MAIL_IMAP_ENCRYPTION", "tls", "IMAP encryption: none, tls, ssl", "Mail"),
+        ("TINA4_MAIL_TLS_INSECURE", "false", "Allow insecure TLS certificates", "Mail"),
+        ("TINA4_MAILBOX_DIR", "data/mailbox", "Dev mailbox directory", "Mail"),
 
-        // Rate Limiting
-        ("TINA4_RATE_LIMIT", "100", "Requests per window", "Rate Limiting"),
-        ("TINA4_RATE_WINDOW", "60", "Rate limit window in seconds", "Rate Limiting"),
+        // Queue
+        ("TINA4_QUEUE_BACKEND", "file", "Queue backend: file, rabbitmq, kafka, mongodb", "Queue"),
+        ("TINA4_QUEUE_PATH", "data/queue", "Queue storage path (file backend)", "Queue"),
+        ("TINA4_QUEUE_URL", "", "Unified queue URL for AMQP/Kafka/Mongo (default: unset)", "Queue"),
+        ("TINA4_KAFKA_BROKERS", "localhost:9092", "Kafka broker list", "Queue"),
+        ("TINA4_KAFKA_GROUP_ID", "tina4_consumer_group", "Kafka consumer group ID", "Queue"),
+        ("TINA4_RABBITMQ_HOST", "localhost", "RabbitMQ host", "Queue"),
+        ("TINA4_RABBITMQ_PORT", "5672", "RabbitMQ port", "Queue"),
+        ("TINA4_RABBITMQ_USERNAME", "guest", "RabbitMQ username", "Queue"),
+        ("TINA4_RABBITMQ_PASSWORD", "guest", "RabbitMQ password", "Queue"),
+        ("TINA4_RABBITMQ_VHOST", "/", "RabbitMQ virtual host", "Queue"),
+        ("TINA4_MONGO_URI", "", "MongoDB queue connection URI (default: empty)", "Queue"),
+        ("TINA4_MONGO_HOST", "localhost", "MongoDB queue host", "Queue"),
+        ("TINA4_MONGO_PORT", "27017", "MongoDB queue port", "Queue"),
+        ("TINA4_MONGO_USERNAME", "", "MongoDB queue username", "Queue"),
+        ("TINA4_MONGO_PASSWORD", "", "MongoDB queue password", "Queue"),
+        ("TINA4_MONGO_DB", "tina4", "MongoDB queue database", "Queue"),
+        ("TINA4_MONGO_COLLECTION", "tina4_queue", "MongoDB queue collection", "Queue"),
+
+        // WebSocket
+        ("TINA4_WS_BACKPLANE", "", "WebSocket backplane selector: redis or nats (empty = local-only)", "WebSocket"),
+        ("TINA4_WS_BACKPLANE_URL", "redis://localhost:6379", "WebSocket backplane connection URL", "WebSocket"),
+        ("TINA4_WS_ALLOWED_ORIGINS", "", "WebSocket origin allow-list (empty = allow all)", "WebSocket"),
+        ("TINA4_WS_IDLE_TIMEOUT", "0", "WebSocket idle reaper timeout in seconds (0 = disabled)", "WebSocket"),
+        ("TINA4_WS_MAX_FRAME_SIZE", "1048576", "Maximum WebSocket frame size in bytes (1MB)", "WebSocket"),
+
+        // GraphQL
+        ("TINA4_GRAPHQL_ENDPOINT", "/graphql", "GraphQL endpoint path", "GraphQL"),
+        ("TINA4_GRAPHQL_AUTO_SCHEMA", "true", "Auto-build the GraphQL schema from the ORM", "GraphQL"),
+        ("TINA4_GRAPHQL_MAX_DEPTH", "50", "GraphQL selection-depth guard (<= 0 disables)", "GraphQL"),
+
+        // Swagger
+        ("TINA4_SWAGGER_ENABLED", "", "Enable the Swagger/OpenAPI UI (default: inherits TINA4_DEBUG)", "Swagger"),
+        ("TINA4_SWAGGER_TITLE", "Tina4 API", "OpenAPI document title", "Swagger"),
+        ("TINA4_SWAGGER_VERSION", "1.0.0", "OpenAPI document version", "Swagger"),
+        ("TINA4_SWAGGER_DESCRIPTION", "", "OpenAPI document description", "Swagger"),
+        ("TINA4_SWAGGER_CONTACT_EMAIL", "", "OpenAPI contact email (empty suppresses)", "Swagger"),
+        ("TINA4_SWAGGER_LICENSE", "", "OpenAPI license name (empty suppresses)", "Swagger"),
+
+        // Misc
+        ("TINA4_SERVICE_DIR", "src/services", "Background-service discovery directory", "Misc"),
+        ("TINA4_SERVICE_SLEEP", "5", "Background-service loop sleep in seconds", "Misc"),
+
+        // AI / Dev-Admin — MCP
+        ("TINA4_MCP", "", "Enable built-in MCP dev tools (default: inherits TINA4_DEBUG)", "MCP"),
+        ("TINA4_MCP_PORT", "", "Dedicated MCP port (default: framework port + 2000)", "MCP"),
+        ("TINA4_MCP_REMOTE", "false", "Expose the MCP endpoint remotely", "MCP"),
+
+        // AI / Dev-Admin — AI
+        ("TINA4_AI_URL", "http://localhost:11437/api/chat", "Dev-admin AI chat endpoint URL", "AI"),
+        ("TINA4_AI_MODEL", "qwen2.5-coder:14b", "AI model used for plan generation", "AI"),
+        ("TINA4_RAG_URL", "http://localhost:11438", "RAG service URL", "AI"),
+        ("TINA4_RAG_TOPK", "4", "RAG top-K retrieval count", "AI"),
+        ("TINA4_VISION_URL", "http://localhost:11437/api/chat", "Dev-admin vision service URL", "AI"),
+        ("TINA4_EMBED_URL", "http://localhost:11437/api/embeddings", "Dev-admin embedding service URL", "AI"),
+        ("TINA4_IMAGE_URL", "http://localhost:11437/api/generate", "Dev-admin image service URL", "AI"),
+        ("TINA4_SUPERVISOR_URL", "http://localhost:9999", "Rust supervisor URL", "AI"),
+        ("TINA4_AGENT_PORT", "", "Agent port used to derive the supervisor URL (default: unset)", "AI"),
+
+        // AI / Dev-Admin — feedback widget (Misc)
+        ("TINA4_ENABLE_FEEDBACK", "false", "Dev-admin feedback widget master switch", "Misc"),
+        ("TINA4_FEEDBACK_WHITELIST", "", "Feedback widget user whitelist (comma-separated)", "Misc"),
+        ("TINA4_FEEDBACK_DEV_USER", "", "Feedback widget dev-user identity", "Misc"),
     ]
 }
 

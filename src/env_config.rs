@@ -58,6 +58,7 @@ fn known_vars() -> Vec<(&'static str, &'static str, &'static str, &'static str)>
         ("TINA4_DATABASE_PASSWORD", "", "Database password (if not in URL)", "Database"),
         ("TINA4_DB_POOL", "0", "Connection pool size (0 = single connection)", "Database"),
         ("TINA4_AUTOCOMMIT", "true", "Auto-commit standalone writes (pool-safe)", "Database"),
+        ("TINA4_AUTO_MIGRATE", "true", "Run pending migrations on startup when a migrations/ folder exists (non-breaking: a failure logs and the service still boots); set false to disable", "Database"),
         ("TINA4_DATABASE_FIREBIRD_PATH", "", "Firebird database file path override (default: unset)", "Database"),
         ("TINA4_ORM_PLURAL_TABLE_NAMES", "false", "Pluralize ORM table names", "Database"),
 

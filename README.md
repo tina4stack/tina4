@@ -5,7 +5,7 @@
   <a href="https://tina4.com"><img src="https://img.shields.io/badge/docs-tina4.com-7b1fa2" alt="Docs"></a>
 </p>
 
-Unified CLI for the [Tina4](https://tina4.com) framework — Python, PHP, Ruby, and Node.js.
+Unified CLI for the [Tina4](https://tina4.com) framework: Python, PHP, Ruby, and Node.js.
 
 A single Rust binary that auto-detects your project language, compiles SCSS, watches files for hot-reload, and delegates to the language-specific CLI.
 
@@ -99,15 +99,15 @@ tina4 serve
 
 ## How it works
 
-1. **Language detection** — scans for `pyproject.toml`, `composer.json`, `Gemfile`, or `package.json` to determine the project language
-2. **SCSS compilation** — uses the [grass](https://github.com/connorskees/grass) crate (pure Rust Sass compiler) so individual frameworks don't need their own SCSS compilers
-3. **File watching** — monitors `src/`, `migrations/`, and `.env` for changes. On a meaningful change it POSTs `/__dev/api/reload` to the framework (the server keeps running); the framework then broadcasts the reload to the browser via WebSocket (`/__dev_reload`) with a polling fallback (`GET /__dev/api/mtime`). SCSS changes are recompiled in-place and signalled as `type: "css"` so the browser swaps the stylesheet without a full reload. Events are filtered to real source changes — metadata/access events, `__pycache__`, `.git`, `node_modules`, `vendor`, `dist`, `target`, `logs`, `.log`/`.db*`/`.pyc`/`.swp` files are ignored, and a real mtime check defeats overlayfs / polling-mode spurious events (Podman, distrobox)
-4. **Delegation** — forwards commands like `migrate`, `test`, `routes`, `console`, and `ai` to `tina4python`, `tina4php`, `tina4ruby`, or `tina4nodejs` as appropriate
-5. **Self-update** — `tina4 update` checks GitHub releases and replaces the binary in-place. Also detects and removes old v2 CLI binaries that may be shadowing the new CLI
+1. **Language detection**: scans for `pyproject.toml`, `composer.json`, `Gemfile`, or `package.json` to determine the project language
+2. **SCSS compilation**: uses the [grass](https://github.com/connorskees/grass) crate (pure Rust Sass compiler) so individual frameworks don't need their own SCSS compilers
+3. **File watching**: monitors `src/`, `migrations/`, and `.env` for changes. On a meaningful change it POSTs `/__dev/api/reload` to the framework (the server keeps running); the framework then broadcasts the reload to the browser via WebSocket (`/__dev_reload`) with a polling fallback (`GET /__dev/api/mtime`). SCSS changes are recompiled in-place and signalled as `type: "css"` so the browser swaps the stylesheet without a full reload. Events are filtered to real source changes: metadata/access events, `__pycache__`, `.git`, `node_modules`, `vendor`, `dist`, `target`, `logs`, `.log`/`.db*`/`.pyc`/`.swp` files are ignored, and a real mtime check defeats overlayfs / polling-mode spurious events (Podman, distrobox)
+4. **Delegation**: forwards commands like `migrate`, `test`, `routes`, `console`, and `ai` to `tina4python`, `tina4php`, `tina4ruby`, or `tina4nodejs` as appropriate
+5. **Self-update**: `tina4 update` checks GitHub releases and replaces the binary in-place. Also detects and removes old v2 CLI binaries that may be shadowing the new CLI
 
 ## Upgrading from v2
 
-If you have an older v2 Tina4 project, run `tina4 i-want-to-stop-using-v2-and-switch-to-v3` inside the project directory. The verbose name is deliberate — this is a one-way migration and we want you to mean it. It will:
+If you have an older v2 Tina4 project, run `tina4 i-want-to-stop-using-v2-and-switch-to-v3` inside the project directory. The verbose name is deliberate: this is a one-way migration and we want you to mean it. It will:
 
 - Move top-level directories (`routes/`, `orm/`, `templates/`, etc.) into `src/`
 - Update dependency versions in your manifest file to v3

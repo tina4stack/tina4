@@ -734,25 +734,45 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
         }
     };
 
-    // ── Respawn coordination ───────────────────────────────────────
-    // The watcher (when it sees a code file change like .py / .env)
-    // signals: kill the child + set "respawned_by_us" so the main
-    // loop knows the exit was intentional, not a crash. After respawn
-    // the watcher also POSTs the usual /__dev/api/reload so the
-    // browser refresh polling kicks in once the new child is healthy.
+    // ── Child supervision ──────────────────────────────────────────
+    // The CLI owns the language dev server as a child process. File
+    // changes do NOT respawn it: the watcher POSTs /__dev/api/reload and
+    // the framework re-imports changed modules in-process (see
+    // watcher.rs), so the server stays up and dashboard/WebSocket
+    // connections survive. This loop's job is supervision -- detect when
+    // the child exits on its own (a crash) and surface the error.
     //
-    // Why a respawn instead of in-process reload: Python caches
-    // imported modules in sys.modules, so the framework's _auto_discover
-    // can pick up NEW files but cannot re-execute modified ones. Every
-    // AI edit to an existing route silently has no effect until the
-    // process restarts. importlib.reload() is unsafe (stale handlers,
-    // in-flight requests, closure state). A clean child respawn is
-    // 1-2s of downtime in exchange for guaranteed correctness.
+    // The respawn_requested flag below is retained as dormant
+    // infrastructure: the watcher no longer sets it, so the respawn
+    // branch never fires today. It is kept (cheaply) for a future
+    // crash-recovery path, and the group-kill it performs matches the
+    // shutdown handler so it can never orphan the child tree if revived.
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let mut current_child = initial_child;
     let respawn_requested = Arc::new(AtomicBool::new(false));
+
+    // Track the current child's pid (== its process-group id, set via setpgid)
+    // so the shutdown handler can tear down the WHOLE dev-server tree (npx -> tsx
+    // -> node, uv -> python, bundle -> ruby). The child sits in its own process
+    // group, so a signal sent to this CLI never propagates to it — without an
+    // explicit group kill the tree is orphaned every time `serve` is stopped.
+    // The ctrlc "termination" feature makes this fire for SIGINT (Ctrl-C),
+    // SIGTERM (`kill`, supervisor stop) and SIGHUP (terminal closed) — the three
+    // ways a dev server actually dies. SIGKILL stays uncatchable; nothing can
+    // reap on -9, so the OS reparents the group to init in that one case.
+    let current_pid = Arc::new(std::sync::atomic::AtomicI32::new(current_child.id() as i32));
+    {
+        let cp = Arc::clone(&current_pid);
+        let _ = ctrlc::set_handler(move || {
+            let pid = cp.load(Ordering::SeqCst);
+            if pid > 0 {
+                terminate_group(pid as u32);
+            }
+            std::process::exit(130);
+        });
+    }
 
     // Give the server a moment to bind, then open browser.
     //
@@ -787,17 +807,17 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
 
     // File watcher — the Rust CLI owns all file watching. On change it:
     //   1. Compiles SCSS (if src/scss/ exists)
-    //   2. For .py/.env (code) → kills child to trigger respawn
-    //   3. For .css/.scss/.twig/.html (assets) → POSTs /__dev/api/reload
-    //   4. After either, browser reload signal goes out via the
-    //      framework's WebSocket / mtime endpoint
+    //   2. POSTs /__dev/api/reload so the framework hot-reloads in-process
+    //      (code re-imports, assets refresh) -- the server is NOT restarted
+    //   3. The framework then pushes a reload to the browser via its
+    //      WebSocket / mtime endpoint
     match info.language.as_str() {
         "tina4js" => println!(
             "{} Vite HMR active — press Ctrl+C to stop",
             icon_eye().green()
         ),
         _ => println!(
-            "{} File watcher active (code changes → respawn, assets → reload) — press Ctrl+C to stop",
+            "{} File watcher active (changes hot-reload in-process) — press Ctrl+C to stop",
             icon_eye().green()
         ),
     }
@@ -833,10 +853,15 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
         //   (a) child exited naturally (status returned by try_wait)
         //   (b) watcher set respawn_requested → we kill + break
         let exit_cause: ExitCause = loop {
-            // Watcher signalled? Kill our child and trigger respawn.
+            // Dormant respawn branch (the watcher no longer sets this flag --
+            // see the supervision note above). If ever revived, it kills the
+            // child's whole process GROUP before respawning: Child::kill would
+            // signal only the direct PID (npx), orphaning the tsx -> node
+            // grandchildren. terminate_group reaps the entire tree.
             if respawn_requested.swap(false, Ordering::SeqCst) {
-                let _ = current_child.kill();
-                let _ = current_child.wait(); // reap zombie
+                terminate_group(current_child.id());
+                let _ = current_child.wait(); // reap the direct child
+                current_pid.store(0, Ordering::SeqCst);
                 break ExitCause::Respawn;
             }
             // Child exited on its own?
@@ -856,6 +881,7 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
                 match start_language_server(&info_clone, port, &host_clone) {
                     Some(new_child) => {
                         current_child = new_child;
+                        current_pid.store(current_child.id() as i32, Ordering::SeqCst);
                         std::thread::sleep(std::time::Duration::from_secs(1));
                         let body = r#"{"type":"reload","file":"<respawn>"}"#;
                         let url = format!("http://127.0.0.1:{}/__dev/api/reload", port);
@@ -972,6 +998,36 @@ fn set_process_group(cmd: &mut std::process::Command) -> &mut std::process::Comm
 #[cfg(not(unix))]
 fn set_process_group(cmd: &mut std::process::Command) -> &mut std::process::Command {
     cmd
+}
+
+/// Terminate the dev server's entire process GROUP, not just the direct child.
+///
+/// The child is spawned as its own group leader (`set_process_group` →
+/// `setpgid(0,0)`), so its process-group id equals its pid. `Child::kill()`
+/// signals only that one pid — which for Node is the `npx` wrapper, leaving the
+/// `tsx` and `node app.ts` grandchildren orphaned (reparented to init). That is
+/// the leak that accumulated ~one dead `node app.ts` per serve shutdown
+/// (Ctrl-C, `kill`, or a closed terminal). `killpg` reaps the whole
+/// `npx -> tsx -> node` tree: SIGTERM for a graceful stop, then SIGKILL for
+/// anything still alive after a short grace period.
+#[cfg(unix)]
+fn terminate_group(pid: u32) {
+    let pgid = pid as i32;
+    unsafe {
+        libc::killpg(pgid, libc::SIGTERM);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    unsafe {
+        libc::killpg(pgid, libc::SIGKILL);
+    }
+}
+
+/// Windows has no process groups in the POSIX sense — kill the tree via taskkill.
+#[cfg(not(unix))]
+fn terminate_group(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .status();
 }
 
 fn start_language_server(

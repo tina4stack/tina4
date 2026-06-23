@@ -1,6 +1,6 @@
 [package]
 name = "tina4"
-version = "3.8.51"
+version = "3.8.52"
 edition = "2021"
 description = "Tina4 — Unified CLI for Python, PHP, Ruby, and Node.js frameworks"
 license = "MIT"
@@ -19,7 +19,11 @@ notify = "7"
 clap = { version = "4", features = ["derive"] }
 colored = "2"
 which = "7"
-ctrlc = "3"
+# "termination" makes set_handler also catch SIGTERM and SIGHUP (not just
+# SIGINT) on Unix, plus CTRL_CLOSE / LOGOFF / SHUTDOWN on Windows. The dev
+# server child sits in its own process group, so without this a `kill` or a
+# closed terminal would leave the npx -> tsx -> node tree orphaned.
+ctrlc = { version = "3", features = ["termination"] }
 # rustls-tls keeps the build cross-compilable to aarch64-unknown-linux-gnu
 # without a system OpenSSL install. Default native-tls path pulls
 # openssl-sys which can't find /usr/include/openssl on cross-compile

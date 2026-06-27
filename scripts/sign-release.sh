@@ -32,6 +32,14 @@ TS_URL="${TINA4_TS_URL:-http://time.certum.pl/}"
 for tool in gh osslsigncode; do
   command -v "$tool" >/dev/null 2>&1 || { echo "Error: '$tool' is required (see the header of this script)" >&2; exit 1; }
 done
+# Auto-detect the standard SimplySign macOS PKCS#11 module if not overridden.
+if [ -z "${TINA4_PKCS11_MODULE:-}" ]; then
+  for cand in \
+    /usr/local/lib/libSimplySignPKCS.dylib \
+    /Applications/proCertumSmartSign.app/Contents/MacOS/libSimplySignPKCS.dylib; do
+    [ -f "$cand" ] && TINA4_PKCS11_MODULE="$cand" && break
+  done
+fi
 : "${TINA4_PKCS11_MODULE:?Set TINA4_PKCS11_MODULE to the SimplySign PKCS#11 library path}"
 : "${TINA4_SIGN_CERT:?Set TINA4_SIGN_CERT to the Code Infinity certificate PEM path}"
 : "${TINA4_KEY_ID:?Set TINA4_KEY_ID to the PKCS#11 key id/label}"

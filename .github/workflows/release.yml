@@ -4,7 +4,7 @@ on:
   push:
     tags:
       - 'v*'
-  # Manual fire from the Actions tab — useful for a re-publish if the
+  # Manual fire from the Actions tab - useful for a re-publish if the
   # tagged commit needed a follow-up fix (e.g. Cargo.lock drift).
   workflow_dispatch:
     inputs:
@@ -205,7 +205,7 @@ jobs:
         # --allow-dirty handles the case where CI's cargo invocation
         # regenerates Cargo.lock after checkout (the version bump shows up
         # as a "modified" file in the working tree even when the lockfile
-        # is committed on the tagged commit). This is benign — the lock
+        # is committed on the tagged commit). This is benign - the lock
         # content reflects the same Cargo.toml we're about to publish.
         run: |
           set +e

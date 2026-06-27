@@ -1,6 +1,6 @@
 # Tina4 CLI
 
-Version 3.8.50 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 frameworks.
+Version 3.8.53 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 frameworks.
 
 ## Build & Test
 
@@ -146,6 +146,17 @@ binary via `which::which("claude")` and — because on Windows `claude` is a
 - Port auto-increment if default port is in use
 - Cross-platform: macOS, Linux, Windows (ANSI fallbacks for cmd.exe)
 - Default ports: PHP 7145, Python 7146, Ruby 7147, Node.js 7148
+- **Child supervision + clean shutdown.** `serve` runs the language dev
+  server as a child in its OWN process group (`setpgid`), so a stale tree
+  can be group-killed (avoids EADDRINUSE). Because the child is in its own
+  group, a signal to the CLI never reaches it on its own. The shutdown
+  handler (`ctrlc` with the `termination` feature: SIGINT, SIGTERM, SIGHUP)
+  explicitly `killpg`s the whole `npx -> tsx -> node` (or `uv -> python`,
+  `bundle -> ruby`) tree. Without this the Node `npx -> tsx -> node` chain
+  leaked one orphaned `node app.ts` per shutdown. SIGKILL (-9) stays
+  uncatchable, so that one case still reparents to init. The watcher does
+  NOT respawn the child on edits (it hot-reloads in-process); the respawn
+  loop is dormant and kept only for crash detection.
 
 ## Dependencies
 

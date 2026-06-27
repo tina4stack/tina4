@@ -4,7 +4,7 @@ on:
   push:
     tags:
       - 'v*'
-  # Manual fire from the Actions tab — useful for a re-publish if the
+  # Manual fire from the Actions tab - useful for a re-publish if the
   # tagged commit needed a follow-up fix (e.g. Cargo.lock drift).
   workflow_dispatch:
     inputs:
@@ -12,11 +12,35 @@ on:
         description: 'Existing tag to re-publish (e.g. v3.8.26). Leave empty to use main HEAD.'
         required: false
 
+# Least privilege by default; each job elevates only what it needs.
 permissions:
-  contents: write
+  contents: read
+
+env:
+  # Pin the Rust toolchain so every runner produces bytes from the same
+  # compiler (reproducibility). Bump deliberately, never float.
+  RUST_VERSION: "1.94.0"
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Supply-chain gate. Runs BEFORE anything is built or signed, so we never
+  #    sign a release that pulls a vulnerable / yanked / untrusted-source crate.
+  #    `build` depends on this, so a failure here blocks the whole release.
+  # ---------------------------------------------------------------------------
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: EmbarkStudios/cargo-deny-action@e2f4ede4a4e60ea15ff31bc0647485d80c66cfba # v2.0.4
+        with:
+          command: check advisories bans sources
+
   build:
+    needs: audit
+    permissions:
+      contents: write       # upload assets to the GitHub release
+      id-token: write       # OIDC, for build-provenance attestation
+      attestations: write   # write the provenance attestation
     strategy:
       fail-fast: false
       matrix:
@@ -24,18 +48,23 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             name: tina4-linux-amd64
+            run_smoke: true     # runner is x64 Linux -> can execute
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             name: tina4-linux-arm64
+            run_smoke: false    # cross-built ARM, can't run on x64
           - target: x86_64-apple-darwin
             os: macos-latest
             name: tina4-darwin-amd64
+            run_smoke: false    # runner is arm64, x64 run needs Rosetta (not guaranteed)
           - target: aarch64-apple-darwin
             os: macos-latest
             name: tina4-darwin-arm64
+            run_smoke: true     # runner is arm64 -> can execute
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             name: tina4-windows-amd64.exe
+            run_smoke: true     # runner is x64 Windows -> can execute
 
     runs-on: ${{ matrix.os }}
 
@@ -43,11 +72,12 @@ jobs:
       SIGN_ENABLED: ${{ secrets.CERT_THUMBPRINT }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust (pinned)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2025
         with:
+          toolchain: ${{ env.RUST_VERSION }}
           targets: ${{ matrix.target }}
 
       - name: Install cross-compilation tools (Linux ARM)
@@ -56,8 +86,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
+      # --locked forces the committed Cargo.lock - the build can't silently
+      # resolve a different dependency set than the one that was reviewed.
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
@@ -69,47 +101,102 @@ jobs:
         if: runner.os == 'Windows'
         run: cp target/${{ matrix.target }}/release/tina4.exe ${{ matrix.name }}
 
-      - name: Install SimplySign Desktop (Windows)
-        if: runner.os == 'Windows' && env.SIGN_ENABLED != ''
-        shell: powershell
+      # Don't sign (or ship) a binary that can't even report its version.
+      # Only runs where the runner arch can execute the target.
+      - name: Smoke test (Unix)
+        if: matrix.run_smoke && runner.os != 'Windows'
         run: |
-          Write-Host "Downloading SimplySign Desktop..."
-          $installerUrl = "https://simplysign.certum.eu/downloads/SimplySignDesktop-latest.msi"
-          $installerPath = "$env:RUNNER_TEMP\SimplySignDesktop.msi"
-          Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing
-          Write-Host "Installing SimplySign Desktop..."
-          Start-Process msiexec.exe -ArgumentList "/i", $installerPath, "/quiet", "/norestart" -Wait
-          Write-Host "SimplySign Desktop installed"
+          chmod +x ${{ matrix.name }}
+          ./${{ matrix.name }} --version
 
-      - name: Sign Windows binary
-        if: runner.os == 'Windows' && env.SIGN_ENABLED != ''
-        shell: powershell
-        env:
-          SIMPLYSIGN_OTP_URI: ${{ secrets.SIMPLYSIGN_OTP_URI }}
-          CERT_THUMBPRINT: ${{ secrets.CERT_THUMBPRINT }}
-          SIMPLYSIGN_EXE_PATH: "C:\\Program Files\\Certum\\SimplySign Desktop\\SimplySignDesktop.exe"
-          SIGN_TARGET: ${{ matrix.name }}
+      - name: Smoke test (Windows)
+        if: matrix.run_smoke && runner.os == 'Windows'
+        shell: pwsh
         run: |
-          .\scripts\sign-windows.ps1
+          & ".\${{ matrix.name }}" --version
 
-      - name: Upload to Release
-        uses: softprops/action-gh-release@v2
+      # Windows code-signing is a DELIBERATE, LOCAL step (a human enters the EV
+      # 2FA), NOT a CI step - the SimplySign OTP seed is never stored in CI, so
+      # nothing automated can sign as us. CI ships a DRAFT release;
+      # scripts/sign-release.ps1 signs the Windows .exe locally, regenerates
+      # SHA256SUMS over the signed bytes, and publishes. See scripts/RELEASING.md.
+
+      # SLSA provenance over the CI-built artifacts. Skipped for Windows: that
+      # binary is re-signed locally, so its shipped bytes differ from the build
+      # output - the EV Authenticode signature is its trust anchor instead.
+      - name: Attest build provenance
+        if: runner.os != 'Windows'
+        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
+        with:
+          subject-path: ${{ matrix.name }}
+
+      # Stash the build artifact so the checksums job hashes exactly what the
+      # draft ships (the Windows .exe is re-signed + re-hashed locally later).
+      - name: Upload build artifact
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Upload to draft Release
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
         with:
           files: ${{ matrix.name }}
+          draft: true   # finalized by the local signing step (scripts/sign-release.ps1)
+
+  # ---------------------------------------------------------------------------
+  # 2. Provisional checksums over the CI-built artifacts, attached to the DRAFT.
+  #    The local signing step (scripts/sign-release.ps1) re-signs the Windows
+  #    .exe and REGENERATES SHA256SUMS over the signed bytes before publishing,
+  #    so the released SHA256SUMS always matches what install.sh/.ps1 verify.
+  # ---------------------------------------------------------------------------
+  checksums:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist
+          sha256sum * > ../SHA256SUMS
+          echo "Published checksums:"
+          cat ../SHA256SUMS
+
+      - name: Upload SHA256SUMS to draft Release
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
+        with:
+          files: SHA256SUMS
+          draft: true   # regenerated over the SIGNED bytes by scripts/sign-release.ps1
 
   publish-crate:
+    needs: audit
+    # Publish the source crate ONLY on a final version tag (vX.Y.Z) - never on a
+    # prerelease/RC tag (vX.Y.Z-rc.N) or a manual branch dispatch, so an RC dry
+    # run can exercise the binary pipeline without pushing to crates.io.
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust (pinned)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2025
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
 
       - name: Publish to crates.io
         # --allow-dirty handles the case where CI's cargo invocation
         # regenerates Cargo.lock after checkout (the version bump shows up
         # as a "modified" file in the working tree even when the lockfile
-        # is committed on the tagged commit). This is benign — the lock
+        # is committed on the tagged commit). This is benign - the lock
         # content reflects the same Cargo.toml we're about to publish.
         run: |
           set +e

@@ -3,6 +3,13 @@
 # (scripts/sign-release.ps1) is primary and best-trodden for Authenticode;
 # use this only when you cannot sign on Windows.
 #
+# CAVEAT (macOS): signing a Windows PE through the SimplySign *cloud* PKCS#11
+# .dylib has no verified public success story - the well-trodden osslsigncode +
+# Certum recipes run on Linux against the *physical-card* module. Treat a macOS
+# run as best-effort and keep a Windows box ready as the fallback. The EV key
+# lives only in the cloud HSM (non-exportable) and a SimplySign session lasts
+# ~2 hours, so a wrong flag burns the session - do discovery + signing in one go.
+#
 # Signs the Windows tina4-windows-amd64.exe with the Code Infinity EV cert via
 # osslsigncode against the SimplySign / Certum cloud key (PKCS#11). You enter
 # the SimplySign 2FA yourself (cloud card mounted) - no OTP seed is stored.
@@ -16,8 +23,15 @@
 #   - These env vars (paths are specific to your SimplySign install):
 #       TINA4_PKCS11_MODULE  path to the SimplySign/Certum PKCS#11 library
 #                            (.dylib on macOS, .so on Linux)
-#       TINA4_SIGN_CERT      path to the Code Infinity certificate (PEM)
-#       TINA4_KEY_ID         the PKCS#11 key id/label for the cert
+#       TINA4_SIGN_CERT      path to a PEM holding the FULL CHAIN: the Code
+#                            Infinity leaf cert FIRST, then the Certum
+#                            intermediate(s) (omit the root - it is in the OS
+#                            trust store). Leaf-only signing fails chain
+#                            validation on verifiers.
+#       TINA4_KEY_ID         the PKCS#11 PRIVATE-KEY id/label (the -key id; on
+#                            SimplySign it matches the cert's CKA_ID). Discover
+#                            it with: pkcs11-tool --module <lib> --login
+#                            --list-objects --type privkey
 #   Optional: TINA4_TS_URL (default http://time.certum.pl/)
 #
 # USAGE:  sh scripts/sign-release.sh v3.8.53
@@ -44,6 +58,18 @@ fi
 : "${TINA4_SIGN_CERT:?Set TINA4_SIGN_CERT to the Code Infinity certificate PEM path}"
 : "${TINA4_KEY_ID:?Set TINA4_KEY_ID to the PKCS#11 key id/label}"
 [ -f "$TINA4_PKCS11_MODULE" ] || { echo "Error: PKCS#11 module not found: $TINA4_PKCS11_MODULE" >&2; exit 1; }
+# Resolve a symlinked module to its real target. Some macOS PKCS#11 tooling
+# rejects a symlinked provider under /usr/local/lib (OpenSC #1008), and the
+# stock SimplySign install ships libSimplySignPKCS.dylib as a symlink to the
+# versioned real file - so point osslsigncode at the resolved path.
+if [ -L "$TINA4_PKCS11_MODULE" ]; then
+  _link="$(readlink "$TINA4_PKCS11_MODULE")"
+  case "$_link" in
+    /*) TINA4_PKCS11_MODULE="$_link" ;;
+    *)  TINA4_PKCS11_MODULE="$(cd "$(dirname "$TINA4_PKCS11_MODULE")" && pwd)/$_link" ;;
+  esac
+  echo "Resolved PKCS#11 module symlink -> $TINA4_PKCS11_MODULE"
+fi
 [ -f "$TINA4_SIGN_CERT" ]     || { echo "Error: cert PEM not found: $TINA4_SIGN_CERT" >&2; exit 1; }
 
 WORK="$(mktemp -d)"
@@ -55,12 +81,17 @@ gh release download "$TAG" --dir . --clobber
 [ -f "$BINARY" ] || { echo "Error: $BINARY not found in release $TAG" >&2; exit 1; }
 
 echo "Signing $BINARY (SimplySign must be logged in) ..."
+# -t (legacy Authenticode timestamp) is the Certum-proven form against
+# time.certum.pl - it is what the canonical osslsigncode + Certum recipes use
+# (e.g. oneclick/rubyinstaller2). RFC3161 (-ts) has been reported to fail there
+# (osslsigncode #109). If your Certum setup specifically needs RFC3161, switch
+# -t back to -ts and test it BEFORE the real signing session.
 osslsigncode sign \
   -pkcs11module "$TINA4_PKCS11_MODULE" \
   -certs "$TINA4_SIGN_CERT" \
   -key "$TINA4_KEY_ID" \
   -h sha256 \
-  -ts "$TS_URL" \
+  -t "$TS_URL" \
   -in "$BINARY" -out "${BINARY}.signed"
 mv -f "${BINARY}.signed" "$BINARY"
 

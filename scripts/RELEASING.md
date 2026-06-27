@@ -47,9 +47,33 @@ $env:CERT_THUMBPRINT = "<sha1-thumbprint>"
 pwsh ./scripts/sign-release.ps1 -Tag v3.8.53
 ```
 
-**macOS / Linux (fallback):** see the header of `scripts/sign-release.sh` for
-the `osslsigncode` + SimplySign PKCS#11 prerequisites, then:
+**macOS / Linux (fallback - best-effort):** signing a Windows PE through the
+SimplySign *cloud* PKCS#11 module has no verified public success story (the
+proven osslsigncode + Certum recipes run on Linux with the *physical-card*
+module). Try it only if Windows is unavailable, and keep a Windows box ready.
+
 ```
+# 1. Tools (brew ships osslsigncode 2.13 + opensc 0.27.1):
+brew install osslsigncode opensc
+
+# 2. Open SimplySign Desktop and LOG IN (your 2FA; cloud card mounted).
+
+# 3. Resolve the module to its REAL file (the stock install is a symlink, which
+#    some macOS PKCS#11 tooling rejects - the script also does this for you):
+export TINA4_PKCS11_MODULE="$(readlink /usr/local/lib/libSimplySignPKCS.dylib)"
+
+# 4. Find the private-key id (this is TINA4_KEY_ID):
+pkcs11-tool --module "$TINA4_PKCS11_MODULE" --login --list-objects --type privkey
+
+# 5. TINA4_SIGN_CERT = a PEM with the leaf FIRST then the Certum intermediate(s).
+#    Get the leaf from the Certum portal (preferred), or read it off the token:
+#      pkcs11-tool --module "$TINA4_PKCS11_MODULE" --read-object --type cert --id <HEXID> -o leaf.der
+#      openssl x509 -inform DER -in leaf.der -out leaf.pem
+#    cat leaf.pem intermediate.pem > fullchain.pem
+export TINA4_SIGN_CERT="$PWD/fullchain.pem"
+export TINA4_KEY_ID="<HEXID-from-step-4>"
+
+# 6. Sign + publish:
 sh scripts/sign-release.sh v3.8.53
 ```
 

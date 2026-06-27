@@ -115,39 +115,23 @@ jobs:
         run: |
           & ".\${{ matrix.name }}" --version
 
-      - name: Install SimplySign Desktop (Windows)
-        if: runner.os == 'Windows' && env.SIGN_ENABLED != ''
-        shell: powershell
-        run: |
-          Write-Host "Downloading SimplySign Desktop..."
-          $installerUrl = "https://simplysign.certum.eu/downloads/SimplySignDesktop-latest.msi"
-          $installerPath = "$env:RUNNER_TEMP\SimplySignDesktop.msi"
-          Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing
-          Write-Host "Installing SimplySign Desktop..."
-          Start-Process msiexec.exe -ArgumentList "/i", $installerPath, "/quiet", "/norestart" -Wait
-          Write-Host "SimplySign Desktop installed"
+      # Windows code-signing is a DELIBERATE, LOCAL step (a human enters the EV
+      # 2FA), NOT a CI step - the SimplySign OTP seed is never stored in CI, so
+      # nothing automated can sign as us. CI ships a DRAFT release;
+      # scripts/sign-release.ps1 signs the Windows .exe locally, regenerates
+      # SHA256SUMS over the signed bytes, and publishes. See scripts/RELEASING.md.
 
-      - name: Sign Windows binary
-        if: runner.os == 'Windows' && env.SIGN_ENABLED != ''
-        shell: powershell
-        env:
-          SIMPLYSIGN_OTP_URI: ${{ secrets.SIMPLYSIGN_OTP_URI }}
-          CERT_THUMBPRINT: ${{ secrets.CERT_THUMBPRINT }}
-          SIMPLYSIGN_EXE_PATH: "C:\\Program Files\\Certum\\SimplySign Desktop\\SimplySignDesktop.exe"
-          SIGN_TARGET: ${{ matrix.name }}
-        run: |
-          .\scripts\sign-windows.ps1
-
-      # Provenance AFTER signing, so the attested digest is the digest of the
-      # bytes we actually ship. Lets anyone verify (independently of the cert)
-      # that this artifact was built by THIS workflow from THIS commit.
+      # SLSA provenance over the CI-built artifacts. Skipped for Windows: that
+      # binary is re-signed locally, so its shipped bytes differ from the build
+      # output - the EV Authenticode signature is its trust anchor instead.
       - name: Attest build provenance
+        if: runner.os != 'Windows'
         uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
         with:
           subject-path: ${{ matrix.name }}
 
-      # Stash the FINAL (signed) artifact so the checksums job hashes exactly
-      # what gets published.
+      # Stash the build artifact so the checksums job hashes exactly what the
+      # draft ships (the Windows .exe is re-signed + re-hashed locally later).
       - name: Upload build artifact
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
@@ -156,15 +140,17 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-      - name: Upload to Release
+      - name: Upload to draft Release
         uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
         with:
           files: ${{ matrix.name }}
+          draft: true   # finalized by the local signing step (scripts/sign-release.ps1)
 
   # ---------------------------------------------------------------------------
-  # 2. Checksums over the FINAL artifacts, computed AFTER signing (the signature
-  #    changes the bytes), so SHA256SUMS matches what install.sh / install.ps1
-  #    download and verify.
+  # 2. Provisional checksums over the CI-built artifacts, attached to the DRAFT.
+  #    The local signing step (scripts/sign-release.ps1) re-signs the Windows
+  #    .exe and REGENERATES SHA256SUMS over the signed bytes before publishing,
+  #    so the released SHA256SUMS always matches what install.sh/.ps1 verify.
   # ---------------------------------------------------------------------------
   checksums:
     needs: build
@@ -185,10 +171,11 @@ jobs:
           echo "Published checksums:"
           cat ../SHA256SUMS
 
-      - name: Upload SHA256SUMS to Release
+      - name: Upload SHA256SUMS to draft Release
         uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
         with:
           files: SHA256SUMS
+          draft: true   # regenerated over the SIGNED bytes by scripts/sign-release.ps1
 
   publish-crate:
     needs: audit

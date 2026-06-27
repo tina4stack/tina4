@@ -6,9 +6,13 @@
 # policy when ready.
 
 [advisories]
-# Block any dependency with a RustSec advisory or that has been yanked from the
-# registry. (cargo-deny denies known vulnerabilities by default.)
+# Block any dependency with a RustSec security advisory or that has been yanked
+# from the registry. (cargo-deny denies known vulnerabilities by default.)
 yanked = "deny"
+# Only flag UNMAINTAINED advisories for crates we directly depend on - not deep
+# transitive ones we cannot fix until an upstream updates (e.g. notify -> instant,
+# RUSTSEC-2024-0384, no safe upgrade). Vulnerabilities are still always denied.
+unmaintained = "workspace"
 ignore = []
 
 [bans]

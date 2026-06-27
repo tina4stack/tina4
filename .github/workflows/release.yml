@@ -179,6 +179,10 @@ jobs:
 
   publish-crate:
     needs: audit
+    # Publish the source crate ONLY on a final version tag (vX.Y.Z) - never on a
+    # prerelease/RC tag (vX.Y.Z-rc.N) or a manual branch dispatch, so an RC dry
+    # run can exercise the binary pipeline without pushing to crates.io.
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2

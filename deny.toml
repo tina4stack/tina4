@@ -1,0 +1,24 @@
+# Supply-chain gate for the tina4 CLI release pipeline.
+# Run by .github/workflows/release.yml (cargo-deny) BEFORE any binary is built
+# or signed, so we never sign a release that pulls a known-vulnerable, yanked,
+# or untrusted-source crate. Licenses are intentionally NOT gated here yet (the
+# release workflow runs `check advisories bans sources`); add a [licenses]
+# policy when ready.
+
+[advisories]
+# Block any dependency with a RustSec advisory or that has been yanked from the
+# registry. (cargo-deny denies known vulnerabilities by default.)
+yanked = "deny"
+ignore = []
+
+[bans]
+# A pulled-in second copy of a crate is a smell, not a hard stop - warn so it
+# stays visible without blocking a release.
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+# Only crates.io. A dependency pulled from an unknown registry or a git URL is a
+# supply-chain red flag and fails the gate.
+unknown-registry = "deny"
+unknown-git = "deny"

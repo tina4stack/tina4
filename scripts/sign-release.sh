@@ -18,7 +18,9 @@
 #
 # PREREQUISITES:
 #   - SimplySign Desktop installed and LOGGED IN (your 2FA; cloud card mounted)
-#   - osslsigncode installed (brew install osslsigncode)
+#   - osslsigncode + the pkcs11 engine + opensc (macOS):
+#       brew install osslsigncode libp11 opensc
+#     (Debian: apt-get install osslsigncode libengine-pkcs11-openssl opensc)
 #   - gh (GitHub CLI) installed and authenticated
 #   - These env vars (paths are specific to your SimplySign install):
 #       TINA4_PKCS11_MODULE  path to the SimplySign/Certum PKCS#11 library
@@ -28,10 +30,12 @@
 #                            intermediate(s) (omit the root - it is in the OS
 #                            trust store). Leaf-only signing fails chain
 #                            validation on verifiers.
-#       TINA4_KEY_ID         the PKCS#11 PRIVATE-KEY id/label (the -key id; on
-#                            SimplySign it matches the cert's CKA_ID). Discover
-#                            it with: pkcs11-tool --module <lib> --login
-#                            --list-objects --type privkey
+#       TINA4_KEY_ID         the PKCS#11 key id (hex, with or without colons -
+#                            this script wraps it into a pkcs11: URI), or a full
+#                            pkcs11: URI. On SimplySign the cert shares the key's
+#                            CKA_ID; read it (NO --login: the cloud card has no
+#                            PIN, so --login fails) with:
+#                              pkcs11-tool --module <lib> --list-objects --type cert
 #   Optional: TINA4_TS_URL (default http://time.certum.pl/)
 #
 # USAGE:  sh scripts/sign-release.sh v3.8.53
@@ -72,6 +76,41 @@ if [ -L "$TINA4_PKCS11_MODULE" ]; then
 fi
 [ -f "$TINA4_SIGN_CERT" ]     || { echo "Error: cert PEM not found: $TINA4_SIGN_CERT" >&2; exit 1; }
 
+# osslsigncode signs through OpenSSL's pkcs11 ENGINE (libp11). On OpenSSL 3 the
+# engine is not built in - if OPENSSL_ENGINES is unset, locate libp11's
+# pkcs11.{dylib,so} and point OpenSSL at it. Without this, osslsigncode fails
+# with "Failed to find and load 'pkcs11' engine".
+if [ -z "${OPENSSL_ENGINES:-}" ]; then
+  for d in /opt/homebrew/lib/engines-3 /usr/local/lib/engines-3 \
+           "$(brew --prefix libp11 2>/dev/null)/lib/engines-3" \
+           /usr/lib/engines-3 /usr/lib/*/engines-3 /usr/lib/ssl/engines-3; do
+    if [ -f "$d/pkcs11.dylib" ] || [ -f "$d/pkcs11.so" ]; then
+      OPENSSL_ENGINES="$d"; export OPENSSL_ENGINES; break
+    fi
+  done
+fi
+if [ -z "${OPENSSL_ENGINES:-}" ]; then
+  echo "Error: PKCS#11 engine (libp11) not found. Install it:" >&2
+  echo "  macOS:  brew install libp11" >&2
+  echo "  Debian: apt-get install libengine-pkcs11-openssl" >&2
+  echo "  (or set OPENSSL_ENGINES to the dir holding pkcs11.dylib/.so)" >&2
+  exit 1
+fi
+echo "Using PKCS#11 engine dir: $OPENSSL_ENGINES"
+
+# osslsigncode's -key wants a PKCS#11 URI when signing through the engine.
+# Accept a full pkcs11: URI as-is, or build one from a hex key id (with or
+# without colons): 636c1f49.. / 63:6c:1f.. -> pkcs11:id=%63%6c%1f..;type=private
+case "$TINA4_KEY_ID" in
+  pkcs11:*) KEY_URI="$TINA4_KEY_ID" ;;
+  *)
+    _hex="$(printf '%s' "$TINA4_KEY_ID" | tr -d ':')"
+    _enc="$(printf '%s' "$_hex" | sed 's/\(..\)/%\1/g')"
+    KEY_URI="pkcs11:id=${_enc};type=private"
+    ;;
+esac
+echo "Using key URI: $KEY_URI"
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 cd "$WORK"
@@ -89,7 +128,7 @@ echo "Signing $BINARY (SimplySign must be logged in) ..."
 osslsigncode sign \
   -pkcs11module "$TINA4_PKCS11_MODULE" \
   -certs "$TINA4_SIGN_CERT" \
-  -key "$TINA4_KEY_ID" \
+  -key "$KEY_URI" \
   -h sha256 \
   -t "$TS_URL" \
   -in "$BINARY" -out "${BINARY}.signed"

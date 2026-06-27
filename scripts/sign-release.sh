@@ -111,12 +111,18 @@ case "$TINA4_KEY_ID" in
 esac
 echo "Using key URI: $KEY_URI"
 
+# gh infers the repo from the cwd's git remote, but we cd into a temp dir below,
+# so capture it now (while still in the checkout) and pass --repo explicitly.
+REPO="${TINA4_REPO:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)}"
+[ -n "$REPO" ] || REPO="tina4stack/tina4"
+echo "Target repo: $REPO"
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 cd "$WORK"
 
 echo "Downloading draft release assets for $TAG ..."
-gh release download "$TAG" --dir . --clobber
+gh release download "$TAG" --repo "$REPO" --dir . --clobber
 [ -f "$BINARY" ] || { echo "Error: $BINARY not found in release $TAG" >&2; exit 1; }
 
 echo "Signing $BINARY (SimplySign must be logged in) ..."
@@ -138,7 +144,7 @@ echo "Verifying signature ..."
 osslsigncode verify "$BINARY"
 
 echo "Uploading signed $BINARY ..."
-gh release upload "$TAG" "$BINARY" --clobber
+gh release upload "$TAG" "$BINARY" --repo "$REPO" --clobber
 
 echo "Regenerating SHA256SUMS over the signed assets ..."
 rm -f SHA256SUMS
@@ -151,10 +157,10 @@ else
   done > SHA256SUMS
 fi
 cat SHA256SUMS
-gh release upload "$TAG" SHA256SUMS --clobber
+gh release upload "$TAG" SHA256SUMS --repo "$REPO" --clobber
 
 echo "Publishing release $TAG ..."
-gh release edit "$TAG" --draft=false
+gh release edit "$TAG" --repo "$REPO" --draft=false
 
 echo ""
 echo "Done: $TAG signed (EV), checksummed over signed bytes, and published."

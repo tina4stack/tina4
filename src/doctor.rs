@@ -130,9 +130,9 @@ pub fn run() {
 
     let clis = [
         CliCheck { name: "tina4python", lang: "Python",  install_cmd: "pip install tina4-python" },
-        CliCheck { name: "tina4php",    lang: "PHP",     install_cmd: "composer global require tina4/tina4php" },
+        CliCheck { name: "tina4php",    lang: "PHP",     install_cmd: "composer global require tina4stack/tina4php" },
         CliCheck { name: "tina4ruby",   lang: "Ruby",    install_cmd: "gem install tina4ruby" },
-        CliCheck { name: "tina4nodejs", lang: "Node.js", install_cmd: "npm install -g tina4nodejs" },
+        CliCheck { name: "tina4nodejs", lang: "Node.js", install_cmd: "npm install -g tina4-nodejs" },
         CliCheck { name: "vite",       lang: "tina4js",  install_cmd: "npm install vite" },
     ];
 

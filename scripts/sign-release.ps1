@@ -46,6 +46,7 @@ foreach ($tool in @("gh")) {
 # --- Locate signtool.exe (newest x64 SDK build) ---
 $signtool = $null
 $candidates = @(
+    "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe",
     "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool.exe",
     "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22000.0\x64\signtool.exe",
     "C:\Program Files (x86)\Windows Kits\10\bin\10.0.19041.0\x64\signtool.exe"
@@ -76,6 +77,17 @@ try {
     Write-Host "Verifying signature ..."
     & $signtool verify /pa /v $Binary
     if ($LASTEXITCODE -ne 0) { Write-Error "signature verification failed"; exit 1 }
+
+    # Guard: 'verify /pa' accepts ANY valid chain. Assert this is OUR EV cert so a
+    # wrong-cert or stale-unsigned binary can never be published. Subject is
+    # 'CN=Code Infinity (Pty) Ltd, O=Code Infinity (Pty) Ltd, ...'.
+    $sig = Get-AuthenticodeSignature $Binary
+    if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notlike '*Code Infinity*') {
+        Write-Error ("Refusing to publish: {0} is not validly signed by Code Infinity (status={1}, signer={2})" -f `
+            $Binary, $sig.Status, $sig.SignerCertificate.Subject)
+        exit 1
+    }
+    Write-Host "Signer verified: $($sig.SignerCertificate.Subject)"
 
     Write-Host "Uploading signed $Binary ..."
     gh release upload $Tag $Binary --clobber

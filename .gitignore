@@ -2,6 +2,10 @@
 .claude/worktrees/
 target/
 
+# Per-project manifest cache (`<cli> commands --json`), written into any Tina4
+# project the client runs `--help` in. Never committed.
+.tina4/
+
 # Built release binaries (produced by CI, never committed)
 tina4-linux-amd64
 tina4-linux-arm64

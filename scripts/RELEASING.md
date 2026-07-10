@@ -47,37 +47,36 @@ $env:CERT_THUMBPRINT = "<sha1-thumbprint>"
 pwsh ./scripts/sign-release.ps1 -Tag v3.8.53
 ```
 
-**macOS / Linux (fallback - best-effort):** signing a Windows PE through the
-SimplySign *cloud* PKCS#11 module has no verified public success story (the
-proven osslsigncode + Certum recipes run on Linux with the *physical-card*
-module). Try it only if Windows is unavailable, and keep a Windows box ready.
+**macOS (proven): `sh sign-mac.sh <tag>` - use jsign, NOT osslsigncode.** v3.8.55
+was signed on macOS this way. osslsigncode + the OpenSSL libp11 engine FAILS on
+the SimplySign *cloud* module (the pkcs11 provider won't load; the legacy engine
+path dies with "PKCS#11 module: Attribute type invalid" - the cloud HSM rejects
+the RSA sign the engine issues). jsign talks PKCS#11 directly and signs cleanly.
 
 ```
-# 1. Tools (brew ships osslsigncode 2.13 + opensc 0.27.1):
-brew install osslsigncode opensc
+# 1. Tools:
+brew install jsign osslsigncode   # jsign signs; osslsigncode verifies
 
 # 2. Open SimplySign Desktop and LOG IN (your 2FA; cloud card mounted).
 
-# 3. Resolve the module to its REAL file (the stock install is a symlink, which
-#    some macOS PKCS#11 tooling rejects - the script also does this for you):
-export TINA4_PKCS11_MODULE="$(readlink /usr/local/lib/libSimplySignPKCS.dylib)"
-
-# 4. Find the private-key id (this is TINA4_KEY_ID):
-pkcs11-tool --module "$TINA4_PKCS11_MODULE" --login --list-objects --type privkey
-
-# 5. TINA4_SIGN_CERT = a PEM with the leaf FIRST then the Certum intermediate(s).
-#    Get the leaf from the Certum portal (preferred), or read it off the token:
-#      pkcs11-tool --module "$TINA4_PKCS11_MODULE" --read-object --type cert --id <HEXID> -o leaf.der
-#      openssl x509 -inform DER -in leaf.der -out leaf.pem
-#    cat leaf.pem intermediate.pem > fullchain.pem
-export TINA4_SIGN_CERT="$PWD/fullchain.pem"
-export TINA4_KEY_ID="<HEXID-from-step-4>"
-
-# 6. Sign + publish:
-sh scripts/sign-release.sh v3.8.53
+# 3. Sign + verify + checksum + publish (values are pre-filled; override via
+#    TINA4_PKCS11_MODULE / TINA4_SIGN_ALIAS / TINA4_TS_URL if your install differs):
+sh sign-mac.sh v3.8.56
 ```
 
-Either script: downloads the draft's assets, signs the `.exe`, verifies it,
+`sign-mac.sh` resolves the SimplySign module symlink, writes a SunPKCS11 config,
+and runs `jsign --storetype PKCS11 --storepass "" --alias <CKA_LABEL>
+--tsmode AUTHENTICODE --tsaurl http://time.certum.pl/`. jsign reads the signing
+certificate (and chain) from the token, so no cert PEM lives on disk. Read the
+cert's CKA_LABEL (the `--alias`) with
+`pkcs11-tool --module <module> --list-objects --type cert` (NO `--login` - the
+cloud card has no PIN).
+
+**Linux / physical-card fallback: `sh scripts/sign-release.sh <tag>`** (osslsigncode
++ libp11). This is the well-trodden path for a *physical* Certum card on Linux; it
+does not work against the SimplySign *cloud* module (use `sign-mac.sh` there).
+
+Either script downloads the draft's assets, signs the `.exe`, verifies it,
 re-uploads it, regenerates `SHA256SUMS` over the signed bytes, and un-drafts the
 release.
 

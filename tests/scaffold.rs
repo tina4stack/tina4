@@ -1,15 +1,14 @@
-//! Integration tests for the scaffolding tools (`tina4 generate ...`, and a
-//! gated `tina4 init`).
+//! Integration tests for scaffolding delegation.
 //!
-//! `generate` is pure templating + project detection — no language runtime
-//! needed — so the whole matrix (4 languages × {model, route, migration,
-//! middleware}) runs deterministically here, including regression coverage for
-//! the two bugs found by manual testing:
-//!   * migration names must be slugified (no spaces in the filename / SQL)
-//!   * `generate route foo` must NOT leave a spurious empty `src/routes/foo/`
+//! Phase 2 of the self-describing-client epic removed the Rust `generate` stubs:
+//! `generate` (and migrate/seed/test/routes/metrics/queue/console) are no longer
+//! client-owned — they are forwarded verbatim to the detected framework CLI,
+//! which owns arg parsing and the real generators. These tests prove the
+//! delegation wiring end-to-end with the built binary (no mocks).
 //!
-//! The `init` tests need the language toolchains + network, so they are
-//! `#[ignore]`d by default — run them with `cargo test -- --ignored`.
+//! The tests that need a real framework toolchain (`generate crud`, `init`) are
+//! `#[ignore]`d by default — run them with `cargo test -- --ignored`. The
+//! project-detection tests run everywhere.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,218 +18,98 @@ use std::sync::atomic::{AtomicU32, Ordering};
 const BIN: &str = env!("CARGO_BIN_EXE_tina4");
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
-/// A throwaway project directory pre-seeded with the marker file(s) that make
-/// `detect_language()` recognise the language. Each test gets a unique dir, so
-/// the suite is parallel-safe (no global cwd mutation — every command runs with
-/// `.current_dir(dir)`).
-struct Project {
-    dir: PathBuf,
+fn unique_dir(tag: &str) -> PathBuf {
+    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("tina4-scaffold-{}-{}-{}", std::process::id(), tag, n));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).expect("create temp dir");
+    dir
 }
 
-impl Project {
-    fn new(markers: &[(&str, &str)]) -> Project {
-        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let dir = std::env::temp_dir().join(format!("tina4-scaffold-{}-{}", std::process::id(), n));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("create temp project dir");
-        for (rel, content) in markers {
-            fs::write(dir.join(rel), content).expect("write marker");
-        }
-        Project { dir }
-    }
-
-    fn python() -> Project { Project::new(&[("app.py", "")]) }
-    fn php() -> Project { Project::new(&[("composer.json", r#"{"require":{"tina4stack/tina4-php":"^3.0"}}"#)]) }
-    fn ruby() -> Project { Project::new(&[("app.rb", "")]) }
-    fn nodejs() -> Project { Project::new(&[("app.ts", "")]) }
-
-    fn generate(&self, what: &str, name: &str) -> Output {
-        Command::new(BIN)
-            .args(["generate", what, name])
-            .current_dir(&self.dir)
-            .output()
-            .expect("run tina4 generate")
-    }
-
-    fn path(&self, rel: &str) -> PathBuf {
-        self.dir.join(rel)
-    }
-
-    fn read(&self, rel: &str) -> String {
-        fs::read_to_string(self.path(rel)).unwrap_or_else(|_| panic!("read {rel}"))
-    }
-
-    /// The single .sql file under migrations/ (filename only).
-    fn migration_filename(&self) -> String {
-        let mut entries: Vec<String> = fs::read_dir(self.path("migrations"))
-            .expect("migrations dir exists")
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().to_string())
-            .filter(|n| n.ends_with(".sql"))
-            .collect();
-        entries.sort();
-        entries.pop().expect("at least one migration .sql")
-    }
+fn run(dir: &Path, args: &[&str]) -> Output {
+    Command::new(BIN)
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("run tina4")
 }
 
-impl Drop for Project {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
-    }
+/// Is a real `tina4python` on PATH? (Spawns it — no assumptions.)
+fn tina4python_available() -> bool {
+    Command::new("tina4python").arg("commands").output().is_ok()
 }
 
-fn ok(out: &Output) -> bool {
-    out.status.success()
-}
-
-// ── model ─────────────────────────────────────────────────────────
-
-#[test]
-fn model_python() {
-    let p = Project::python();
-    assert!(ok(&p.generate("model", "Product")));
-    assert!(p.path("src/orm/Product.py").is_file());
-    assert!(p.read("src/orm/Product.py").contains("class Product(ORM)"));
-}
-
-#[test]
-fn model_php() {
-    let p = Project::php();
-    assert!(ok(&p.generate("model", "Product")));
-    assert!(p.path("src/orm/Product.php").is_file());
-    assert!(p.read("src/orm/Product.php").contains("class Product extends"));
-}
-
-#[test]
-fn model_ruby() {
-    let p = Project::ruby();
-    assert!(ok(&p.generate("model", "Product")));
-    // Ruby filenames are snake_case.
-    assert!(p.path("src/orm/product.rb").is_file());
-    assert!(p.read("src/orm/product.rb").contains("class Product < Tina4::ORM"));
-}
-
-#[test]
-fn model_nodejs() {
-    let p = Project::nodejs();
-    assert!(ok(&p.generate("model", "Product")));
-    assert!(p.path("src/models/Product.ts").is_file());
-    assert!(p.read("src/models/Product.ts").contains("class Product"));
-}
-
-// ── route (regression: no spurious directory) ──────────────────────
-
-#[test]
-fn route_python_no_spurious_dir() {
-    let p = Project::python();
-    assert!(ok(&p.generate("route", "products")));
-    assert!(p.path("src/routes/products.py").is_file());
-    // The bug: a spurious empty src/routes/products/ directory.
-    assert!(!p.path("src/routes/products").is_dir(), "spurious src/routes/products/ dir");
-    assert!(p.read("src/routes/products.py").contains("/products"));
-}
-
-#[test]
-fn route_php_no_spurious_dir() {
-    let p = Project::php();
-    assert!(ok(&p.generate("route", "products")));
-    assert!(p.path("src/routes/products.php").is_file());
-    assert!(!p.path("src/routes/products").is_dir(), "spurious src/routes/products/ dir");
-}
-
-#[test]
-fn route_ruby_no_spurious_dir() {
-    let p = Project::ruby();
-    assert!(ok(&p.generate("route", "products")));
-    assert!(p.path("src/routes/products.rb").is_file());
-    assert!(!p.path("src/routes/products").is_dir(), "spurious src/routes/products/ dir");
-}
-
-#[test]
-fn route_nodejs_is_directory_based() {
-    // Node uses file-based routing by design: src/routes/products/get.ts etc.
-    let p = Project::nodejs();
-    assert!(ok(&p.generate("route", "products")));
-    assert!(p.path("src/routes/products/get.ts").is_file());
-    assert!(p.path("src/routes/products/post.ts").is_file());
-    assert!(p.path("src/routes/products/[id]/get.ts").is_file());
-}
-
-#[test]
-fn route_nested_path_creates_parent_dirs() {
-    // `generate route api/users` → src/routes/api/users.py, with src/routes/api/
-    // existing as the parent (NOT src/routes/api/users/ as a dir).
-    let p = Project::python();
-    assert!(ok(&p.generate("route", "api/users")));
-    assert!(p.path("src/routes/api/users.py").is_file());
-    assert!(p.path("src/routes/api").is_dir());
-    assert!(!p.path("src/routes/api/users").is_dir(), "spurious nested dir");
-}
-
-// ── migration (regression: slugified name, valid SQL identifier) ────
-
-#[test]
-fn migration_slugifies_spaces() {
-    let p = Project::python();
-    assert!(ok(&p.generate("migration", "create products")));
-    let fname = p.migration_filename();
-    assert!(!fname.contains(' '), "migration filename has a space: {fname}");
-    assert!(fname.ends_with("_create_products.sql"), "unexpected name: {fname}");
-    // <14-digit-timestamp>_create_products.sql
-    let ts = &fname[..14];
-    assert!(ts.chars().all(|c| c.is_ascii_digit()), "no timestamp prefix: {fname}");
-    let sql = p.read(&format!("migrations/{fname}"));
-    assert!(sql.contains("CREATE TABLE products"), "bad table name in SQL:\n{sql}");
-}
-
-#[test]
-fn migration_handles_mixed_text() {
-    let p = Project::python();
-    assert!(ok(&p.generate("migration", "Add Users Table")));
-    let fname = p.migration_filename();
-    assert!(fname.ends_with("_add_users_table.sql"), "unexpected name: {fname}");
-}
-
-// ── middleware ──────────────────────────────────────────────────────
-
-#[test]
-fn middleware_python_snake_case_file() {
-    let p = Project::python();
-    assert!(ok(&p.generate("middleware", "RateLimit")));
-    assert!(p.path("src/middleware/rate_limit.py").is_file());
-    assert!(p.read("src/middleware/rate_limit.py").contains("class RateLimit"));
-}
-
-#[test]
-fn middleware_all_languages() {
-    let php = Project::php();
-    assert!(ok(&php.generate("middleware", "RateLimit")));
-    assert!(php.path("src/middleware/RateLimit.php").is_file());
-
-    let rb = Project::ruby();
-    assert!(ok(&rb.generate("middleware", "RateLimit")));
-    assert!(rb.path("src/middleware/rate_limit.rb").is_file());
-
-    let node = Project::nodejs();
-    assert!(ok(&node.generate("middleware", "RateLimit")));
-    assert!(node.path("src/middleware/rate_limit.ts").is_file());
-}
-
-// ── safety ──────────────────────────────────────────────────────────
-
-#[test]
-fn generate_refuses_to_overwrite() {
-    let p = Project::python();
-    assert!(ok(&p.generate("model", "Product")));
-    // Second time must fail rather than clobber an existing file.
-    assert!(!ok(&p.generate("model", "Product")), "should refuse to overwrite");
-}
+// ── pass-through dispatch (no framework needed) ─────────────────────
 
 #[test]
 fn generate_outside_project_fails() {
-    // No marker file → not a Tina4 project → must error, not scaffold blindly.
-    let empty = Project::new(&[]);
-    assert!(!ok(&empty.generate("model", "Product")));
+    // `generate` now forwards to the framework CLI via the pass-through path.
+    // With no project to detect, that path must error cleanly, not scaffold.
+    let dir = unique_dir("no-project");
+    let out = run(&dir, &["generate", "model", "Product"]);
+    assert!(!out.status.success(), "generate outside a project must fail");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("No Tina4 project"),
+        "expected a 'No Tina4 project' error, got: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn unknown_command_is_forwarded_verbatim() {
+    // A command the client doesn't own (with a --flag) must reach the
+    // external-subcommand pass-through — not a clap "unexpected argument"
+    // error. In a non-project dir the delegate then reports no project.
+    let dir = unique_dir("frob");
+    let out = run(&dir, &["frobnicate", "--wat", "42"]);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("No Tina4 project"),
+        "unknown command should hit pass-through -> delegate (no project), got: {stderr}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ── generate delegates to the framework (real generator output) ─────
+
+#[test]
+#[ignore = "needs a locally-installed tina4python; run with: cargo test -- --ignored"]
+fn generate_crud_delegates_to_framework() {
+    // `crud` was NEVER a Rust generator — the deleted stub only handled
+    // model/route/migration/middleware and printed "Unknown generator: crud".
+    // So a WORKING `generate crud` that emits framework-shaped files proves the
+    // client now delegates to the framework CLI.
+    if !tina4python_available() {
+        eprintln!("SKIP generate_crud_delegates_to_framework: tina4python not on PATH");
+        return;
+    }
+    let dir = unique_dir("crud");
+    // app.py alone => detected as python; no pyproject/uv.lock => resolve_cli
+    // uses the globally-installed tina4python (no venv, no network).
+    fs::write(dir.join("app.py"), "from tina4_python import Tina4\n").unwrap();
+
+    let out = run(&dir, &["generate", "crud", "Widget"]);
+    assert!(
+        out.status.success(),
+        "generate crud failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let model = dir.join("src/orm/Widget.py");
+    assert!(model.is_file(), "framework model src/orm/Widget.py not generated");
+    let body = fs::read_to_string(&model).unwrap();
+    // Framework-only markers, absent from the old Rust stub (which imported
+    // `from tina4_python import ORM, ...` and had no table_name):
+    assert!(body.contains("table_name = \"widget\""), "not framework output:\n{body}");
+    assert!(body.contains("from tina4_python.orm import"), "not framework import:\n{body}");
+    // The framework's crud also emits routes + a real test the stub never did.
+    assert!(dir.join("src/routes/widgets.py").is_file(), "framework routes missing");
+    assert!(dir.join("tests/test_widgets.py").is_file(), "framework test missing");
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 // ── init (gated: needs the language toolchain + network) ────────────
@@ -238,10 +117,7 @@ fn generate_outside_project_fails() {
 #[test]
 #[ignore = "needs uv + network; run with: cargo test -- --ignored"]
 fn init_python_scaffolds_runnable_project() {
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let base = std::env::temp_dir().join(format!("tina4-init-{}-{}", std::process::id(), n));
-    let _ = fs::remove_dir_all(&base);
-    fs::create_dir_all(&base).unwrap();
+    let base = unique_dir("init");
     let out = Command::new(BIN)
         .args(["init", "python", "app"])
         .current_dir(&base)
@@ -252,6 +128,6 @@ fn init_python_scaffolds_runnable_project() {
     let proj = base.join("app");
     assert!(proj.join("app.py").is_file());
     assert!(proj.join("pyproject.toml").is_file());
-    assert!(Path::new(&proj).join(".env").is_file());
+    assert!(proj.join(".env").is_file());
     let _ = fs::remove_dir_all(&base);
 }

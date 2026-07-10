@@ -5,9 +5,9 @@ mod env_config;
 mod env_migrate;
 mod detect;
 mod doctor;
-mod generate;
 mod init;
 mod install;
+mod manifest;
 mod rag;
 mod scss;
 mod session;
@@ -129,42 +129,6 @@ enum Commands {
         watch: bool,
     },
 
-    /// Run database migrations (delegates to language CLI)
-    Migrate {
-        /// Create a new migration file with this description
-        #[arg(long)]
-        create: Option<String>,
-        /// Roll back the most recent migration batch
-        #[arg(long, conflicts_with = "create")]
-        rollback: bool,
-        /// Show pending vs applied migrations without running anything
-        #[arg(long, conflicts_with_all = ["create", "rollback"])]
-        status: bool,
-    },
-
-    /// Run tests (delegates to language CLI)
-    Test,
-
-    /// List registered routes (delegates to language CLI)
-    Routes,
-
-    /// Report code-health metrics — top offenders (delegates to language CLI)
-    Metrics {
-        /// Passthrough flags: --top N, --json, --fail-on warn|error, --path DIR
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-
-    /// Generate scaffolding: model, route, migration, middleware
-    Generate {
-        /// What to generate: model, route, migration, middleware
-        #[arg()]
-        what: String,
-        /// Name or path
-        #[arg()]
-        name: String,
-    },
-
     /// Detect AI coding tools and install framework context/skills
     Ai {
         /// Install context for ALL known AI tools (not just detected ones)
@@ -188,9 +152,6 @@ enum Commands {
     /// Download framework-specific documentation into .tina4-docs/
     Docs,
 
-    /// Start an interactive REPL with the framework loaded
-    Console,
-
     /// Start the AI agent server for Code With Me
     Agent {
         /// Port number (default: framework port + 2000)
@@ -203,19 +164,6 @@ enum Commands {
         /// Disable minification (default: minify in production builds)
         #[arg(long)]
         no_minify: bool,
-    },
-
-    /// Run database seeders to populate development/demo data
-    Seed {
-        /// Optional seeder name (default: run every seed file in seeds/)
-        #[arg()]
-        name: Option<String>,
-    },
-
-    /// Queue management — `tina4 queue work` runs a long-lived consumer
-    Queue {
-        #[command(subcommand)]
-        action: QueueAction,
     },
 
     /// Generate deployment scaffolding (Dockerfile, systemd unit,
@@ -249,26 +197,34 @@ enum Commands {
         #[arg(long)]
         yes: bool,
     },
-}
 
-#[derive(Subcommand, Debug)]
-enum QueueAction {
-    /// Long-lived worker — pop jobs and run them until interrupted
-    Work {
-        /// Topic / queue name (default: framework default — usually "default")
-        #[arg(long)]
-        topic: Option<String>,
-    },
-    /// Show queue depth and recent stats
-    Stats,
-    /// Re-queue every dead-letter job for retry
-    Retry,
-    /// Delete completed jobs older than the configured retention
-    Clear,
+    /// Any command the client doesn't own is forwarded verbatim to the detected
+    /// framework CLI: `tina4 <cmd> <args...>` -> `<framework-cli> <cmd> <args...>`.
+    /// This covers migrate/migrate:create/seed/test/routes/metrics/queue/
+    /// generate/console and anything a framework adds later. The framework owns
+    /// arg parsing and rejects unknowns; dispatch pays zero manifest cost.
+    #[command(external_subcommand)]
+    External(Vec<String>),
 }
 
 fn main() {
     console::enable_ansi();
+
+    // Top-level help is the ONLY place the manifest is consumed: render clap's
+    // help for the native conductor commands, then append the framework's
+    // DISCOVERED commands. `--refresh` re-queries past the fingerprint cache.
+    // Everything else goes straight to clap + dispatch (zero manifest cost).
+    let raw_args: Vec<String> = std::env::args().skip(1).collect();
+    let first = raw_args.first().map(String::as_str);
+    let wants_help = raw_args.is_empty()
+        || matches!(first, Some("-h" | "--help" | "help"))
+        || raw_args.iter().all(|a| a == "--refresh");
+    if wants_help {
+        let refresh = raw_args.iter().any(|a| a == "--refresh");
+        print_help(refresh);
+        return;
+    }
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -423,40 +379,12 @@ fn main() {
             }
         }
 
-        Commands::Migrate { create, rollback, status } => {
-            // Three mutually-exclusive modes (clap enforces): create a
-            // new migration file, roll back the most recent batch, or
-            // print status. Default (none of the above) runs all
-            // pending migrations.
-            //
-            // All four framework CLIs (Python, PHP, Ruby, Node) use the
-            // COLON FORM natively: migrate:create, migrate:rollback,
-            // migrate:status. Sending --create as a flag silently does
-            // nothing — the language CLI then treats "--create" as the
-            // migrations directory path and reports "no migrations found."
-            let args = if let Some(desc) = create {
-                vec!["migrate:create".into(), desc]
-            } else if rollback {
-                vec!["migrate:rollback".into()]
-            } else if status {
-                vec!["migrate:status".into()]
-            } else {
-                vec!["migrate".into()]
-            };
-            delegate_command(args);
-        }
-
-        Commands::Test => delegate_command(vec!["test".into()]),
-
-        Commands::Routes => delegate_command(vec!["routes".into()]),
-
-        Commands::Metrics { args } => {
-            let mut a = vec!["metrics".to_string()];
-            a.extend(args);
-            delegate_command(a);
-        }
-
-        Commands::Generate { what, name } => generate::run(&what, &name),
+        // Any non-native command (migrate, migrate:create, seed, test, routes,
+        // metrics, queue, generate, console, ...) is forwarded verbatim to the
+        // framework CLI. The framework owns arg parsing and rejects unknowns, so
+        // the client carries no per-command flag knowledge and can never drift
+        // out of parity with the framework's command surface.
+        Commands::External(args) => delegate_command(args),
 
         Commands::Agent { port } => {
             let default_port = 9145u16; // default agent port
@@ -479,7 +407,6 @@ fn main() {
 
         Commands::Update => handle_update(),
 
-        Commands::Console => delegate_command(vec!["console".into()]),
         Commands::Books => handle_books(),
         Commands::Docs => handle_docs(),
         Commands::Build { no_minify } => {
@@ -496,29 +423,6 @@ fn main() {
             delegate_command(vec!["build".into()]);
         }
 
-        Commands::Seed { name } => {
-            let mut args = vec!["seed".into()];
-            if let Some(n) = name { args.push(n); }
-            delegate_command(args);
-        }
-
-        Commands::Queue { action } => {
-            let mut args = vec!["queue".into()];
-            match action {
-                QueueAction::Work { topic } => {
-                    args.push("work".into());
-                    if let Some(t) = topic {
-                        args.push("--topic".into());
-                        args.push(t);
-                    }
-                }
-                QueueAction::Stats => args.push("stats".into()),
-                QueueAction::Retry => args.push("retry".into()),
-                QueueAction::Clear => args.push("clear".into()),
-            }
-            delegate_command(args);
-        }
-
         Commands::Deploy { target, force } => deploy::run(&target, force),
 
         Commands::Env { sync, example, list, migrate, yes } => {
@@ -527,6 +431,57 @@ fn main() {
             } else {
                 env_config::run(sync, example, list);
             }
+        }
+    }
+}
+
+// ── Help (native + discovered) ───────────────────────────────────
+
+/// Render `tina4 --help`: clap's help for the native conductor commands, then
+/// the commands DISCOVERED from the detected framework's `commands --json`
+/// manifest. The manifest is consumed HERE ONLY — dispatch never touches it, so
+/// a discovery miss just yields a shorter listing, never a broken command.
+/// `refresh` re-queries past the fingerprint cache.
+fn print_help(refresh: bool) {
+    use clap::CommandFactory;
+    let mut command = Cli::command();
+    print!("{}", command.render_long_help());
+
+    let info = match detect::detect_language() {
+        Some(info) => info,
+        None => return,
+    };
+    let discovered = match manifest::load(&info, refresh) {
+        Some(manifest) => manifest,
+        None => return,
+    };
+
+    // Skip commands clap already prints (the native conductor set) plus the
+    // framework's own `help` — list only what's genuinely extra.
+    let native: std::collections::HashSet<String> = command
+        .get_subcommands()
+        .map(|s| s.get_name().to_string())
+        .collect();
+    let extra: Vec<&manifest::Command> = discovered
+        .commands
+        .iter()
+        .filter(|c| c.name != "help" && !native.contains(&c.name))
+        .collect();
+    if extra.is_empty() {
+        return;
+    }
+
+    println!(
+        "\nDiscovered from {} {} (via {}):",
+        discovered.framework.cyan(),
+        discovered.version.dimmed(),
+        info.cli_name()
+    );
+    let width = extra.iter().map(|c| c.name.len()).max().unwrap_or(0);
+    for command in extra {
+        println!("  {:<width$}  {}", command.name, command.summary);
+        if !command.subcommands.is_empty() {
+            println!("  {:<width$}    {}", "", command.subcommands.join(", ").dimmed());
         }
     }
 }
@@ -1156,7 +1111,7 @@ fn start_language_server(
 
 /// Resolve the language CLI command and arguments for the detected project.
 /// PHP needs special handling: `php vendor/bin/tina4php` instead of bare `tina4php`.
-fn resolve_cli(info: &detect::ProjectInfo) -> (String, Vec<String>) {
+pub(crate) fn resolve_cli(info: &detect::ProjectInfo) -> (String, Vec<String>) {
     match info.language.as_str() {
         "php" => {
             let vendor_path = console::php_vendor_bin("tina4php");

@@ -6,6 +6,11 @@ target/
 # project the client runs `--help` in. Never committed.
 .tina4/
 
+# Signing material (certs/keys used by sign-mac.sh / sign-release.*). The EV
+# private key lives only in the SimplySign cloud HSM; these are local artifacts
+# (leaf/intermediate PEMs, DERs) that never belong in git.
+secrets/
+
 # Built release binaries (produced by CI, never committed)
 tina4-linux-amd64
 tina4-linux-arm64

@@ -1269,7 +1269,7 @@ fn looks_like_prose_path(rel_path: &str) -> Option<String> {
         if seg.is_empty() || seg == "." || seg == ".." { continue; }
         if seg.len() > 80 {
             return Some(format!("path segment too long ({} chars): {:?}", seg.len(),
-                &seg.chars().take(60).collect::<String>()));
+                seg.chars().take(60).collect::<String>()));
         }
         for c in seg.chars() {
             if !(c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-') {
@@ -2677,7 +2677,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                     &format!("kind={} thread={} reply_preview={:?}",
                         action_kind,
                         chat_req.thread_id.as_deref().unwrap_or("-"),
-                        &supervisor_reply.chars().take(140).collect::<String>()));
+                        supervisor_reply.chars().take(140).collect::<String>()));
 
                 match action {
                     Some(SupervisorAction { action: ref a, .. }) if a == "plan" => {

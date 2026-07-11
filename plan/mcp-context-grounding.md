@@ -194,5 +194,28 @@ Remaining: the **execute_plan** coder steps (2 other call sites at ~3077/~3500)
 still use the old `## FILE:` + citation path — they need the same treatment for
 plan-driven builds. And nodejs/php/ruby coders (tina4_chat is Python-only).
 
-## Status: independent Python coder verified end-to-end (macOS). Remaining:
-##   execute_plan coder-step parity, scaffold 3-framework parity, vision/image slots.
+## Addendum 4 — RUNNABLE code, end-to-end (the goal)
+
+Generate-first landed: the coder detects scaffoldable artifacts (resource/CRUD,
+model, migration) and runs the framework generators — the textbook path — before
+the LLM. `tina4_chat` authors only genuinely custom logic; plain routes are not
+over-scaffolded. Steering: `TINA4_ESSENCE` now carries the "generators, not
+hand-roll" rule for the reasoning agents.
+
+Proven RUNNABLE (macOS, real `tina4python init` app, no Anthropic key, no mocks):
+- [x] Agent builds "products resource (Product has name+price)" → 4 files:
+      `src/orm/Product.py` + up/down migrations + secure CRUD `src/routes/products.py`.
+- [x] `tina4python migrate` applies the migration (table created).
+- [x] App boots (`Server started http://localhost:7146`, 8 routes, no errors).
+- [x] `GET /api/products` → 200 `{"records":[],"count":0,"page":1,...}`.
+- [x] Secure-by-default confirmed by the running framework: reads public,
+      POST/PUT/DELETE `auth=required` — no `@noauth()` foot-guns.
+- [x] Simple route ("GET /hello greeting") → tina4_chat minimal handler (not
+      over-scaffolded); imports clean.
+- [x] 95 Rust tests pass, clippy clean.
+
+Committed on `feature/independent-coding-agent`.
+
+## Status: RUNNABLE code proven (macOS, direct `code` path). Remaining:
+##   execute_plan (plan-driven) coder-step parity, scaffold 3-framework parity,
+##   tests-first in the loop, vision/image slots.

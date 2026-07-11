@@ -140,7 +140,13 @@ pub fn format_hits_for_prompt(hits: &[RagHit], max_chars_per_hit: usize) -> Stri
     if hits.is_empty() {
         return String::new();
     }
-    let mut out = String::from("Relevant Tina4 framework patterns (from tina4-rag):\n\n");
+    // Source is named per-hit (metadata.source): mcp.tina4.com for the
+    // official framework MCP, or tina4-rag for the local corpus fallback.
+    let source = hits
+        .first()
+        .map(|h| if h.metadata.source.is_empty() { "tina4-rag" } else { h.metadata.source.as_str() })
+        .unwrap_or("tina4-rag");
+    let mut out = format!("Relevant Tina4 framework patterns (from {source}):\n\n");
     for (i, hit) in hits.iter().enumerate() {
         let trimmed = if hit.text.len() > max_chars_per_hit {
             format!("{}…", &hit.text[..max_chars_per_hit])

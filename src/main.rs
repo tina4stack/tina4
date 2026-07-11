@@ -8,6 +8,7 @@ mod doctor;
 mod init;
 mod install;
 mod manifest;
+mod mcp_context;
 mod rag;
 mod scss;
 mod session;

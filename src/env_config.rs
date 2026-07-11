@@ -195,6 +195,8 @@ fn known_vars() -> Vec<(&'static str, &'static str, &'static str, &'static str)>
         ("TINA4_AI_MODEL", "qwen2.5-coder:14b", "AI model used for plan generation", "AI"),
         ("TINA4_RAG_URL", "http://localhost:11438", "RAG service URL", "AI"),
         ("TINA4_RAG_TOPK", "4", "RAG top-K retrieval count", "AI"),
+        ("TINA4_MCP_URL", "https://mcp.tina4.com", "Official Tina4 framework MCP base URL (tina4_context grounding)", "AI"),
+        ("TINA4_MCP_TOKEN", "", "Bearer token for mcp.tina4.com framework grounding (register free at https://profile.tina4.com)", "AI"),
         ("TINA4_VISION_URL", "http://localhost:11437/api/chat", "Dev-admin vision service URL", "AI"),
         ("TINA4_EMBED_URL", "http://localhost:11437/api/embeddings", "Dev-admin embedding service URL", "AI"),
         ("TINA4_IMAGE_URL", "http://localhost:11437/api/generate", "Dev-admin image service URL", "AI"),

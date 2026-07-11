@@ -45,7 +45,7 @@ pub struct Agent {
 
 // ── Model settings (from dev admin) ──
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelSettings {
     pub provider: String,
     pub model: String,
@@ -60,6 +60,12 @@ pub struct ChatSettings {
     pub vision: ModelSettings,
     #[serde(rename = "imageGen")]
     pub image_gen: ModelSettings,
+    // The coder is a distinct slot from `thinking`: reasoning agents want a
+    // strong Q&A model (long_context / Claude), but the coder must EMIT precise
+    // multi-file code, so it uses the fine-tuned `tina4_chat` coder. Defaulted
+    // (backfilled in load_chat_settings) so older settings.json still parse.
+    #[serde(default)]
+    pub coder: ModelSettings,
 }
 
 // ── Chat messages ──
@@ -285,6 +291,31 @@ struct AnthropicUsage {
     output_tokens: u32,
 }
 
+// ── Tina4 build discipline (the essence of the Claude Tina4 skills) ──
+//
+// The framework REFERENCE (classes, signatures, idioms) comes from
+// `tina4_context` at build time — we deliberately do NOT repeat it here. What
+// this adds is the transferable METHOD the skills teach: how a good Tina4 build
+// is reasoned about. Appended to the supervisor/planner/coder/debug prompts.
+const TINA4_ESSENCE: &str = "\
+TINA4 BUILD DISCIPLINE — how to build (the API itself comes from tina4_context; never from memory):\n\
+- Reuse ladder — climb in order, write new code only at the last rung:\n\
+  1) Does it need to exist? The best change is often none.\n\
+  2) Does Tina4 already do it? 54 built-ins, zero deps — CRUD (AutoCrud), ORM, Auth/JWT, Validator, Queue, templates (Frond), sessions, i18n, WebSockets, GraphQL, realtime.\n\
+  3) Does the language stdlib do it?\n\
+  4) Is it already in THIS app? Reuse the existing model/route/service; don't duplicate.\n\
+  5) Adding a dependency? Stop — Tina4 is zero-dependency; find the built-in.\n\
+  6) Can it be one field-object / one decorator / one line? Prefer the smallest declarative form.\n\
+  7) Only now, write the minimum that works — no wrappers, no speculative options.\n\
+- Generators are the textbook path — do NOT hand-roll. For scaffoldable artifacts use the framework's own generators, which emit complete, secure-by-default, swagger-annotated code: a resource/CRUD → `generate model <Model>` + `generate route <plural> --model <Model>`; a model → `generate model <Model>`; a migration → `generate migration <name>`. Only author by hand the genuinely custom logic the generators can't produce.\n\
+- Ground first: call tina4_context for the version-exact API before writing; never invent symbols. Do NOT use tina4_code (it emits non-runnable output).\n\
+- Convention over configuration: file location IS configuration (routes auto-discovered, models auto-registered). Don't add config files.\n\
+- The framework is smart: return a dict/object → JSON, a string → HTML, a number → status code; a JSON body arrives already parsed. Don't hand-serialize.\n\
+- Less code wins, but names stay verbose and descriptive — full words, never cryptic abbreviations.\n\
+- One idiomatic Tina4 way per task; use it consistently across the app, don't reinvent per file.\n\
+- Secure by default: parameterized queries only, escape output, verify JWTs, writes require auth unless explicitly public.\n\
+- Tests first and REAL — no mocks; cover the happy path AND a negative case. A change isn't done until it runs green for real.";
+
 // ── Default agent configs ──
 
 const DEFAULT_AGENTS: &[(&str, &str, &str)] = &[
@@ -443,7 +474,7 @@ Example:
 - Start with an objective sentence before the numbered list
 "#),
 
-    ("coder", r#"{"model":"thinking","temperature":0.1,"max_tokens":4096,"tools":["file_read","file_write"],"max_iterations":10}"#,
+    ("coder", r#"{"model":"coder","temperature":0.1,"max_tokens":4096,"tools":["file_read","file_write"],"max_iterations":10}"#,
      r#"You are the Coder agent for Tina4 projects. Write code that follows the plan exactly.
 
 ## CRITICAL: Verify your imports — they break the project
@@ -732,7 +763,18 @@ pub fn load_agents(project_dir: &Path) -> Vec<Agent> {
                 Err(_) => continue,
             };
 
-            let system_prompt = fs::read_to_string(&prompt_path).unwrap_or_default();
+            let mut system_prompt = fs::read_to_string(&prompt_path).unwrap_or_default();
+
+            // Fold in the Tina4 build DISCIPLINE (not the API — that comes from
+            // tina4_context) for the agents that reason about building: the
+            // reuse ladder, ground-first, convention-over-config, secure-by-
+            // default, tests-first. This is the essence of the Claude Tina4
+            // skills distilled to the transferable method, so the supervisor's
+            // agents build the Tina4 way without repeating framework reference.
+            if matches!(name.as_str(), "supervisor" | "planner" | "coder" | "debug") {
+                system_prompt.push_str("\n\n");
+                system_prompt.push_str(TINA4_ESSENCE);
+            }
 
             agents.push(Agent { name, config, system_prompt });
         }
@@ -751,12 +793,42 @@ pub fn load_agents(project_dir: &Path) -> Vec<Agent> {
 /// A settings.json on disk always wins, so saving via the dev admin UI
 /// overrides the env-var default cleanly.
 pub fn load_chat_settings(project_dir: &Path) -> ChatSettings {
+    // The coder is ALWAYS the fine-tuned Tina4 coder (`tina4_chat`), whether or
+    // not an Anthropic key is present: reasoning agents want a general model,
+    // but the coder must emit precise multi-file Tina4 code, which the general
+    // `long_context` model can't (it summarizes code to prose). Grounding
+    // (`tina4_context`) is still injected upstream by `ground_coder_msg`.
+    let coder = ModelSettings {
+        provider: "tina4-mcp".into(),
+        model: "tina4_chat".into(),
+        url: crate::mcp_context::base_url(),
+        api_key: crate::mcp_context::token(project_dir).unwrap_or_default(),
+    };
+
     let path = project_dir.join(".tina4").join("chat").join("settings.json");
     if let Ok(s) = fs::read_to_string(&path) {
-        if let Ok(settings) = serde_json::from_str(&s) {
+        if let Ok(mut settings) = serde_json::from_str::<ChatSettings>(&s) {
+            // Backfill the coder slot for settings.json written before it existed.
+            if settings.coder.provider.is_empty() {
+                settings.coder = coder;
+            }
             return settings;
         }
     }
+
+    // The model topology has two providers now: Anthropic (when a key is set)
+    // and the mcp.tina4.com tools. The old Tina4 Cloud chat endpoints
+    // (qwen @ 41.71.84.173) are retired, so there is NO local chat fallback.
+
+    // `image_gen` isn't a chat model on either provider — image generation is
+    // the `tina4_image` MCP tool, invoked from the image path, not `llm_call`.
+    // Left as an empty placeholder so the struct is complete.
+    let image_gen = ModelSettings {
+        provider: "tina4-mcp".into(),
+        model: "tina4_image".into(),
+        url: crate::mcp_context::base_url(),
+        api_key: crate::mcp_context::token(project_dir).unwrap_or_default(),
+    };
 
     // Env-var path — lets users iterate with `ANTHROPIC_API_KEY=sk-ant-...
     // tina4 agent` without first having to click through the settings UI.
@@ -770,39 +842,34 @@ pub fn load_chat_settings(project_dir: &Path) -> ChatSettings {
             };
             return ChatSettings {
                 thinking: claude("claude-sonnet-4-5"),
-                vision: claude("claude-sonnet-4-5"),
-                // Claude has no image generation model — fall back to the
-                // Tina4 Cloud endpoint so /generate_image still works.
-                image_gen: ModelSettings {
-                    provider: "tina4".into(),
-                    model: String::new(),
-                    url: "http://41.71.84.173:11436".into(),
-                    api_key: String::new(),
-                },
+                vision: claude("claude-sonnet-4-5"), // Claude is multimodal
+                coder, // fine-tuned tina4_chat even when Claude is available
+                image_gen,
             };
         }
     }
 
-    // Defaults — Tina4 Cloud (per-model-type endpoints, models fetched at runtime)
+    // No Anthropic key → the `thinking` slot IS the long-context reasoning
+    // model, served by the mcp.tina4.com `long_context` tool (provider
+    // "tina4-mcp"). Every agent that uses "thinking" — supervisor, planner,
+    // coder (grounded), debug, intake — rides this one model. Requires a
+    // TINA4_MCP_TOKEN (set it in the dev-admin grounding panel or `.env`);
+    // without it, `long_context_call` returns None and the turn errors clearly.
+    let reasoning = ModelSettings {
+        provider: "tina4-mcp".into(),
+        model: "long_context".into(),
+        url: crate::mcp_context::base_url(),
+        api_key: crate::mcp_context::token(project_dir).unwrap_or_default(),
+    };
     ChatSettings {
-        thinking: ModelSettings {
-            provider: "tina4".into(),
-            model: String::new(),
-            url: "http://41.71.84.173:11437".into(),
-            api_key: String::new(),
-        },
-        vision: ModelSettings {
-            provider: "tina4".into(),
-            model: String::new(),
-            url: "http://41.71.84.173:11434".into(),
-            api_key: String::new(),
-        },
-        image_gen: ModelSettings {
-            provider: "tina4".into(),
-            model: String::new(),
-            url: "http://41.71.84.173:11436".into(),
-            api_key: String::new(),
-        },
+        thinking: reasoning.clone(),
+        // tina4: no dedicated vision model exists on mcp.tina4.com yet; the
+        // retired Tina4 Cloud vision endpoint is gone. Point vision at the
+        // long_context model as a text-only degraded placeholder (it can't see
+        // images) until a vision tool ships. Not used by the code-building POC.
+        vision: reasoning,
+        coder,
+        image_gen,
     }
 }
 
@@ -824,6 +891,7 @@ pub fn resolve_agent_model(model_field: &str, settings: &ChatSettings) -> ModelS
     match model_field {
         "thinking" => settings.thinking.clone(),
         "vision" => settings.vision.clone(),
+        "coder" => settings.coder.clone(),
         "image-gen" | "image_gen" => settings.image_gen.clone(),
         // Direct model name — infer provider from prefix
         m if m.starts_with("claude-") => ModelSettings {
@@ -1531,6 +1599,56 @@ pub async fn llm_call(
     max_tokens: u32,
     temperature: f32,
 ) -> Result<String, String> {
+    // mcp.tina4.com tools stand in for a chat endpoint here. Two models ride
+    // this provider, dispatched by `settings.model`:
+    //   - `tina4_chat`   → the fine-tuned Tina4 CODER. Pass the full chat as
+    //                      OpenAI-format messages; it emits proper multi-file
+    //                      `## FILE:` code (the general model can't).
+    //   - `long_context` → the general reasoning model behind the `thinking`
+    //                      slot. It's Q&A (question + context), so map the chat
+    //                      shape onto those two args.
+    // No secondary chat endpoint exists, so a failure surfaces as a clear error.
+    if settings.provider == "tina4-mcp" {
+        if settings.model == "tina4_chat" {
+            let mut arr: Vec<serde_json::Value> = Vec::new();
+            if !system_prompt.is_empty() {
+                arr.push(serde_json::json!({"role": "system", "content": system_prompt}));
+            }
+            for m in messages {
+                arr.push(serde_json::json!({"role": m.role, "content": m.content}));
+            }
+            eprintln!("  [llm] tina4-mcp tina4_chat messages={}", arr.len());
+            return match crate::mcp_context::tina4_chat_call(&settings.url, &settings.api_key, serde_json::json!(arr)).await {
+                Some(answer) => Ok(answer),
+                None => Err("tina4_chat unavailable (mcp.tina4.com) — set TINA4_MCP_TOKEN in the dev-admin grounding panel / .env".into()),
+            };
+        }
+
+        // long_context (reasoning / thinking slot)
+        let question = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+        let mut context = String::new();
+        if !system_prompt.is_empty() {
+            context.push_str(system_prompt);
+            context.push_str("\n\n");
+        }
+        for m in messages {
+            context.push_str(&format!("[{}]\n{}\n\n", m.role, m.content));
+        }
+        eprintln!(
+            "  [llm] tina4-mcp long_context question={}B context={}B",
+            question.len(), context.len(),
+        );
+        return match crate::mcp_context::long_context_call(&settings.url, &settings.api_key, &question, &context).await {
+            Some(answer) => Ok(answer),
+            None => Err("long_context unavailable (mcp.tina4.com) — set TINA4_MCP_TOKEN in the dev-admin grounding panel / .env, or set ANTHROPIC_API_KEY".into()),
+        };
+    }
+
     let client = reqwest::Client::new();
 
     // If model is empty, auto-detect from the server
@@ -2385,6 +2503,48 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                     body.len(), body
                 );
                 let _ = stream.write_all(resp.as_bytes()).await;
+            } else if first_line.starts_with("GET /mcp/status") {
+                // Framework-grounding MCP status for the dev-admin token panel.
+                // Never returns the token — only whether it's configured and,
+                // for confirmation, its last 4 chars.
+                let configured = crate::mcp_context::is_configured(&project_dir);
+                let last4 = crate::mcp_context::token(&project_dir)
+                    .map(|t| t.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect::<String>())
+                    .unwrap_or_default();
+                let payload = serde_json::json!({
+                    "configured": configured,
+                    "last4": last4,
+                    "url": std::env::var("TINA4_MCP_URL").unwrap_or_else(|_| "https://mcp.tina4.com".into()),
+                });
+                let body = serde_json::to_string(&payload).unwrap_or_default();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
+            } else if first_line.starts_with("POST /mcp/token") {
+                // Persist a pasted mcp.tina4.com Bearer token to the project
+                // .env (TINA4_MCP_TOKEN). The agent resolves the token at call
+                // time (process env → .env), so it takes effect on the next
+                // coder turn without a restart.
+                let body_start = request.find("\r\n\r\n").unwrap_or(n) + 4;
+                let body_str = &request[body_start..];
+                #[derive(Deserialize)]
+                struct TokenReq { token: String }
+                let (status, body) = match serde_json::from_str::<TokenReq>(body_str) {
+                    Ok(req) if !req.token.trim().is_empty() => {
+                        match crate::mcp_context::save_token(&project_dir, &req.token) {
+                            Ok(last4) => ("200 OK", format!("{{\"ok\":true,\"last4\":\"{}\"}}", last4)),
+                            Err(e) => ("500 Internal Server Error", format!("{{\"ok\":false,\"error\":\"{}\"}}", e.to_string().replace('"', "'"))),
+                        }
+                    }
+                    _ => ("400 Bad Request", "{\"ok\":false,\"error\":\"missing token\"}".to_string()),
+                };
+                let resp = format!(
+                    "HTTP/1.1 {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                    status, body.len(), body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
             } else if first_line.starts_with("GET /thoughts") {
                 let thoughts = load_thoughts(&project_dir);
                 let body = serde_json::to_string(&thoughts).unwrap_or_default();
@@ -2486,9 +2646,10 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                     }
                 }
 
-                // Resolve model settings for the agent
+                // Model selection for the supervisor turn is handled by
+                // reasoning_llm_call below (routes to mcp.tina4.com long_context
+                // when configured, falls back to settings.thinking).
                 let supervisor = agents.iter().find(|a| a.name == "supervisor");
-                let model_settings = &settings.thinking;
 
                 // Save user message
                 let user_msg = ChatMessage {
@@ -2655,7 +2816,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                 }
                 msgs.push(LlmMessage { role: "user".into(), content: user_turn });
 
-                let supervisor_reply = match llm_call(model_settings, supervisor_prompt, &msgs, 2048, 0.3).await {
+                let supervisor_reply = match llm_call(&settings.thinking, supervisor_prompt, &msgs, 2048, 0.3).await {
                     Ok(r) => r,
                     Err(e) => {
                         let escaped = e.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
@@ -2752,12 +2913,67 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
 
                     Some(SupervisorAction { action: ref a, .. }) if a == "code" => {
                         let ctx = action.as_ref().and_then(|a| a.context.clone()).unwrap_or_default();
-                        let files = action.as_ref().and_then(|a| a.files.clone()).unwrap_or_default();
-                        sse_event(&mut stream, "status", &sse_json(&serde_json::json!({"text": "→ Grounding against tina4-rag…", "agent": "coder"}))).await;
+                        let mut files = action.as_ref().and_then(|a| a.files.clone()).unwrap_or_default();
+                        let coder_model_pre = resolve_model("coder", &agents, &settings);
+                        let coder_is_tina4chat_pre = coder_model_pre.provider == "tina4-mcp" && coder_model_pre.model == "tina4_chat";
+
+                        // GENERATE-FIRST (textbook Tina4): scaffoldable artifacts — a
+                        // resource/CRUD, a model, a migration — are built by the
+                        // framework's own generators, which emit complete, secure-by-
+                        // default, swagger-annotated code (the reuse ladder's "does
+                        // Tina4 already do it?"). The LLM coder only authors the custom
+                        // logic the generators can't. This is what makes the DEFAULT
+                        // output textbook rather than a hand-rolled route.
+                        let scaffolded = if coder_is_tina4chat_pre {
+                            scaffold_first(&project_dir, &ctx, &files)
+                        } else {
+                            Vec::new()
+                        };
+                        if !scaffolded.is_empty() {
+                            for f in &scaffolded {
+                                sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
+                                    "text": format!("Scaffolded (textbook): {f}"), "agent": "coder"}))).await;
+                            }
+                            let msg = format!("Created {} files via the Tina4 generators:\n{}",
+                                scaffolded.len(),
+                                scaffolded.iter().map(|f| format!("- {}", f)).collect::<Vec<_>>().join("\n"));
+                            let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+                            sse_event(&mut stream, "message", &format!(
+                                "{{\"content\":\"{}\",\"agent\":\"coder\",\"files_changed\":{}}}", escaped,
+                                serde_json::to_string(&scaffolded).unwrap_or_default())).await;
+                            save_message(&project_dir, &ChatMessage {
+                                id: format!("{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()),
+                                role: "assistant".into(), content: msg, timestamp: chrono_now(),
+                                thread_id: chat_req.thread_id.clone(), agent: Some("coder".into()),
+                            });
+                        } else {
+                        sse_event(&mut stream, "status", &sse_json(&serde_json::json!({"text": "→ Grounding against Tina4 framework corpus…", "agent": "coder"}))).await;
 
                         let coder = agents.iter().find(|a| a.name == "coder");
                         let coder_prompt = coder.map(|c| c.system_prompt.as_str()).unwrap_or("");
                         let coder_model = resolve_model("coder", &agents, &settings);
+
+                        // The fine-tuned `tina4_chat` coder emits a bare code block
+                        // (no `## FILE:` header) and won't add grounding citations.
+                        // For it we: (1) establish a deterministic path via `tina4
+                        // generate` (framework owns structure), (2) skip the
+                        // citation-verify retry, (3) synthesize the `## FILE:`
+                        // header from the known path so the shared writer runs.
+                        // `tina4_chat` REGENERATES a full file (it doesn't edit an
+                        // existing one), so we don't pre-scaffold the target — a
+                        // skeleton on disk would just trip the write's anti-shrink
+                        // guard. Instead we establish the deterministic PATH (using
+                        // the same route→path convention `generate` uses) and let
+                        // tina4_chat author the fresh file there. `generate` is kept
+                        // as a fallback if tina4_chat produces nothing (below).
+                        let coder_is_tina4chat = coder_model.provider == "tina4-mcp" && coder_model.model == "tina4_chat";
+                        let mut forced_path: Option<String> = None;
+                        if coder_is_tina4chat {
+                            if let Some(path) = derive_coder_path(&ctx, &files) {
+                                if !files.iter().any(|f| f == &path) { files = vec![path.clone()]; }
+                                forced_path = Some(path);
+                            }
+                        }
 
                         let base_msg = format!(
                             "Write the following code:\n\n{}\n\nFiles to create/modify: {:?}\n\nReturn each file as:\n## FILE: path/to/file\n```\ncontent\n```",
@@ -2768,12 +2984,29 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                         // coder cites or explicitly diverges from the
                         // examples. One retry if the first attempt skips
                         // the citation.
-                        let (coder_msg, hits) = ground_coder_msg(&base_msg, &ctx, &files).await;
+                        let (coder_msg, hits) = ground_coder_msg(&project_dir, &base_msg, &ctx, &files).await;
                         sse_event(&mut stream, "status", &sse_json(&serde_json::json!({"text": "→ Coder: writing code…", "agent": "coder"}))).await;
                         let coder_msgs = vec![LlmMessage { role: "user".into(), content: coder_msg }];
 
-                        match llm_call_with_grounding_retry(&coder_model, coder_prompt, coder_msgs, 4096, 0.1, &hits).await {
+                        // tina4_chat: single call, no citation-verify (it won't
+                        // comply). Other models keep the grounding-citation retry.
+                        let coder_result = if coder_is_tina4chat {
+                            llm_call(&coder_model, coder_prompt, &coder_msgs, 4096, 0.1).await
+                        } else {
+                            llm_call_with_grounding_retry(&coder_model, coder_prompt, coder_msgs, 4096, 0.1, &hits).await
+                        };
+                        match coder_result {
                             Ok(code_output) => {
+                                // Synthesize the `## FILE:` header for tina4_chat's
+                                // bare code block so the shared writer can place it.
+                                let code_output = if coder_is_tina4chat && !code_output.contains("## FILE:") {
+                                    match forced_path {
+                                        Some(ref p) => format!("## FILE: {p}\n{code_output}"),
+                                        None => code_output,
+                                    }
+                                } else {
+                                    code_output
+                                };
                                 // Parse file outputs and write them
                                 let mut files_written = Vec::new();
                                 for section in code_output.split("## FILE:") {
@@ -2820,6 +3053,19 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                                     }
                                 }
 
+                                // Fallback: if tina4_chat produced nothing writable,
+                                // scaffold the skeleton via `generate` so at least a
+                                // correct, framework-native file lands at the path.
+                                if files_written.is_empty() && coder_is_tina4chat {
+                                    if let Some(ref path) = forced_path {
+                                        if let Some((kind, name)) = kind_name_from_path(path) {
+                                            sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
+                                                "text": format!("→ tina4_chat produced no file; scaffolding {kind}: {path}"), "agent": "coder"}))).await;
+                                            files_written.extend(run_framework_generate(&project_dir, &kind, &name, &[]));
+                                        }
+                                    }
+                                }
+
                                 let msg = if files_written.is_empty() {
                                     code_output.clone()
                                 } else {
@@ -2845,6 +3091,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                                 let escaped = e.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
                                 sse_event(&mut stream, "error", &format!("{{\"message\":\"Coder failed: {}\"}}", escaped)).await;
                             }
+                        }
                         }
                     }
 
@@ -2968,7 +3215,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                                     Return each file as:\n## FILE: path/to/file\n```\ncontent\n```",
                                     step_num, step, plan_content, project_dir.display()
                                 );
-                                let (coder_msg, hits) = ground_coder_msg(&base_msg, step, &[]).await;
+                                let (coder_msg, hits) = ground_coder_msg(&project_dir, &base_msg, step, &[]).await;
                                 let coder_msgs = vec![LlmMessage { role: "user".into(), content: coder_msg }];
 
                                 match llm_call_with_grounding_retry(&coder_model, coder_prompt, coder_msgs, 4096, 0.1, &hits).await {
@@ -3392,7 +3639,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                         Return each file as:\n## FILE: path/to/file\n```\ncontent\n```",
                         framework_ctx, project_ctx, num, total, step_text, plan_content
                     );
-                    let (coder_msg, hits) = ground_coder_msg(&base_msg, &step_text, &[]).await;
+                    let (coder_msg, hits) = ground_coder_msg(&project_dir, &base_msg, &step_text, &[]).await;
                     let coder_msgs = vec![LlmMessage { role: "user".into(), content: coder_msg }];
 
                     match llm_call_with_grounding_retry(&coder_model, coder_prompt, coder_msgs, 4096, 0.1, &hits).await {
@@ -4079,14 +4326,160 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
 /// Returns (enriched_message, hits). Caller passes hits into
 /// `verify_coder_grounding` so verification only runs when we actually
 /// had RAG context to cite.
-async fn ground_coder_msg(base_msg: &str, task: &str, files: &[String])
+/// Derive a deterministic target file path for the `tina4_chat` coder. That
+/// model emits a bare code block (no `## FILE:` header), so the path can't come
+/// from its output — it must be established up front. Priority:
+///   1. An explicit path the supervisor put in the action's `files`.
+///   2. Derived from the route named in `context` (e.g. "GET /hello route" →
+///      `src/routes/hello.py`).
+fn derive_coder_path(ctx: &str, files: &[String]) -> Option<String> {
+    if let Some(p) = files.iter().find(|f| f.contains('/') && f.contains('.')) {
+        return Some(p.clone());
+    }
+    let lower = ctx.to_lowercase();
+    // A "/segment" route path → its last segment is the resource name.
+    let from_slash = lower.split(|c: char| c.is_whitespace() || c == ',' || c == '.')
+        .find_map(|w| w.strip_prefix('/'))
+        .map(|s| s.trim_end_matches(|c: char| !(c.is_alphanumeric() || c == '_')).to_string())
+        .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_'));
+    let name = from_slash.or_else(|| {
+        // "route <name>" / "<name> route"
+        let toks: Vec<&str> = lower.split_whitespace().collect();
+        toks.iter().position(|&t| t == "route").and_then(|i| {
+            toks.get(i + 1).or_else(|| i.checked_sub(1).and_then(|j| toks.get(j)))
+                .map(|w| w.trim_matches(|c: char| !(c.is_alphanumeric() || c == '_')).to_string())
+                .filter(|s| !s.is_empty())
+        })
+    })?;
+    Some(format!("src/routes/{name}.py"))
+}
+
+/// Map a target path to a `(generator-kind, name)` pair for `tina4 generate`.
+fn kind_name_from_path(path: &str) -> Option<(String, String)> {
+    let stem = std::path::Path::new(path).file_stem()?.to_str()?.to_string();
+    let lower = path.to_lowercase();
+    if lower.contains("/routes/") { return Some(("route".into(), stem)); }
+    if lower.contains("/orm/") || lower.contains("/models/") { return Some(("model".into(), stem)); }
+    None
+}
+
+/// Run the framework's own `generate` — the textbook path for scaffoldable
+/// artifacts (complete, secure-by-default, swagger-annotated). Returns the
+/// project-relative paths of the files it created (parsed from the generator's
+/// `✓ Created <path>` output). Empty on failure — best-effort.
+fn run_framework_generate(project_dir: &Path, kind: &str, name: &str, extra: &[&str]) -> Vec<String> {
+    let lang = crate::detect::detect_language().map(|p| p.language).unwrap_or_default();
+    let (cmd, mut argv): (&str, Vec<String>) = match lang.as_str() {
+        "nodejs" => ("npx", vec!["tina4nodejs".into(), "generate".into(), kind.into(), name.into()]),
+        "php" => ("php", vec!["tina4php".into(), "generate".into(), kind.into(), name.into()]),
+        "ruby" => ("tina4ruby", vec!["generate".into(), kind.into(), name.into()]),
+        _ => ("tina4python", vec!["generate".into(), kind.into(), name.into()]),
+    };
+    for e in extra { argv.push((*e).to_string()); }
+    match std::process::Command::new(cmd).args(&argv).current_dir(project_dir).output() {
+        Ok(o) => {
+            let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+            if !o.status.success() {
+                eprintln!("[coder] generate {kind} {name}: {}", text.trim());
+            }
+            // Parse "Created <path>" lines; keep whitespace-free relative paths.
+            text.lines()
+                .filter_map(|l| l.find("Created ").map(|i| l[i + "Created ".len()..].trim().to_string()))
+                .filter(|p| !p.is_empty() && !p.contains(char::is_whitespace))
+                .collect()
+        }
+        Err(e) => { eprintln!("[coder] generate spawn failed: {e}"); Vec::new() }
+    }
+}
+
+/// True for a PascalCase identifier with at least one lowercase letter (so an
+/// all-caps acronym like "CRUD"/"JSON"/"GET" is NOT treated as a model name).
+fn is_pascal_ident(w: &str) -> bool {
+    w.len() > 1
+        && w.chars().next().map(|c| c.is_ascii_uppercase()).unwrap_or(false)
+        && w.chars().skip(1).any(|c| c.is_ascii_lowercase())
+        && w.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// Detect a model name in the request: an explicit "model <Name>", else the
+/// first PascalCase identifier after the first word (skipping a sentence-start
+/// capital). Returns None when nothing model-like is present.
+fn detect_model_name(ctx: &str) -> Option<String> {
+    let words: Vec<&str> = ctx
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|w| !w.is_empty())
+        .collect();
+    for (i, w) in words.iter().enumerate() {
+        if w.eq_ignore_ascii_case("model") {
+            if let Some(n) = words.get(i + 1) {
+                if is_pascal_ident(n) { return Some((*n).to_string()); }
+            }
+        }
+    }
+    words.iter().skip(1).find(|w| is_pascal_ident(w)).map(|w| (*w).to_string())
+}
+
+fn pluralize(s: &str) -> String {
+    if s.ends_with('s') { s.to_string() } else { format!("{s}s") }
+}
+
+/// Generate-first: for a scaffoldable request (a resource/CRUD, a model, or a
+/// migration) run the framework's generators — the textbook Tina4 path — and
+/// return the files created. Empty when nothing scaffoldable is detected (a
+/// plain custom route/logic), so the caller falls through to the LLM coder.
+/// Deliberately does NOT scaffold a plain route: `generate route x` emits a full
+/// CRUD skeleton, which would over-build a simple custom handler.
+fn scaffold_first(project_dir: &Path, ctx: &str, files: &[String]) -> Vec<String> {
+    let lower = ctx.to_lowercase();
+    let wants_crud = lower.contains("crud") || lower.contains("resource");
+    let model = detect_model_name(ctx);
+
+    // Only scaffold a genuine resource/model — not a plain route.
+    if !wants_crud && model.is_none() {
+        return Vec::new();
+    }
+
+    let route_name = derive_coder_path(ctx, files)
+        .and_then(|p| kind_name_from_path(&p).map(|(_, n)| n))
+        .or_else(|| model.as_ref().map(|m| pluralize(&m.to_lowercase())));
+
+    let mut created = Vec::new();
+    if let Some(ref m) = model {
+        created.extend(run_framework_generate(project_dir, "model", m, &[]));
+    }
+    if wants_crud {
+        if let Some(ref r) = route_name {
+            let extra: Vec<&str> = match model {
+                Some(ref m) => vec!["--model", m.as_str()],
+                None => Vec::new(),
+            };
+            created.extend(run_framework_generate(project_dir, "route", r, &extra));
+        }
+    }
+    created
+}
+
+async fn ground_coder_msg(project_dir: &std::path::Path, base_msg: &str, task: &str, files: &[String])
     -> (String, Vec<crate::rag::RagHit>)
 {
     let query = build_rag_query(task, files);
     if query.is_empty() {
         return (base_msg.to_string(), Vec::new());
     }
-    let hits = crate::rag::search(&query, 4).await;
+    // Two grounding sources, in preference order:
+    //   1. The OFFICIAL framework MCP (mcp.tina4.com tina4_context) —
+    //      version-current, language-correct — when a token is configured.
+    //   2. The LOCAL tina4-rag corpus — always tried as the fallback so an
+    //      unconfigured or offline framework MCP never blocks a write.
+    // Both return the same RagHit shape, so the citation/verify machinery
+    // downstream is identical regardless of which source answered.
+    let language = tina4_context_language(files);
+    let hits = crate::mcp_context::tina4_context(project_dir, &query, &language).await;
+    let hits = if hits.is_empty() {
+        crate::rag::search(&query, 4).await
+    } else {
+        hits
+    };
     let context = crate::rag::format_hits_for_prompt(&hits, 500);
     if context.is_empty() {
         return (base_msg.to_string(), hits);
@@ -4251,6 +4644,28 @@ fn detect_language_from_path(path: &str) -> String {
     if lower.ends_with(".twig") || lower.ends_with(".jinja") { return "twig".into(); }
     if lower.ends_with(".html") || lower.ends_with(".htm") { return "html".into(); }
     "general".into()
+}
+
+/// Map the coder's target files to the `language` token mcp.tina4.com's
+/// `tina4_context` expects (`python`/`php`/`nodejs`/`ruby`). JS and TS both
+/// mean the Node framework. When the files don't reveal a framework language
+/// (e.g. a plan step with no file list, or only `.sql`/`.twig`), fall back to
+/// the detected project framework (agent CWD is the project dir), then to `""`
+/// which the MCP treats as "infer".
+fn tina4_context_language(files: &[String]) -> String {
+    for f in files {
+        match detect_language_from_path(f).as_str() {
+            "python" => return "python".into(),
+            "php" => return "php".into(),
+            "ruby" => return "ruby".into(),
+            "typescript" | "javascript" => return "nodejs".into(),
+            _ => {}
+        }
+    }
+    if let Some(info) = crate::detect::detect_language() {
+        return info.language; // python | php | ruby | nodejs
+    }
+    String::new()
 }
 
 /// Pull a query-string parameter out of an HTTP request line like
@@ -4525,11 +4940,14 @@ print('hi')
                 url: "u".into(), api_key: "k".into(),
             },
             vision: ModelSettings { provider: "v".into(), ..ModelSettings::default_test() },
+            coder: ModelSettings { provider: "c".into(), ..ModelSettings::default_test() },
             image_gen: ModelSettings { provider: "i".into(), ..ModelSettings::default_test() },
         };
         let m = resolve_agent_model("thinking", &settings);
         assert_eq!(m.provider, "x");
         assert_eq!(m.api_key, "k");
+        // The coder slot resolves independently of thinking.
+        assert_eq!(resolve_agent_model("coder", &settings).provider, "c");
     }
 
     #[test]
@@ -4570,6 +4988,7 @@ print('hi')
         ChatSettings {
             thinking: ModelSettings::default_test(),
             vision: ModelSettings::default_test(),
+            coder: ModelSettings::default_test(),
             image_gen: ModelSettings::default_test(),
         }
     }

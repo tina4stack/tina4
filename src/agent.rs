@@ -3184,6 +3184,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                             let coder = agents.iter().find(|a| a.name == "coder");
                             let coder_prompt = coder.map(|c| c.system_prompt.as_str()).unwrap_or("");
                             let coder_model = resolve_model("coder", &agents, &settings);
+                            let coder_is_tina4chat = coder_model.provider == "tina4-mcp" && coder_model.model == "tina4_chat";
 
                             let mut all_files_written: Vec<String> = Vec::new();
                             let mut step_summaries: Vec<String> = Vec::new();
@@ -3202,77 +3203,100 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                                     step_num, total_steps, step.replace('\\', "\\\\").replace('"', "\\\"")
                                 )).await;
 
-                                // Send step to coder — RAG-grounded so the
-                                // model writes off actual Tina4 examples.
-                                // Files list inferred from the step text
-                                // is sparse here, but the step + language
-                                // tag in the query is still enough to
-                                // retrieve useful convention chunks.
-                                let base_msg = format!(
-                                    "Implement this single step from the project plan:\n\n**Step {}:** {}\n\n\
-                                    Full plan context:\n{}\n\n\
-                                    Project directory: {}\n\n\
-                                    Return each file as:\n## FILE: path/to/file\n```\ncontent\n```",
-                                    step_num, step, plan_content, project_dir.display()
-                                );
-                                let (coder_msg, hits) = ground_coder_msg(&project_dir, &base_msg, step, &[]).await;
-                                let coder_msgs = vec![LlmMessage { role: "user".into(), content: coder_msg }];
-
-                                match llm_call_with_grounding_retry(&coder_model, coder_prompt, coder_msgs, 4096, 0.1, &hits).await {
-                                    Ok(code_output) => {
-                                        // Parse and write files
-                                        let mut step_files = Vec::new();
-                                        for section in code_output.split("## FILE:") {
-                                            let section = section.trim();
-                                            if section.is_empty() { continue; }
-                                            let mut lines = section.lines();
-                                            if let Some(file_path) = lines.next() {
-                                                let file_path = file_path.trim();
-                                                let remaining: String = lines.collect::<Vec<&str>>().join("\n");
-                                                let content = if let Some(start) = remaining.find("```") {
-                                                    let after = &remaining[start + 3..];
-                                                    let after = if let Some(nl) = after.find('\n') { &after[nl+1..] } else { after };
-                                                    if let Some(end) = after.find("```") { &after[..end] } else { after }
-                                                } else {
-                                                    remaining.as_str()
-                                                };
-
-                                                // Defensive write — backup + truncation guard + log.
-                                                match agent_write_file(&project_dir, file_path, content.trim()) {
-                                                    Ok(_) => {
-                                                        step_files.push(file_path.to_string());
-                                                        all_files_written.push(file_path.to_string());
-                                                    }
-                                                    Err(reason) => {
-                                                        sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
-                                                            "text": format!("Skipped {} on step {}: {}", file_path, step_num, reason),
-                                                            "agent": "coder",
-                                                        }))).await;
+                                // GENERATE-FIRST (textbook): a scaffoldable step
+                                // (resource/CRUD, model, migration) goes through the
+                                // framework generators; the LLM coder authors only
+                                // the custom logic — identical to the direct `code`
+                                // path so plan-driven builds are textbook too.
+                                let mut step_files: Vec<String> = Vec::new();
+                                let scaffolded = if coder_is_tina4chat {
+                                    scaffold_first(&project_dir, step, &[])
+                                } else {
+                                    Vec::new()
+                                };
+                                if !scaffolded.is_empty() {
+                                    for f in &scaffolded {
+                                        sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
+                                            "text": format!("Scaffolded (textbook): {f}"), "agent": "coder"}))).await;
+                                        step_files.push(f.clone());
+                                        all_files_written.push(f.clone());
+                                    }
+                                    step_summaries.push(format!("{}. {} ✓", step_num, step));
+                                    sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
+                                        "text": format!("Step {} complete — {} files scaffolded.", step_num, step_files.len()), "agent": "coder"}))).await;
+                                } else {
+                                    // No scaffoldable artifact — the LLM coder authors
+                                    // the step to a deterministic path.
+                                    let forced_path = if coder_is_tina4chat { derive_coder_path(step, &[]) } else { None };
+                                    let base_msg = format!(
+                                        "Implement this single step from the project plan:\n\n**Step {}:** {}\n\n\
+                                        Full plan context:\n{}\n\n\
+                                        Project directory: {}\n\n\
+                                        Return each file as:\n## FILE: path/to/file\n```\ncontent\n```",
+                                        step_num, step, plan_content, project_dir.display()
+                                    );
+                                    let (coder_msg, hits) = ground_coder_msg(&project_dir, &base_msg, step, &[]).await;
+                                    let coder_msgs = vec![LlmMessage { role: "user".into(), content: coder_msg }];
+                                    let coder_result = if coder_is_tina4chat {
+                                        llm_call(&coder_model, coder_prompt, &coder_msgs, 4096, 0.1).await
+                                    } else {
+                                        llm_call_with_grounding_retry(&coder_model, coder_prompt, coder_msgs, 4096, 0.1, &hits).await
+                                    };
+                                    match coder_result {
+                                        Ok(code_output) => {
+                                            let code_output = if coder_is_tina4chat && !code_output.contains("## FILE:") {
+                                                match forced_path {
+                                                    Some(ref p) => format!("## FILE: {p}\n{code_output}"),
+                                                    None => code_output,
+                                                }
+                                            } else {
+                                                code_output
+                                            };
+                                            for section in code_output.split("## FILE:") {
+                                                let section = section.trim();
+                                                if section.is_empty() { continue; }
+                                                let mut lines = section.lines();
+                                                if let Some(file_path) = lines.next() {
+                                                    let file_path = file_path.trim();
+                                                    let remaining: String = lines.collect::<Vec<&str>>().join("\n");
+                                                    let content = if let Some(start) = remaining.find("```") {
+                                                        let after = &remaining[start + 3..];
+                                                        let after = if let Some(nl) = after.find('\n') { &after[nl+1..] } else { after };
+                                                        if let Some(end) = after.find("```") { &after[..end] } else { after }
+                                                    } else {
+                                                        remaining.as_str()
+                                                    };
+                                                    match agent_write_file(&project_dir, file_path, content.trim()) {
+                                                        Ok(_) => {
+                                                            step_files.push(file_path.to_string());
+                                                            all_files_written.push(file_path.to_string());
+                                                        }
+                                                        Err(reason) => {
+                                                            sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
+                                                                "text": format!("Skipped {} on step {}: {}", file_path, step_num, reason),
+                                                                "agent": "coder",
+                                                            }))).await;
+                                                        }
                                                     }
                                                 }
                                             }
+                                            let done_msg = if step_files.is_empty() {
+                                                format!("Step {} complete.", step_num)
+                                            } else {
+                                                format!("Step {} complete — {} files updated.", step_num, step_files.len())
+                                            };
+                                            step_summaries.push(format!("{}. {} ✓", step_num, step));
+                                            sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
+                                                "text": done_msg, "agent": "coder"}))).await;
                                         }
-
-                                        // Report step completion
-                                        let done_msg = if step_files.is_empty() {
-                                            format!("Step {} complete.", step_num)
-                                        } else {
-                                            format!("Step {} complete — {} files updated.", step_num, step_files.len())
-                                        };
-                                        step_summaries.push(format!("{}. {} ✓", step_num, step));
-
-                                        sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
-                                            "text": done_msg,
-                                            "agent": "coder"
-                                        }))).await;
-                                    }
-                                    Err(e) => {
-                                        step_summaries.push(format!("{}. {} ✗ (failed)", step_num, step));
-                                        let err_escaped = e.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
-                                        sse_event(&mut stream, "message", &format!(
-                                            "{{\"content\":\"Step {} had an issue: {}. Moving on...\",\"agent\":\"supervisor\"}}",
-                                            step_num, err_escaped
-                                        )).await;
+                                        Err(e) => {
+                                            step_summaries.push(format!("{}. {} ✗ (failed)", step_num, step));
+                                            let err_escaped = e.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+                                            sse_event(&mut stream, "message", &format!(
+                                                "{{\"content\":\"Step {} had an issue: {}. Moving on...\",\"agent\":\"supervisor\"}}",
+                                                step_num, err_escaped
+                                            )).await;
+                                        }
                                     }
                                 }
                             }
@@ -3632,6 +3656,25 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                     // cheat-sheet: the cheat-sheet covers the universal
                     // idioms, RAG pulls chunks specific to *this* step's
                     // intent. Together they beat either on its own.
+                    let coder_is_tina4chat = coder_model.provider == "tina4-mcp" && coder_model.model == "tina4_chat";
+                    // GENERATE-FIRST (textbook): a scaffoldable step (resource/CRUD,
+                    // model, migration) goes through the framework generators; the
+                    // LLM coder authors only custom logic — same as the other paths.
+                    let scaffolded = if coder_is_tina4chat {
+                        scaffold_first(&project_dir, &step_text, &[])
+                    } else {
+                        Vec::new()
+                    };
+                    if !scaffolded.is_empty() {
+                        for f in &scaffolded { state.files.push(f.clone()); }
+                        state.completed.push(num);
+                        let _ = fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap_or_default());
+                        summaries.push(format!("{}. {} ✓", num, step_text));
+                        sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({
+                            "text": format!("Step {} done — {} files scaffolded", num, scaffolded.len()), "agent": "coder"}))).await;
+                        continue;
+                    }
+                    let forced_path = if coder_is_tina4chat { derive_coder_path(&step_text, &[]) } else { None };
                     let base_msg = format!(
                         "{}## Project Context\n{}\n\n\
                         ## Task\nImplement step {} of {}:\n**{}**\n\n\
@@ -3641,9 +3684,21 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                     );
                     let (coder_msg, hits) = ground_coder_msg(&project_dir, &base_msg, &step_text, &[]).await;
                     let coder_msgs = vec![LlmMessage { role: "user".into(), content: coder_msg }];
-
-                    match llm_call_with_grounding_retry(&coder_model, coder_prompt, coder_msgs, 4096, 0.1, &hits).await {
+                    let coder_result = if coder_is_tina4chat {
+                        llm_call(&coder_model, coder_prompt, &coder_msgs, 4096, 0.1).await
+                    } else {
+                        llm_call_with_grounding_retry(&coder_model, coder_prompt, coder_msgs, 4096, 0.1, &hits).await
+                    };
+                    match coder_result {
                         Ok(code_output) => {
+                            let code_output = if coder_is_tina4chat && !code_output.contains("## FILE:") {
+                                match forced_path {
+                                    Some(ref p) => format!("## FILE: {p}\n{code_output}"),
+                                    None => code_output,
+                                }
+                            } else {
+                                code_output
+                            };
                             let mut step_files = Vec::new();
                             for section in code_output.split("## FILE:") {
                                 let section = section.trim();

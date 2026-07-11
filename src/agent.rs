@@ -4478,22 +4478,66 @@ fn pluralize(s: &str) -> String {
     if s.ends_with('s') { s.to_string() } else { format!("{s}s") }
 }
 
-/// Generate-first: for a scaffoldable request (a resource/CRUD, a model, or a
-/// migration) run the framework's generators — the textbook Tina4 path — and
-/// return the files created. Empty when nothing scaffoldable is detected (a
-/// plain custom route/logic), so the caller falls through to the LLM coder.
-/// Deliberately does NOT scaffold a plain route: `generate route x` emits a full
-/// CRUD skeleton, which would over-build a simple custom handler.
+/// Words that are never the resource noun in a "generate X" step.
+const SCAFFOLD_STOPWORDS: &[&str] = &[
+    "the", "for", "with", "and", "full", "new", "that", "this", "use", "using", "via",
+    "model", "models", "route", "routes", "resource", "resources", "crud", "endpoint",
+    "endpoints", "generate", "create", "creating", "reading", "updating", "deleting",
+    "operation", "operations", "field", "fields", "api", "framework", "project", "step",
+    "file", "files", "code", "test", "tests", "ensure", "define", "having", "have", "has",
+    "its", "each", "all", "them", "correctly", "successfully",
+];
+
+/// Turn a noun into a singular PascalCase model name: "products" → "Product".
+fn singular_pascal(word: &str) -> String {
+    let lower = word.to_lowercase();
+    let singular = lower.strip_suffix('s').filter(|s| s.len() > 2).unwrap_or(&lower);
+    let mut chars = singular.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Best-effort resource name (as a PascalCase model) from a request/step. Prefers
+/// an explicit PascalCase identifier (`Product`), else the last content noun —
+/// so "Generate a model for products" and "Post model" both resolve.
+fn detect_resource_name(ctx: &str) -> Option<String> {
+    if let Some(m) = detect_model_name(ctx) {
+        return Some(m);
+    }
+    let noun = ctx
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .rfind(|w| w.len() > 2
+            && w.chars().all(|c| c.is_ascii_alphabetic())
+            && !SCAFFOLD_STOPWORDS.contains(&w.to_lowercase().as_str()))?;
+    let m = singular_pascal(noun);
+    (m.len() > 1).then_some(m)
+}
+
+/// Generate-first: for a scaffoldable request (a resource/CRUD or a model) run
+/// the framework's generators — the textbook Tina4 path — and return the files
+/// created. Robust to natural phrasing ("Generate a model for products", "Post
+/// resource with full CRUD"). Empty when nothing scaffoldable is detected (a
+/// plain custom route/logic), so the caller falls through to the LLM coder —
+/// a plain route is deliberately NOT scaffolded (that would over-build a simple
+/// handler into a full CRUD skeleton).
 fn scaffold_first(project_dir: &Path, ctx: &str, files: &[String]) -> Vec<String> {
     let lower = ctx.to_lowercase();
-    let wants_crud = lower.contains("crud") || lower.contains("resource");
-    let model = detect_model_name(ctx);
+    let has_model = lower.contains("model");
+    // Multiple distinct CRUD verbs (create/read/update/delete/list) signal a
+    // real CRUD step; a lone "Create" (the imperative) does not.
+    let verb_count = ["creat", "read", "updat", "delet", "list"]
+        .iter()
+        .filter(|v| lower.contains(**v))
+        .count();
+    let wants_crud = lower.contains("crud") || lower.contains("resource") || verb_count >= 2;
 
-    // Only scaffold a genuine resource/model — not a plain route.
-    if !wants_crud && model.is_none() {
+    if !has_model && !wants_crud {
         return Vec::new();
     }
 
+    let model = detect_resource_name(ctx);
     let route_name = derive_coder_path(ctx, files)
         .and_then(|p| kind_name_from_path(&p).map(|(_, n)| n))
         .or_else(|| model.as_ref().map(|m| pluralize(&m.to_lowercase())));

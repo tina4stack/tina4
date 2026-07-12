@@ -12,7 +12,7 @@ session stays free.
 | 3 | New-route discovery without an app restart | [live-route-discovery.md](live-route-discovery.md) | ✅ Complete — build auto-migrates + reloads; endpoint serves live |
 | 4 | Supervisor routing: "go ahead" → execute_plan | _tbd_ | 🟡 Next |
 | 5 | Coders for nodejs/php/ruby (tina4_chat is Python-only) | _tbd_ | ❌ Not started |
-| 6 | Dev-admin scaffold-endpoint parity (python/php/ruby) | _tbd_ (dev-admin repo) | ❌ Not started |
+| 6 | Dev-admin scaffold-endpoint parity (python/php/ruby/node) | [dev-admin-parity.md](dev-admin-parity.md) | ✅ Complete — all 4 verified live (migrate/test/seed-run + grounding + de-stub) |
 | 7 | Dev tools deploy dependencies (persist + dev-aware, all 4 langs) | [dev-tools-deploy-deps.md](dev-tools-deploy-deps.md) | ✅ Complete — verified live (uv add, init scaffolds pyproject) |
 
 ## Rules of the method

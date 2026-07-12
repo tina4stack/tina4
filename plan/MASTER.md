@@ -7,9 +7,9 @@ session stays free.
 | # | Thread | Plan | Status |
 |---|--------|------|--------|
 | 0 | Independent no-Claude agent (topology, coder redesign, generate-first, essence) | [mcp-context-grounding.md](mcp-context-grounding.md) | ✅ Complete (runnable, direct + plan paths) |
-| 1 | **Tests-first in the coder loop** | [tests-first-coder.md](tests-first-coder.md) | 🟡 Next |
-| 2 | Auth enforcement — is `POST` without token really open? | _tbd_ | ❌ Not started (security) |
-| 3 | New-route discovery without an app restart | _tbd_ | ❌ Not started |
+| 1 | Tests-first in the coder loop | [tests-first-coder.md](tests-first-coder.md) | ✅ Complete — builds verified (tests emitted + run + ✅/❌) |
+| 2 | Auth enforcement — is `POST` without token really open? | (resolved in Thread 1) | ✅ Resolved — writes ARE gated (401); earlier 201 was a bare `.env` with no `TINA4_SECRET` |
+| 3 | New-route discovery without an app restart | _tbd_ | 🟡 Next |
 | 4 | Supervisor routing: "go ahead" → execute_plan | _tbd_ | ❌ Not started |
 | 5 | Coders for nodejs/php/ruby (tina4_chat is Python-only) | _tbd_ | ❌ Not started |
 | 6 | Dev-admin scaffold-endpoint parity (python/php/ruby) | _tbd_ (dev-admin repo) | ❌ Not started |

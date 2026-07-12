@@ -2934,9 +2934,19 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                                 sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
                                     "text": format!("Scaffolded (textbook): {f}"), "agent": "coder"}))).await;
                             }
-                            let msg = format!("Created {} files via the Tina4 generators:\n{}",
+                            // Tests-first: the generators co-emit real tests — run
+                            // them so the build is VERIFIED, not just written.
+                            let mut test_line = String::new();
+                            if scaffolded.iter().any(|f| f.contains("test")) {
+                                sse_event(&mut stream, "status", &sse_json(&serde_json::json!({"text": "→ Running the co-emitted tests…", "agent": "coder"}))).await;
+                                let (passed, summary) = run_project_tests(&project_dir);
+                                test_line = format!("\n{} Tests: {}", if passed { "✅" } else { "❌" }, summary);
+                                sse_event(&mut stream, "status", &sse_json(&serde_json::json!({"text": format!("{} {}", if passed {"✅ tests"} else {"❌ tests"}, summary), "agent": "coder"}))).await;
+                            }
+                            let msg = format!("Created {} files via the Tina4 generators:\n{}{}",
                                 scaffolded.len(),
-                                scaffolded.iter().map(|f| format!("- {}", f)).collect::<Vec<_>>().join("\n"));
+                                scaffolded.iter().map(|f| format!("- {}", f)).collect::<Vec<_>>().join("\n"),
+                                test_line);
                             let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
                             sse_event(&mut stream, "message", &format!(
                                 "{{\"content\":\"{}\",\"agent\":\"coder\",\"files_changed\":{}}}", escaped,
@@ -3301,11 +3311,20 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                                 }
                             }
 
+                            // Tests-first: run the co-emitted tests once, at the
+                            // end of the plan, so the whole build is verified.
+                            let mut test_line = String::new();
+                            if all_files_written.iter().any(|f| f.contains("test")) {
+                                sse_event(&mut stream, "status", &sse_json(&serde_json::json!({"text": "→ Running the co-emitted tests…", "agent": "coder"}))).await;
+                                let (passed, tsum) = run_project_tests(&project_dir);
+                                test_line = format!("\\n\\n{} Tests: {}", if passed { "✅" } else { "❌" }, tsum.replace('\\', "\\\\").replace('"', "\\\""));
+                            }
                             // Final summary
                             let summary = format!(
-                                "All done! Here's what I built:\\n\\n{}\\n\\n{} files were created or updated.",
+                                "All done! Here's what I built:\\n\\n{}\\n\\n{} files were created or updated.{}",
                                 step_summaries.iter().map(|s| format!("- {}", s.replace('\\', "\\\\").replace('"', "\\\""))).collect::<Vec<_>>().join("\\n"),
-                                all_files_written.len()
+                                all_files_written.len(),
+                                test_line
                             );
                             sse_event(&mut stream, "message", &format!(
                                 "{{\"content\":\"{}\",\"agent\":\"supervisor\",\"files_changed\":{}}}",
@@ -3764,6 +3783,14 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
 
                 // Final summary
                 let summary_lines = summaries.iter().map(|s| format!("- {}", s.replace('\\', "\\\\").replace('"', "\\\""))).collect::<Vec<_>>().join("\\n");
+                // Tests-first: run the co-emitted tests once at the end (only on a
+                // successful build — a failed/interrupted plan resumes instead).
+                let mut test_line = String::new();
+                if !failed && state.files.iter().any(|f| f.contains("test")) {
+                    sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({"text": "→ Running the co-emitted tests…", "agent": "coder"}))).await;
+                    let (passed, tsum) = run_project_tests(&project_dir);
+                    test_line = format!("\\n\\n{} Tests: {}", if passed { "✅" } else { "❌" }, tsum.replace('\\', "\\\\").replace('"', "\\\""));
+                }
                 if failed {
                     sse_ev(&mut stream, "message", &format!(
                         "{{\"content\":\"Progress so far:\\n\\n{}\\n\\n{} files created. Resume when ready.\",\"agent\":\"supervisor\",\"files_changed\":{}}}",
@@ -3773,8 +3800,8 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                     // All done — clean up state file
                     let _ = fs::remove_file(&state_path);
                     sse_ev(&mut stream, "message", &format!(
-                        "{{\"content\":\"All done!\\n\\n{}\\n\\n{} files created or updated.\",\"agent\":\"supervisor\",\"files_changed\":{}}}",
-                        summary_lines, state.files.len(), serde_json::to_string(&state.files).unwrap_or_default()
+                        "{{\"content\":\"All done!\\n\\n{}\\n\\n{} files created or updated.{}\",\"agent\":\"supervisor\",\"files_changed\":{}}}",
+                        summary_lines, state.files.len(), test_line, serde_json::to_string(&state.files).unwrap_or_default()
                     )).await;
                 }
                 sse_ev(&mut stream, "done", "{}").await;
@@ -4447,6 +4474,35 @@ fn run_framework_generate(project_dir: &Path, kind: &str, name: &str, extra: &[&
     }
 }
 
+/// Run the project's co-emitted tests via the framework's own `test` command,
+/// returning `(passed, one-line summary)`. The generators emit real, no-mock
+/// tests alongside every resource; running them makes a scaffold build VERIFIED,
+/// not merely written. Best-effort: a missing/failed runner yields
+/// `(false, reason)` so the coder can surface it without aborting the build.
+fn run_project_tests(project_dir: &Path) -> (bool, String) {
+    let lang = crate::detect::detect_language().map(|p| p.language).unwrap_or_default();
+    let (cmd, args): (&str, &[&str]) = match lang.as_str() {
+        "nodejs" => ("npm", &["test"]),
+        "php" => ("php", &["tina4php", "test"]),
+        "ruby" => ("tina4ruby", &["test"]),
+        _ => ("tina4python", &["test"]),
+    };
+    match std::process::Command::new(cmd).args(args).current_dir(project_dir).output() {
+        Ok(o) => {
+            let out = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+            // Prefer a pytest-style summary line ("N passed", "N failed").
+            let summary = out
+                .lines()
+                .rev()
+                .find(|l| l.contains("passed") || l.contains("failed") || l.contains("error"))
+                .map(|l| l.trim().trim_matches('=').trim().to_string())
+                .unwrap_or_else(|| "tests run".to_string());
+            (o.status.success(), summary)
+        }
+        Err(e) => (false, format!("test runner unavailable: {e}")),
+    }
+}
+
 /// True for a PascalCase identifier with at least one lowercase letter (so an
 /// all-caps acronym like "CRUD"/"JSON"/"GET" is NOT treated as a model name).
 fn is_pascal_ident(w: &str) -> bool {
@@ -4506,7 +4562,17 @@ fn detect_resource_name(ctx: &str) -> Option<String> {
     if let Some(m) = detect_model_name(ctx) {
         return Some(m);
     }
-    let noun = ctx
+    // Field names follow "with"/"having"/"that has" ("... widgets WITH a name and
+    // a price") — cut that clause so a field ("price") isn't mistaken for the
+    // resource. The resource is the last content noun in the head.
+    let lower = ctx.to_lowercase();
+    let cut = [" with ", " having ", " that has", " whose ", " containing "]
+        .iter()
+        .filter_map(|m| lower.find(m))
+        .min()
+        .unwrap_or(ctx.len());
+    let head = ctx.get(..cut).unwrap_or(ctx);
+    let noun = head
         .split(|c: char| !c.is_ascii_alphanumeric())
         .rfind(|w| w.len() > 2
             && w.chars().all(|c| c.is_ascii_alphabetic())

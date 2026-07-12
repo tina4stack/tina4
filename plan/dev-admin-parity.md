@@ -75,9 +75,11 @@ distinct from `/seed/run` (project seeder chip).
       python/php/node use positional-with-default signatures (`size(status="pending")`)
       so the bug is **Ruby-only** — no port needed.
 
-## Grounding divergence (intentional)
-Python/PHP/Ruby write `TINA4_MCP_TOKEN` to `.env` directly (standalone, no agent
-needed). Node proxies to the Rust agent's `/mcp/{status,token}`, which writes the
-same `.env`. Same wire shape + end state; Node's path needs the agent running.
+## Grounding — uniform across all four (resolved)
+All four frameworks now write/read `TINA4_MCP_TOKEN` in the project `.env`
+directly — standalone, no Rust-agent dependency. Node originally proxied to the
+agent's `/mcp/{status,token}`; it was made self-contained to match py/php/ruby
+(same `{configured,last4,url}` wire shape; agent still resolves the token at run
+time). Node test extended with a real .env round-trip (29 pass).
 
 ## Status: ✅ Complete — full parity, all four verified live.

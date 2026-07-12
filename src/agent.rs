@@ -2943,10 +2943,16 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                                 test_line = format!("\n{} Tests: {}", if passed { "✅" } else { "❌" }, summary);
                                 sse_event(&mut stream, "status", &sse_json(&serde_json::json!({"text": format!("{} {}", if passed {"✅ tests"} else {"❌ tests"}, summary), "agent": "coder"}))).await;
                             }
-                            let msg = format!("Created {} files via the Tina4 generators:\n{}{}",
+                            // Make it live: apply the new migration + tell the
+                            // running app to re-discover routes (no restart).
+                            sse_event(&mut stream, "status", &sse_json(&serde_json::json!({"text": "→ Migrating + reloading…", "agent": "coder"}))).await;
+                            let migrated = run_migrate(&project_dir);
+                            ping_reload(port.saturating_sub(2000)).await;
+                            let live_line = format!("\n{} — endpoint is live (no restart)", if migrated { "✅ migrated + reloaded" } else { "↻ reloaded" });
+                            let msg = format!("Created {} files via the Tina4 generators:\n{}{}{}",
                                 scaffolded.len(),
                                 scaffolded.iter().map(|f| format!("- {}", f)).collect::<Vec<_>>().join("\n"),
-                                test_line);
+                                test_line, live_line);
                             let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
                             sse_event(&mut stream, "message", &format!(
                                 "{{\"content\":\"{}\",\"agent\":\"coder\",\"files_changed\":{}}}", escaped,
@@ -3318,6 +3324,13 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                                 sse_event(&mut stream, "status", &sse_json(&serde_json::json!({"text": "→ Running the co-emitted tests…", "agent": "coder"}))).await;
                                 let (passed, tsum) = run_project_tests(&project_dir);
                                 test_line = format!("\\n\\n{} Tests: {}", if passed { "✅" } else { "❌" }, tsum.replace('\\', "\\\\").replace('"', "\\\""));
+                            }
+                            // Make it live: migrate the new tables + re-discover routes.
+                            if !all_files_written.is_empty() {
+                                sse_event(&mut stream, "status", &sse_json(&serde_json::json!({"text": "→ Migrating + reloading…", "agent": "coder"}))).await;
+                                let migrated = run_migrate(&project_dir);
+                                ping_reload(port.saturating_sub(2000)).await;
+                                test_line.push_str(&format!("\\n{} — live (no restart)", if migrated { "✅ migrated + reloaded" } else { "↻ reloaded" }));
                             }
                             // Final summary
                             let summary = format!(
@@ -3790,6 +3803,13 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                     sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({"text": "→ Running the co-emitted tests…", "agent": "coder"}))).await;
                     let (passed, tsum) = run_project_tests(&project_dir);
                     test_line = format!("\\n\\n{} Tests: {}", if passed { "✅" } else { "❌" }, tsum.replace('\\', "\\\\").replace('"', "\\\""));
+                }
+                // Make it live: migrate the new tables + re-discover routes (no restart).
+                if !failed && !state.files.is_empty() {
+                    sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({"text": "→ Migrating + reloading…", "agent": "coder"}))).await;
+                    let migrated = run_migrate(&project_dir);
+                    ping_reload(port.saturating_sub(2000)).await;
+                    test_line.push_str(&format!("\\n{} — live (no restart)", if migrated { "✅ migrated + reloaded" } else { "↻ reloaded" }));
                 }
                 if failed {
                     sse_ev(&mut stream, "message", &format!(
@@ -4500,6 +4520,38 @@ fn run_project_tests(project_dir: &Path) -> (bool, String) {
             (o.status.success(), summary)
         }
         Err(e) => (false, format!("test runner unavailable: {e}")),
+    }
+}
+
+/// Apply pending migrations via the framework CLI so a freshly-scaffolded table
+/// exists. Best-effort — returns whether anything was actually applied.
+fn run_migrate(project_dir: &Path) -> bool {
+    let lang = crate::detect::detect_language().map(|p| p.language).unwrap_or_default();
+    let (cmd, args): (&str, &[&str]) = match lang.as_str() {
+        "nodejs" => ("npx", &["tina4nodejs", "migrate"]),
+        "php" => ("php", &["tina4php", "migrate"]),
+        "ruby" => ("tina4ruby", &["migrate"]),
+        _ => ("tina4python", &["migrate"]),
+    };
+    match std::process::Command::new(cmd).args(args).current_dir(project_dir).output() {
+        Ok(o) => {
+            let out = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+            o.status.success() && out.contains("migration") && !out.to_lowercase().contains("nothing to migrate")
+        }
+        Err(_) => false,
+    }
+}
+
+/// Ping the running framework app (agent port − 2000) to re-discover routes so a
+/// newly-built endpoint serves WITHOUT an app restart. Best-effort — the app may
+/// not be running (the POST just fails and we move on).
+async fn ping_reload(framework_port: u16) {
+    let url = format!("http://127.0.0.1:{}/__dev/api/reload", framework_port);
+    if let Ok(c) = reqwest::Client::builder().timeout(std::time::Duration::from_secs(3)).build() {
+        let _ = c.post(&url)
+            .json(&serde_json::json!({"file": "", "type": "reload"}))
+            .send()
+            .await;
     }
 }
 

@@ -13,6 +13,7 @@ session stays free.
 | 4 | Supervisor routing: "go ahead" → execute_plan | _tbd_ | 🟡 Next |
 | 5 | Coders for nodejs/php/ruby (tina4_chat is Python-only) | _tbd_ | ❌ Not started |
 | 6 | Dev-admin scaffold-endpoint parity (python/php/ruby) | _tbd_ (dev-admin repo) | ❌ Not started |
+| 7 | Dev tools deploy dependencies (persist + dev-aware, all 4 langs) | [dev-tools-deploy-deps.md](dev-tools-deploy-deps.md) | ✅ Complete — verified live (uv add, init scaffolds pyproject) |
 
 ## Rules of the method
 - One thread at a time; scope it in its plan file first, get a nod, then build.

@@ -79,8 +79,11 @@ echo "  (SimplySign Desktop must be logged in - your 2FA)"
 echo ""
 
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
-cat > "$WORK/pkcs11.cfg" <<CFG
+# SunPKCS11 config lives OUTSIDE $WORK: $WORK holds only the downloaded release
+# assets, so the SHA256SUMS regen below can never pick up a stray pkcs11.cfg line.
+PKCFG="$(mktemp)"
+trap 'rm -rf "$WORK"; rm -f "$PKCFG"' EXIT
+cat > "$PKCFG" <<CFG
 name = SimplySign
 library = $MODULE
 CFG
@@ -105,7 +108,7 @@ echo "Signing $BINARY via jsign ..."
 # --storepass "" : the cloud session has no PIN (the 2FA gate is SimplySign Desktop).
 # --tsmode AUTHENTICODE : Certum's proven timestamp mode (their RFC3161 endpoint
 #   is flaky; AUTHENTICODE is what worked for v3.8.55). jsign signs in place.
-jsign --storetype PKCS11 --keystore "$WORK/pkcs11.cfg" --storepass "" \
+jsign --storetype PKCS11 --keystore "$PKCFG" --storepass "" \
       --alias "$ALIAS" --tsmode AUTHENTICODE --tsaurl "$TSA_URL" "$BINARY"
 
 echo "Verifying signature ..."

@@ -1,6 +1,6 @@
 # Tina4 CLI
 
-Version 3.8.55 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 frameworks.
+Version 3.8.56 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 frameworks.
 
 ## Build & Test
 
@@ -30,7 +30,10 @@ tina4 serve [project]            Start dev server (file watcher + SCSS + browser
                                  guidance. cd into the resolved project happens automatically.
 tina4 serve --production         Auto-install and use production server
 tina4 serve --no-browser         Don't open browser on startup
-tina4 doctor                     Check installed languages and tools
+tina4 doctor                     Check installed languages/tools, ports, AND global
+                                 Tina4 AI-skills currency (~/.claude/skills vs the latest
+                                 published ref). Strictly READ-ONLY: it reports + suggests a
+                                 refresh; it writes nothing and NEVER touches a project CLAUDE.md.
 tina4 install <target>           Install a language runtime or tina4-js
 tina4 generate <what> <name>     Generate model, route, migration, middleware
 tina4 migrate                    Run database migrations
@@ -143,6 +146,14 @@ binary via `which::which("claude")` and — because on Windows `claude` is a
   `.db-shm`, `.sqlite`, `.tmp`, `.swp`, `.pyc` files; does a real mtime
   check to defeat overlayfs / polling-mode spurious events.
 - SCSS compilation via grass crate (zero-dep, no sass/node required)
+- **AI-skills currency check** (`doctor.rs`): `install-skills.sh`/`.ps1` record the
+  ref they installed in a GLOBAL marker `~/.claude/skills/.tina4-skills-ref`;
+  `tina4 doctor` reads that marker, fetches the current pinned ref from the same
+  installer (`https://tina4.com/install-skills.sh`, so "latest" equals what a
+  refresh installs), and reports current / update-available / offline / not-recorded.
+  The path is read-only (curl for the ref, no HTTP-client dep) and — like the
+  installer — only ever touches `~/.claude/skills`; it never writes a project CLAUDE.md.
+  The classifier + ref parser are pure and unit-tested.
 - Port auto-increment if default port is in use
 - Cross-platform: macOS, Linux, Windows (ANSI fallbacks for cmd.exe)
 - Default ports: PHP 7145, Python 7146, Ruby 7147, Node.js 7148

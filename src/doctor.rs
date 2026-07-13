@@ -1,7 +1,14 @@
 use crate::console::{icon_ok, icon_fail, icon_play, icon_info, icon_warn};
 use colored::Colorize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// The user-facing installer for the global Tina4 AI skills. `tina4 doctor` reads
+/// its pinned `ref` to learn the latest skills version, and prints it as the
+/// refresh command. Fetch-source and refresh-command are the SAME URL on purpose,
+/// so what doctor reports as "latest" is exactly what a refresh would install.
+const SKILLS_INSTALL_URL: &str = "https://tina4.com/install-skills.sh";
+const SKILLS_INSTALL_CMD: &str = "curl -fsSL https://tina4.com/install-skills.sh | sh";
 
 struct ToolCheck {
     name: &'static str,
@@ -168,6 +175,9 @@ pub fn run() {
         };
         println!("  {} {:<16} {:<12} {}", icon, cli.name, cli.lang, status_text);
     }
+
+    // --- Tina4 AI skills (global ~/.claude/skills) ---
+    check_skills_currency();
 
     // --- macOS build tools (Xcode Command Line Tools) ---
     // Homebrew, git, and the PHP/Ruby/Node runtimes need these; Python (uv) does
@@ -338,4 +348,209 @@ fn extract_version_number(raw: &str) -> String {
         }
     }
     first_line.trim().to_string()
+}
+
+// ─── Tina4 AI skills currency ────────────────────────────────────────────────
+//
+// `tina4 doctor` reports whether the globally-installed skills in
+// ~/.claude/skills are current with the latest published release. This whole
+// path is STRICTLY READ-ONLY: it reads a global marker + fetches the installer's
+// pinned ref, and prints. It writes nothing, and it NEVER touches a project's
+// CLAUDE.md (the only writer, install-skills, only touches ~/.claude/skills).
+
+#[derive(Debug, PartialEq, Eq)]
+enum SkillsStatus {
+    NotInstalled,
+    Current(String),
+    Stale { installed: String, latest: String },
+    InstalledUnknownLatest(String), // marker known, latest unknown (offline)
+    UnknownInstalled(Option<String>), // no marker; latest maybe known
+}
+
+/// Pure decision: given whether the skills dir exists, the recorded installed
+/// ref, and the latest published ref, classify currency. No IO - unit-tested.
+fn classify_skills(dir_exists: bool, installed: Option<String>, latest: Option<String>) -> SkillsStatus {
+    if !dir_exists {
+        return SkillsStatus::NotInstalled;
+    }
+    match (installed, latest) {
+        (Some(i), Some(l)) if i == l => SkillsStatus::Current(i),
+        (Some(i), Some(l)) => SkillsStatus::Stale { installed: i, latest: l },
+        (Some(i), None) => SkillsStatus::InstalledUnknownLatest(i),
+        (None, l) => SkillsStatus::UnknownInstalled(l),
+    }
+}
+
+/// Pull the pinned version out of the installer script's
+/// `ref="${TINA4_SKILLS_REF:-X.Y.Z}"` default. Pure - unit-tested.
+fn parse_ref_from_installer(script: &str) -> Option<String> {
+    let marker = "TINA4_SKILLS_REF:-";
+    let start = script.find(marker)? + marker.len();
+    let rest = &script[start..];
+    let end = rest.find(|c: char| c == '}' || c == '"' || c == '\'' || c.is_whitespace())?;
+    let v = rest[..end].trim();
+    if v.is_empty() { None } else { Some(v.to_string()) }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+}
+
+/// Read the ref recorded by install-skills (global marker). None if never
+/// installed by a marker-aware installer.
+fn read_installed_skills_ref(skills_dir: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(skills_dir.join(".tina4-skills-ref")).ok()?;
+    let v = content.trim();
+    if v.is_empty() { None } else { Some(v.to_string()) }
+}
+
+/// Fetch the latest published skills ref from the same installer users refresh
+/// with, so "latest" always equals what a refresh would install. Best-effort:
+/// None on any curl/network failure (doctor then reports "offline", never fails).
+fn fetch_latest_skills_ref() -> Option<String> {
+    let out = Command::new(crate::console::resolve_cmd("curl"))
+        .args(["-fsSL", "--max-time", "6", SKILLS_INSTALL_URL])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_ref_from_installer(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Read-only currency report for the global Tina4 AI skills. Never writes; never
+/// touches a project CLAUDE.md.
+fn check_skills_currency() {
+    println!();
+    println!("  {}", "Tina4 AI skills (global)".bold());
+    println!("  {}", "─".repeat(70));
+
+    let skills_dir = match home_dir() {
+        Some(h) => h.join(".claude").join("skills"),
+        None => {
+            println!("  {} could not resolve home directory", icon_warn().yellow());
+            return;
+        }
+    };
+    let dir_exists = skills_dir.is_dir();
+
+    let known = [
+        "tina4-developer-python", "tina4-developer-php", "tina4-developer-ruby",
+        "tina4-developer-nodejs", "tina4-js", "tina4-maintainer",
+    ];
+    let present = if dir_exists {
+        known.iter().filter(|s| skills_dir.join(s).join("SKILL.md").is_file()).count()
+    } else {
+        0
+    };
+
+    match classify_skills(dir_exists, read_installed_skills_ref(&skills_dir), fetch_latest_skills_ref()) {
+        SkillsStatus::NotInstalled => {
+            println!(
+                "  {} skills not installed  {}  {}",
+                icon_fail().red(), "->".dimmed(), format!("run: {}", SKILLS_INSTALL_CMD).yellow()
+            );
+        }
+        SkillsStatus::Current(r) => {
+            println!(
+                "  {} {}",
+                icon_ok().green(), format!("current - ref {} ({} skills installed)", r, present).cyan()
+            );
+        }
+        SkillsStatus::Stale { installed, latest } => {
+            println!(
+                "  {} {}",
+                icon_warn().yellow(),
+                format!("update available - installed {}, latest {}", installed, latest).yellow()
+            );
+            println!("      {} {}", "refresh:".dimmed(), SKILLS_INSTALL_CMD.yellow());
+        }
+        SkillsStatus::InstalledUnknownLatest(i) => {
+            println!(
+                "  {} {}  {}",
+                icon_info().blue(), format!("ref {} ({} skills)", i, present).cyan(),
+                "could not check latest (offline)".dimmed()
+            );
+        }
+        SkillsStatus::UnknownInstalled(latest) => {
+            let tail = match latest {
+                Some(l) => format!("version not recorded (latest is {}) - re-run install-skills to record + refresh", l),
+                None => "version not recorded - re-run install-skills to record it".to_string(),
+            };
+            println!("  {} {} ({} skills present)", icon_info().blue(), tail.yellow(), present);
+        }
+    }
+
+    // Make the safety guarantee explicit and visible: refreshing skills only ever
+    // writes ~/.claude/skills. Neither doctor nor the refresh touches a project's CLAUDE.md.
+    println!(
+        "      {}",
+        "refresh writes ~/.claude/skills only - it never changes a project's CLAUDE.md".dimmed()
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_ref_from_installer_script() {
+        let s = "set -euo pipefail\nref=\"${TINA4_SKILLS_REF:-3.13.73}\"\ndest=x";
+        assert_eq!(parse_ref_from_installer(s), Some("3.13.73".to_string()));
+    }
+
+    #[test]
+    fn parses_ref_from_powershell_form() {
+        let s = "$ref = if ($env:TINA4_SKILLS_REF) { $env:TINA4_SKILLS_REF } else { \"3.13.73\" }";
+        // The bash marker is absent here; parser returns None (doctor fetches the .sh form).
+        assert_eq!(parse_ref_from_installer(s), None);
+    }
+
+    #[test]
+    fn parse_ref_none_when_absent() {
+        assert_eq!(parse_ref_from_installer("nothing to see"), None);
+    }
+
+    #[test]
+    fn classify_not_installed_when_dir_missing() {
+        assert_eq!(
+            classify_skills(false, Some("3.13.73".into()), Some("3.13.73".into())),
+            SkillsStatus::NotInstalled
+        );
+    }
+
+    #[test]
+    fn classify_current_on_match() {
+        assert_eq!(
+            classify_skills(true, Some("3.13.73".into()), Some("3.13.73".into())),
+            SkillsStatus::Current("3.13.73".into())
+        );
+    }
+
+    #[test]
+    fn classify_stale_on_mismatch() {
+        assert_eq!(
+            classify_skills(true, Some("3.13.71".into()), Some("3.13.73".into())),
+            SkillsStatus::Stale { installed: "3.13.71".into(), latest: "3.13.73".into() }
+        );
+    }
+
+    #[test]
+    fn classify_offline_when_latest_unknown() {
+        assert_eq!(
+            classify_skills(true, Some("3.13.73".into()), None),
+            SkillsStatus::InstalledUnknownLatest("3.13.73".into())
+        );
+    }
+
+    #[test]
+    fn classify_unknown_when_no_marker() {
+        assert_eq!(
+            classify_skills(true, None, Some("3.13.73".into())),
+            SkillsStatus::UnknownInstalled(Some("3.13.73".into()))
+        );
+    }
 }

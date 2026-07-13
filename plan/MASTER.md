@@ -14,6 +14,7 @@ session stays free.
 | 5 | Coders for nodejs/php/ruby (tina4_chat is Python-only) | _tbd_ | ❌ Not started |
 | 6 | Dev-admin scaffold-endpoint parity (python/php/ruby/node) | [dev-admin-parity.md](dev-admin-parity.md) | ✅ Complete — all 4 verified live (migrate/test/seed-run + grounding + de-stub) |
 | 7 | Dev tools deploy dependencies (persist + dev-aware, all 4 langs) | [dev-tools-deploy-deps.md](dev-tools-deploy-deps.md) | ✅ Complete — verified live (uv add, init scaffolds pyproject) |
+| 8 | NL→scaffold: extract fields (--fields) + stop phantom resources | [fix-nl-field-extraction.md](fix-nl-field-extraction.md) | ✅ Complete — live build lands name+price in schema, no phantom |
 
 ## Rules of the method
 - One thread at a time; scope it in its plan file first, get a nod, then build.

@@ -4594,6 +4594,9 @@ const SCAFFOLD_STOPWORDS: &[&str] = &[
     "operation", "operations", "field", "fields", "api", "framework", "project", "step",
     "file", "files", "code", "test", "tests", "ensure", "define", "having", "have", "has",
     "its", "each", "all", "them", "correctly", "successfully",
+    // planner-prose verbs/nouns that are never a resource
+    "handle", "handles", "can", "should", "will", "must", "add", "adding", "run",
+    "running", "support", "supports", "functionality", "interface", "automatic",
 ];
 
 /// Turn a noun into a singular PascalCase model name: "products" → "Product".
@@ -4605,6 +4608,138 @@ fn singular_pascal(word: &str) -> String {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => String::new(),
     }
+}
+
+/// Field-type tokens the framework generators understand (`--fields name:TYPE`).
+const VALID_FIELD_TYPES: &[&str] = &[
+    "string", "str", "int", "integer", "float", "numeric", "decimal",
+    "bool", "boolean", "text", "datetime",
+];
+
+/// Words that survive filler-stripping but are never a real field name.
+const FIELD_STOPWORDS: &[&str] = &[
+    "id", "resource", "crud", "model", "route", "routes", "support", "full",
+    "new", "it", "them", "functionality", "interface", "data", "record", "records",
+];
+
+/// Infer a generator field type from a field name by keyword. String-ish names
+/// (name/email/phone/code) are forced to `string` BEFORE the numeric checks so
+/// `phone_number` doesn't become an int.
+fn infer_field_type(name: &str) -> &'static str {
+    let n = name.to_lowercase();
+    let has = |kws: &[&str]| kws.iter().any(|k| n.contains(*k));
+    if n.starts_with("is_") || n.starts_with("has_")
+        || has(&["active", "enabled", "published", "verified", "flag", "done"]) {
+        "bool"
+    } else if n.ends_with("_at") || n.ends_with("_on") || n.ends_with("_date")
+        || has(&["date", "time", "timestamp"]) {
+        "datetime"
+    } else if has(&["name", "email", "phone", "url", "code", "zip", "address",
+                    "title", "slug", "sku", "status", "type", "color", "currency",
+                    "country", "city", "state", "token", "password"]) {
+        "string"
+    } else if has(&["price", "cost", "amount", "total", "rate", "salary",
+                    "balance", "fee", "tax", "discount", "weight", "height"]) {
+        "float"
+    } else if has(&["count", "qty", "quantity", "age", "stock", "votes",
+                    "views", "rank", "number", "score", "level"]) {
+        "int"
+    } else if has(&["description", "body", "content", "notes", "comment",
+                    "bio", "summary", "message"]) {
+        "text"
+    } else {
+        "string"
+    }
+}
+
+/// Normalise a raw field phrase into a snake_case identifier, or "" if it isn't
+/// a plausible field name.
+fn sanitize_field_name(raw: &str) -> String {
+    let parts: Vec<String> = raw
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_lowercase())
+        .collect();
+    let name = parts.join("_");
+    let ok = name.len() >= 2
+        && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && !FIELD_STOPWORDS.contains(&name.as_str());
+    if ok { name } else { String::new() }
+}
+
+/// Extract declared fields from a natural-language request as
+/// `(name, generator_type)` pairs, so the coder can pass them to
+/// `generate model X --fields "name:string,price:float"`. Without this the
+/// generator emits a skeleton table (id + created_at) and the requested
+/// columns never reach the schema.
+///
+/// Reads the clause after with / having / that has / whose / containing, plus
+/// any explicit `name:type` tokens anywhere in the text.
+fn detect_fields(ctx: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut push = |name: String, ty: String| {
+        if !name.is_empty() && !out.iter().any(|(n, _)| *n == name) {
+            out.push((name, ty));
+        }
+    };
+
+    // 1. Explicit `word:type` tokens anywhere (survives phrasing without "with").
+    for tok in ctx.split(|c: char| c.is_whitespace() || c == ',') {
+        if let Some((n, t)) = tok.split_once(':') {
+            let name = sanitize_field_name(n);
+            let t = t.trim().to_lowercase();
+            if !name.is_empty() && VALID_FIELD_TYPES.contains(&t.as_str()) {
+                push(name, t);
+            }
+        }
+    }
+
+    // 2. Names in the field clause. Anchor on the first field marker.
+    let lower = ctx.to_lowercase();
+    if let Some(start) = [" with ", " having ", " that has ", " that have ",
+                          " whose ", " containing ", " fields ", " field "]
+        .iter()
+        .filter_map(|m| lower.find(m).map(|i| i + m.len()))
+        .min()
+    {
+        let clause = ctx.get(start..).unwrap_or("");
+        let clause = clause
+            .split(['.', ';', '\n', '?'])
+            .next()
+            .unwrap_or(clause);
+        let fillers = ["a", "an", "the", "field", "fields", "value", "values",
+                       "attribute", "attributes", "column", "columns", "each",
+                       "its", "and", "with", "of", "type", "flag"];
+        for part in clause.split([',', '&']).flat_map(|p| p.split(" and ")) {
+            let part = part.trim();
+            if part.is_empty() { continue; }
+            if let Some((n, t)) = part.split_once(':') {
+                let name = sanitize_field_name(n);
+                if !name.is_empty() {
+                    let t = t.trim().to_lowercase();
+                    let ty = if VALID_FIELD_TYPES.contains(&t.as_str()) {
+                        t
+                    } else {
+                        infer_field_type(&name).to_string()
+                    };
+                    push(name, ty);
+                    continue;
+                }
+            }
+            let cleaned = part
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .filter(|w| !w.is_empty() && !fillers.contains(&w.to_lowercase().as_str()))
+                .collect::<Vec<_>>()
+                .join("_");
+            let name = sanitize_field_name(&cleaned);
+            if name.is_empty() { continue; }
+            let ty = infer_field_type(&name).to_string();
+            push(name, ty);
+        }
+    }
+
+    out.truncate(12);
+    out
 }
 
 /// Best-effort resource name (as a PascalCase model) from a request/step. Prefers
@@ -4628,6 +4763,9 @@ fn detect_resource_name(ctx: &str) -> Option<String> {
         .split(|c: char| !c.is_ascii_alphanumeric())
         .rfind(|w| w.len() > 2
             && w.chars().all(|c| c.is_ascii_alphabetic())
+            // Adverbs (…ly) are never a resource — "handle it automatically"
+            // must not scaffold an `Automatically` model.
+            && !w.to_lowercase().ends_with("ly")
             && !SCAFFOLD_STOPWORDS.contains(&w.to_lowercase().as_str()))?;
     let m = singular_pascal(noun);
     (m.len() > 1).then_some(m)
@@ -4660,9 +4798,24 @@ fn scaffold_first(project_dir: &Path, ctx: &str, files: &[String]) -> Vec<String
         .and_then(|p| kind_name_from_path(&p).map(|(_, n)| n))
         .or_else(|| model.as_ref().map(|m| pluralize(&m.to_lowercase())));
 
+    // Pull the requested columns out of the NL so the generator writes them into
+    // the model AND the migration (and co-emits their tests). Without this the
+    // table is a bare skeleton and "name/price" never reach the schema.
+    let fields = detect_fields(ctx);
+    let field_spec = fields
+        .iter()
+        .map(|(n, t)| format!("{n}:{t}"))
+        .collect::<Vec<_>>()
+        .join(",");
+
     let mut created = Vec::new();
     if let Some(ref m) = model {
-        created.extend(run_framework_generate(project_dir, "model", m, &[]));
+        let extra: Vec<&str> = if field_spec.is_empty() {
+            Vec::new()
+        } else {
+            vec!["--fields", field_spec.as_str()]
+        };
+        created.extend(run_framework_generate(project_dir, "model", m, &extra));
     }
     if wants_crud {
         if let Some(ref r) = route_name {
@@ -5498,6 +5651,67 @@ print('hi')
         // Should be capped — either by per-source limit (8) or by byte cap.
         assert!(out.len() < RECENT_FAILURES_MAX_BYTES + 256,
             "output {} bytes exceeds cap+slack", out.len());
+    }
+
+    // ── NL field extraction + resource detection (Thread 8) ──────────────
+    #[test]
+    fn detect_fields_name_and_price() {
+        let f = detect_fields("Build a products resource with name and price fields");
+        assert_eq!(f, vec![
+            ("name".to_string(), "string".to_string()),
+            ("price".to_string(), "float".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn detect_fields_type_inference() {
+        let f = detect_fields("a widget with a title, a quantity, an is_active flag and a created_at");
+        assert_eq!(f, vec![
+            ("title".to_string(), "string".to_string()),
+            ("quantity".to_string(), "int".to_string()),
+            ("is_active".to_string(), "bool".to_string()),
+            ("created_at".to_string(), "datetime".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn detect_fields_string_forced_over_numeric() {
+        // "phone_number" contains "number" but must stay a string.
+        assert_eq!(infer_field_type("phone_number"), "string");
+        assert_eq!(infer_field_type("price"), "float");
+        assert_eq!(infer_field_type("view_count"), "int");
+        assert_eq!(infer_field_type("description"), "text");
+    }
+
+    #[test]
+    fn detect_fields_explicit_types() {
+        let f = detect_fields("generate model Product with name:string price:decimal stock:int");
+        assert_eq!(f, vec![
+            ("name".to_string(), "string".to_string()),
+            ("price".to_string(), "decimal".to_string()),
+            ("stock".to_string(), "int".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn detect_fields_none_when_no_clause() {
+        assert!(detect_fields("Build a products resource").is_empty());
+    }
+
+    #[test]
+    fn detect_resource_ignores_adverb_from_planner_prose() {
+        // Regression: "…handle the product resource automatically" scaffolded a
+        // phantom `Automatically` model. The resource must be `Product`.
+        assert_eq!(
+            detect_resource_name("Ensure the framework can handle the product resource automatically"),
+            Some("Product".to_string()),
+        );
+    }
+
+    #[test]
+    fn detect_resource_still_finds_plain_noun() {
+        assert_eq!(detect_resource_name("Generate a model for products"), Some("Product".to_string()));
+        assert_eq!(detect_resource_name("Build a widgets resource with a name"), Some("Widget".to_string()));
     }
 }
 

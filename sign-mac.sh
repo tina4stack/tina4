@@ -15,7 +15,8 @@
 # live session, signs the release's Windows .exe, verifies, regenerates
 # SHA256SUMS over the signed bytes, and publishes the draft release.
 #
-#   usage:  sh sign-mac.sh v3.8.56
+#   usage:  sh sign-mac.sh v3.8.56            (sign + publish)
+#           sh sign-mac.sh v3.8.56 --check    (preview resolved config; no signing)
 #
 # PREREQUISITES:
 #   - SimplySign Desktop installed and LOGGED IN (cloud card mounted; your 2FA)
@@ -26,8 +27,19 @@
 set -eu
 
 cd "$(dirname "$0")"                        # tina4 repo root
-TAG="${1:-}"
-[ -z "$TAG" ] && { echo "Usage: sh sign-mac.sh <tag>   (e.g. v3.8.56)" >&2; exit 1; }
+# Args: <tag> plus optional --check/--dry-run (in any position). --check resolves
+# and prints the config WITHOUT signing or publishing, so you can confirm before
+# spending your SimplySign session.
+TAG=""
+CHECK=0
+for arg in "$@"; do
+  case "$arg" in
+    --check|--dry-run|-n) CHECK=1 ;;
+    -*) echo "Unknown option: $arg" >&2; exit 1 ;;
+    *)  TAG="$arg" ;;
+  esac
+done
+[ -z "$TAG" ] && { echo "Usage: sh sign-mac.sh <tag> [--check]   (e.g. v3.8.56)" >&2; exit 1; }
 BINARY="tina4-windows-amd64.exe"
 TSA_URL="${TINA4_TS_URL:-http://time.certum.pl/}"
 
@@ -47,10 +59,16 @@ if [ -L "$MODULE" ]; then
   echo "Resolved PKCS#11 symlink -> $MODULE"
 fi
 
-# Cert alias = the token's CKA_LABEL for the Code Infinity EV cert. Read it with:
-#   pkcs11-tool --module "$MODULE" --list-objects --type cert
+# Cert alias = the token's CKA_LABEL for the Code Infinity EV cert. If opensc's
+# pkcs11-tool is present, read it straight off the token so a cert REISSUE (new
+# label) does not silently break signing; otherwise fall back to the known label.
 # jsign pulls the signing certificate (and any chain the token holds) from the
 # token itself, so no cert PEM needs to live on disk.
+if [ -z "${TINA4_SIGN_ALIAS:-}" ] && command -v pkcs11-tool >/dev/null 2>&1; then
+  _lbl="$(pkcs11-tool --module "$MODULE" --list-objects --type cert 2>/dev/null \
+          | grep -iE '^[[:space:]]*label:' | head -1 | sed -E 's/.*label:[[:space:]]*//; s/[[:space:]]*$//')"
+  [ -n "$_lbl" ] && { TINA4_SIGN_ALIAS="$_lbl"; echo "Auto-discovered cert alias from token: $_lbl"; }
+fi
 ALIAS="${TINA4_SIGN_ALIAS:-521D88BF7DC9159EE3445861DB1261C6}"
 
 echo "Signing $TAG with:"
@@ -70,6 +88,13 @@ CFG
 REPO="${TINA4_REPO:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)}"
 [ -n "$REPO" ] || REPO="tina4stack/tina4"
 echo "Target repo: $REPO"
+
+if [ "$CHECK" -eq 1 ]; then
+  echo ""
+  echo "  --check OK: config resolved (module, alias, repo, timestamp); jsign + gh present."
+  echo "  Nothing signed or published. Re-run without --check to sign + publish $TAG."
+  exit 0
+fi
 
 cd "$WORK"
 echo "Downloading draft release assets for $TAG ..."

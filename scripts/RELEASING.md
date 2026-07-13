@@ -59,8 +59,11 @@ brew install jsign osslsigncode   # jsign signs; osslsigncode verifies
 
 # 2. Open SimplySign Desktop and LOG IN (your 2FA; cloud card mounted).
 
-# 3. Sign + verify + checksum + publish (values are pre-filled; override via
-#    TINA4_PKCS11_MODULE / TINA4_SIGN_ALIAS / TINA4_TS_URL if your install differs):
+# 3. Preview the resolved config WITHOUT signing (does not spend your session):
+sh sign-mac.sh v3.8.56 --check
+# 4. Sign + verify + checksum + publish. Everything is auto-discovered (module
+#    symlink, cert alias from the token, chain from the token); override via
+#    TINA4_PKCS11_MODULE / TINA4_SIGN_ALIAS / TINA4_TS_URL only if your install differs:
 sh sign-mac.sh v3.8.56
 ```
 

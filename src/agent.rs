@@ -1199,13 +1199,16 @@ fn truncate_title(s: &str) -> String {
 /// explicitly (no risk of stale state).
 ///
 /// Pill vocabulary matches the reference UX:
-///   - "done"               last assistant message completed cleanly,
-///                          or archived with closure_reason="done"
+///   - "done"               ONLY when archived with closure_reason="done".
+///                          A thread is done when the USER signs it off (the ✓
+///                          in the detail header) — never merely because the
+///                          supervisor finished a turn.
 ///   - "wont_do"            archived with closure_reason="wont_do"
 ///                          (developer dismissed without action)
-///   - "awaiting_customer"  last message was from the assistant and
-///                          ended with a question, OR was a planner
-///                          output (waiting for user response/approval)
+///   - "awaiting_customer"  last message was from the assistant — whether it
+///                          ended with a question, was a planner output, OR
+///                          just completed a turn. In every case it's the
+///                          user's move (review / reply / sign off).
 ///   - "blocked"            last assistant message starts with an
 ///                          error sentinel (✗ / "Error:")
 ///   - "feedback"           kind:"feedback" and not yet archived
@@ -1234,13 +1237,11 @@ pub fn compute_thread_status(meta: &ThreadMeta, messages: &[&ChatMessage]) -> &'
     if trimmed.starts_with("Error:") || trimmed.starts_with("✗") {
         return "blocked";
     }
-    if last.agent.as_deref() == Some("planner") {
-        return "awaiting_customer";
-    }
-    if trimmed.ends_with('?') {
-        return "awaiting_customer";
-    }
-    "done"
+    // A completed assistant turn (planner output, a question, OR just a finished
+    // turn) all mean the same thing: it's the user's move. "done" is reserved
+    // for an explicit user sign-off (archived, closure_reason="done") — the
+    // supervisor finishing is NOT done.
+    "awaiting_customer"
 }
 
 // ── Defensive file writes for coder agent output ──────────────────────

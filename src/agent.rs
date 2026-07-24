@@ -793,14 +793,16 @@ pub fn load_agents(project_dir: &Path) -> Vec<Agent> {
 /// A settings.json on disk always wins, so saving via the dev admin UI
 /// overrides the env-var default cleanly.
 pub fn load_chat_settings(project_dir: &Path) -> ChatSettings {
-    // The coder is ALWAYS the fine-tuned Tina4 coder (`tina4_chat`), whether or
-    // not an Anthropic key is present: reasoning agents want a general model,
-    // but the coder must emit precise multi-file Tina4 code, which the general
-    // `long_context` model can't (it summarizes code to prose). Grounding
-    // (`tina4_context`) is still injected upstream by `ground_coder_msg`.
+    // The coder runs on `long_context`. The fine-tuned `tina4_chat` has a small
+    // window — measured live, a prompt over ~9KB comes back as an availability
+    // notice instead of code, so real builds (project context + plan + step)
+    // silently produced nothing. `long_context` takes the whole prompt, and the
+    // textbook structure comes from the framework generators (scaffold-first)
+    // rather than from the model. Grounding (`tina4_context`) is still injected
+    // upstream by `ground_coder_msg`.
     let coder = ModelSettings {
         provider: "tina4-mcp".into(),
-        model: "tina4_chat".into(),
+        model: "long_context".into(),
         url: crate::mcp_context::base_url(),
         api_key: crate::mcp_context::token(project_dir).unwrap_or_default(),
     };
@@ -3230,11 +3232,8 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                                 // the custom logic — identical to the direct `code`
                                 // path so plan-driven builds are textbook too.
                                 let mut step_files: Vec<String> = Vec::new();
-                                let scaffolded = if coder_is_tina4chat {
-                                    scaffold_first(&project_dir, step, &goal, &[])
-                                } else {
-                                    Vec::new()
-                                };
+                                // Generate-first is the textbook path for every coder.
+                                let scaffolded = scaffold_first(&project_dir, step, &goal, &[]);
                                 if !scaffolded.is_empty() {
                                     for f in &scaffolded {
                                         sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
@@ -3248,24 +3247,48 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                                 } else {
                                     // No scaffoldable artifact — the LLM coder authors
                                     // the step to a deterministic path.
-                                    let forced_path = if coder_is_tina4chat { derive_coder_path(step, &[]) } else { None };
-                                    let base_msg = format!(
-                                        "Implement this single step from the project plan:\n\n**Step {}:** {}\n\n\
-                                        Full plan context:\n{}\n\n\
-                                        Project directory: {}\n\n\
-                                        Return each file as:\n## FILE: path/to/file\n```\ncontent\n```",
-                                        step_num, step, plan_content, project_dir.display()
-                                    );
+                                    let forced_path = derive_coder_path(step, &[]);
+                                    // Lean prompt for the small coder — the full plan
+                                    // pushes it past its window (see SMALL_CODER_PROMPT_BUDGET).
+                                    let base_msg = if coder_is_tina4chat {
+                                        format!(
+                                            "Implement this single step from the project plan:\n\n**Step {}:** {}\n\n\
+                                            Return each file as:\n## FILE: path/to/file\n```\ncontent\n```",
+                                            step_num, step
+                                        )
+                                    } else {
+                                        format!(
+                                            "Implement this single step from the project plan:\n\n**Step {}:** {}\n\n\
+                                            Full plan context:\n{}\n\n\
+                                            Project directory: {}\n\n\
+                                            Return each file as:\n## FILE: path/to/file\n```\ncontent\n```",
+                                            step_num, step, plan_content, project_dir.display()
+                                        )
+                                    };
                                     let (coder_msg, hits) = ground_coder_msg(&project_dir, &base_msg, step, &[]).await;
+                                    let coder_msg = if coder_is_tina4chat {
+                                        clamp_coder_prompt(&coder_msg, SMALL_CODER_PROMPT_BUDGET)
+                                    } else {
+                                        coder_msg
+                                    };
                                     let coder_msgs = vec![LlmMessage { role: "user".into(), content: coder_msg }];
-                                    let coder_result = if coder_is_tina4chat {
+                                    let coder_result = if coder_model.provider == "tina4-mcp" {
                                         llm_call(&coder_model, coder_prompt, &coder_msgs, 4096, 0.1).await
                                     } else {
                                         llm_call_with_grounding_retry(&coder_model, coder_prompt, coder_msgs, 4096, 0.1, &hits).await
                                     };
                                     match coder_result {
                                         Ok(code_output) => {
-                                            let code_output = if coder_is_tina4chat && !code_output.contains("## FILE:") {
+                                            // Availability notice comes back as a normal 200
+                                            // with prose — an outage, not output.
+                                            if coder_unavailable_notice(&code_output) {
+                                                step_summaries.push(format!("{}. {} ✗ (coder unavailable)", step_num, step));
+                                                sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
+                                                    "text": format!("Step {} failed — the coding model is unavailable; nothing was written", step_num),
+                                                    "agent": "coder"}))).await;
+                                                break;
+                                            }
+                                            let code_output = if !code_output.contains("## FILE:") {
                                                 match forced_path {
                                                     Some(ref p) => format!("## FILE: {p}\n{code_output}"),
                                                     None => code_output,
@@ -3273,6 +3296,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                                             } else {
                                                 code_output
                                             };
+                                            let mut refused: Vec<String> = Vec::new();
                                             for section in code_output.split("## FILE:") {
                                                 let section = section.trim();
                                                 if section.is_empty() { continue; }
@@ -3297,9 +3321,18 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                                                                 "text": format!("Skipped {} on step {}: {}", file_path, step_num, reason),
                                                                 "agent": "coder",
                                                             }))).await;
+                                                            refused.push(reason);
                                                         }
                                                     }
                                                 }
+                                            }
+                                            // Every write refused → the step did nothing; never ✓ it.
+                                            if step_files.is_empty() && !refused.is_empty() {
+                                                step_summaries.push(format!("{}. {} ✗", step_num, step));
+                                                sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
+                                                    "text": format!("Step {} failed — no file was written ({})", step_num, refused.join("; ")),
+                                                    "agent": "coder"}))).await;
+                                                break;
                                             }
                                             let done_msg = if step_files.is_empty() {
                                                 format!("Step {} complete.", step_num)
@@ -3697,14 +3730,14 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                     // idioms, RAG pulls chunks specific to *this* step's
                     // intent. Together they beat either on its own.
                     let coder_is_tina4chat = coder_model.provider == "tina4-mcp" && coder_model.model == "tina4_chat";
+                    // Neither MCP coder emits `grounded-by:` citations, so skip the
+                    // citation-verify retry loop (that gate is for Claude).
+                    let coder_is_mcp = coder_model.provider == "tina4-mcp";
                     // GENERATE-FIRST (textbook): a scaffoldable step (resource/CRUD,
                     // model, migration) goes through the framework generators; the
-                    // LLM coder authors only custom logic — same as the other paths.
-                    let scaffolded = if coder_is_tina4chat {
-                        scaffold_first(&project_dir, &step_text, &goal, &[])
-                    } else {
-                        Vec::new()
-                    };
+                    // LLM coder authors only custom logic. This is the textbook path
+                    // regardless of which coder model is configured.
+                    let scaffolded = scaffold_first(&project_dir, &step_text, &goal, &[]);
                     if !scaffolded.is_empty() {
                         for f in &scaffolded { state.files.push(f.clone()); }
                         state.completed.push(num);
@@ -3714,24 +3747,62 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                             "text": format!("Step {} done — {} files scaffolded", num, scaffolded.len()), "agent": "coder"}))).await;
                         continue;
                     }
-                    let forced_path = if coder_is_tina4chat { derive_coder_path(&step_text, &[]) } else { None };
-                    let base_msg = format!(
-                        "{}## Project Context\n{}\n\n\
-                        ## Task\nImplement step {} of {}:\n**{}**\n\n\
-                        ## Full Plan\n{}\n\n\
-                        Return each file as:\n## FILE: path/to/file\n```\ncontent\n```",
-                        framework_ctx, project_ctx, num, total, step_text, plan_content
-                    );
+                    // Derive a target path for ANY coder — used to synthesize a
+                    // `## FILE:` header when the model returns a bare code fence.
+                    let forced_path = derive_coder_path(&step_text, &[]);
+                    // The small coder gets a LEAN prompt — task + format only. The
+                    // full plan and heavy contexts push it past its window, and the
+                    // service then answers with an availability notice, not code.
+                    let base_msg = if coder_is_tina4chat {
+                        format!(
+                            "## Task\nImplement step {} of {}:\n**{}**\n\n\
+                            Return each file as:\n## FILE: path/to/file\n```\ncontent\n```",
+                            num, total, step_text
+                        )
+                    } else {
+                        format!(
+                            "{}## Project Context\n{}\n\n\
+                            ## Task\nImplement step {} of {}:\n**{}**\n\n\
+                            ## Full Plan\n{}\n\n\
+                            Return each file as:\n## FILE: path/to/file\n```\ncontent\n```",
+                            framework_ctx, project_ctx, num, total, step_text, plan_content
+                        )
+                    };
                     let (coder_msg, hits) = ground_coder_msg(&project_dir, &base_msg, &step_text, &[]).await;
+                    // Grounding can re-inflate it — clamp as the final guard.
+                    let coder_msg = if coder_is_tina4chat {
+                        clamp_coder_prompt(&coder_msg, SMALL_CODER_PROMPT_BUDGET)
+                    } else {
+                        coder_msg
+                    };
                     let coder_msgs = vec![LlmMessage { role: "user".into(), content: coder_msg }];
-                    let coder_result = if coder_is_tina4chat {
+                    let coder_result = if coder_is_mcp {
                         llm_call(&coder_model, coder_prompt, &coder_msgs, 4096, 0.1).await
                     } else {
                         llm_call_with_grounding_retry(&coder_model, coder_prompt, coder_msgs, 4096, 0.1, &hits).await
                     };
                     match coder_result {
                         Ok(code_output) => {
-                            let code_output = if coder_is_tina4chat && !code_output.contains("## FILE:") {
+                            // Availability notice arrives as a normal 200 with prose.
+                            // Fail loudly and stay resumable instead of writing it.
+                            if coder_unavailable_notice(&code_output) {
+                                summaries.push(format!("{}. {} ✗ (coder unavailable)", num, step_text));
+                                failed = true;
+                                let _ = fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap_or_default());
+                                sse_ev(&mut stream, "message", &format!(
+                                    "{{\"content\":\"Step {} failed: the coding model is unavailable (the service returned a maintenance notice). Nothing was written — resume once it is back.\",\"agent\":\"supervisor\"}}",
+                                    num
+                                )).await;
+                                sse_ev(&mut stream, "plan_failed", &format!(
+                                    "{{\"file\":\"{}\",\"completed\":{},\"total\":{},\"failed_step\":{}}}",
+                                    exec_req.plan_file.replace('\\', "\\\\").replace('"', "\\\""),
+                                    state.completed.len(), total, num
+                                )).await;
+                                break;
+                            }
+                            // A bare code fence with no header is common — synthesize
+                            // the `## FILE:` from the derived path for any coder.
+                            let code_output = if !code_output.contains("## FILE:") {
                                 match forced_path {
                                     Some(ref p) => format!("## FILE: {p}\n{code_output}"),
                                     None => code_output,
@@ -3740,6 +3811,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                                 code_output
                             };
                             let mut step_files = Vec::new();
+                            let mut refused: Vec<String> = Vec::new();
                             for section in code_output.split("## FILE:") {
                                 let section = section.trim();
                                 if section.is_empty() { continue; }
@@ -3766,9 +3838,33 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                                         Err(reason) => {
                                             agent_log(&project_dir, "step.skipped",
                                                 &format!("step {} skipped {}: {}", num, file_path, reason));
+                                            refused.push(reason);
                                         }
                                     }
                                 }
+                            }
+
+                            // Every write refused → the step did nothing. Never
+                            // report ✓ or record it completed: resume would skip
+                            // real work and the build would look green while empty.
+                            // (A step that legitimately writes no files — "run the
+                            // tests" — has no refusals and still passes.)
+                            if step_files.is_empty() && !refused.is_empty() {
+                                summaries.push(format!("{}. {} ✗", num, step_text));
+                                failed = true;
+                                let _ = fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap_or_default());
+                                let why = refused.join("; ")
+                                    .replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+                                sse_ev(&mut stream, "message", &format!(
+                                    "{{\"content\":\"Step {} failed: no file was written ({}). You can resume from here.\",\"agent\":\"supervisor\"}}",
+                                    num, why
+                                )).await;
+                                sse_ev(&mut stream, "plan_failed", &format!(
+                                    "{{\"file\":\"{}\",\"completed\":{},\"total\":{},\"failed_step\":{}}}",
+                                    exec_req.plan_file.replace('\\', "\\\\").replace('"', "\\\""),
+                                    state.completed.len(), total, num
+                                )).await;
+                                break;
                             }
 
                             // Mark step complete and save state immediately
@@ -4446,6 +4542,20 @@ fn derive_coder_path(ctx: &str, files: &[String]) -> Option<String> {
     if let Some(p) = files.iter().find(|f| f.contains('/') && f.contains('.')) {
         return Some(p.clone());
     }
+    // An explicit path in the step wins — "Add a slugify helper in
+    // src/app/helpers.py" should target exactly that file.
+    if let Some(p) = ctx
+        .split(|c: char| c.is_whitespace() || c == ',' || c == '"' || c == '`')
+        .map(|w| w.trim_end_matches(['.', ')', ':', ';']))
+        .find(|w| {
+            w.contains('/')
+                && std::path::Path::new(w).extension().is_some()
+                && !w.starts_with("http")
+                && !w.starts_with('/')
+        })
+    {
+        return Some(p.to_string());
+    }
     let lower = ctx.to_lowercase();
     // A "/segment" route path → its last segment is the resource name.
     let from_slash = lower.split(|c: char| c.is_whitespace() || c == ',' || c == '.')
@@ -4525,10 +4635,34 @@ fn run_project_tests(project_dir: &Path) -> (bool, String) {
                 .find(|l| l.contains("passed") || l.contains("failed") || l.contains("error"))
                 .map(|l| l.trim().trim_matches('=').trim().to_string())
                 .unwrap_or_else(|| "tests run".to_string());
-            (o.status.success(), summary)
+            // Never trust the exit code alone — some framework CLIs swallow the
+            // runner's failure code (verified: `tina4python test` exits 0 while
+            // pytest exits 1 on "4 failed"). A summary naming failures wins, so
+            // a red suite can never be reported as ✅.
+            (o.status.success() && !summary_reports_failure(&summary), summary)
         }
         Err(e) => (false, format!("test runner unavailable: {e}")),
     }
+}
+
+/// True when a test summary reports at least one failure or error ("4 failed",
+/// "2 errors", a bare "FAILED tests/…" line). "0 failed" is not a failure.
+fn summary_reports_failure(summary: &str) -> bool {
+    let lower = summary.to_lowercase();
+    let toks: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+    for (i, t) in toks.iter().enumerate() {
+        if matches!(*t, "failed" | "failure" | "failures" | "error" | "errors") {
+            match i.checked_sub(1).and_then(|j| toks.get(j)).and_then(|p| p.parse::<u32>().ok()) {
+                Some(0) => continue,      // "0 failed"
+                Some(_) => return true,   // "4 failed"
+                None => return true,      // "FAILED tests/…"
+            }
+        }
+    }
+    false
 }
 
 /// Apply pending migrations via the framework CLI so a freshly-scaffolded table
@@ -4807,6 +4941,41 @@ fn detect_resource_name(ctx: &str) -> Option<String> {
 /// plain custom route/logic), so the caller falls through to the LLM coder —
 /// a plain route is deliberately NOT scaffolded (that would over-build a simple
 /// handler into a full CRUD skeleton).
+/// tina4_chat is a small fine-tuned model with a modest context window. Measured
+/// against the live service: a ~8.7KB prompt still returns code, ~10.5KB returns
+/// the "under maintenance" notice instead. Stay well under that — the full plan
+/// plus project/framework context routinely blew past it, which is what made
+/// builds silently produce nothing.
+const SMALL_CODER_PROMPT_BUDGET: usize = 6000;
+
+/// Trim a prompt to `budget` bytes, keeping the HEAD (which carries the task and
+/// the output-format contract) and cutting on a char boundary.
+fn clamp_coder_prompt(msg: &str, budget: usize) -> String {
+    if msg.len() <= budget {
+        return msg.to_string();
+    }
+    let mut cut = budget;
+    while cut > 0 && !msg.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}\n\n[context trimmed to fit the coder's window]", &msg[..cut])
+}
+
+/// The coder service can answer HTTP 200 with a plain-prose availability notice
+/// ("The Tina4 coding model is currently offline or under maintenance…") instead
+/// of code. That is an outage, not output: without this check the agent tries to
+/// write the prose to disk, refuses it as a bogus path, and then still marks the
+/// step done — reporting a build as complete that wrote nothing.
+fn coder_unavailable_notice(output: &str) -> bool {
+    if output.contains("## FILE:") {
+        return false;
+    }
+    let l = output.to_lowercase();
+    l.contains("under maintenance")
+        || l.contains("currently offline")
+        || l.contains("try again in a few minutes")
+}
+
 /// The plan's overall goal — the prose lines around the numbered steps. A
 /// planner restates the request there ("…a customers resource with email and
 /// name fields…") while the individual steps drop those details ("create a
@@ -5774,6 +5943,59 @@ print('hi')
             detect_resource_name("Ensure the framework can handle the product resource automatically"),
             Some("Product".to_string()),
         );
+    }
+
+    #[test]
+    fn red_suite_is_never_reported_green() {
+        // The live case: `tina4python test` exits 0 with this summary.
+        assert!(summary_reports_failure("4 failed, 11 passed in 0.16s"));
+        assert!(summary_reports_failure("FAILED tests/test_orders.py::TestOrder::test_x"));
+        assert!(summary_reports_failure("2 errors"));
+        // Green suites and explicit zeros must stay green.
+        assert!(!summary_reports_failure("15 passed in 0.21s"));
+        assert!(!summary_reports_failure("0 failed, 11 passed"));
+        assert!(!summary_reports_failure("tests run"));
+    }
+
+    #[test]
+    fn coder_prompt_is_clamped_to_budget() {
+        let small = "## Task\nDo the thing";
+        assert_eq!(clamp_coder_prompt(small, SMALL_CODER_PROMPT_BUDGET), small);
+
+        let big = "x".repeat(SMALL_CODER_PROMPT_BUDGET * 3);
+        let out = clamp_coder_prompt(&big, SMALL_CODER_PROMPT_BUDGET);
+        assert!(out.len() < big.len());
+        // Head is preserved — that's where the task + format contract live.
+        assert!(out.starts_with("xxxx"));
+        assert!(out.ends_with("[context trimmed to fit the coder's window]"));
+    }
+
+    #[test]
+    fn coder_prompt_clamp_respects_char_boundaries() {
+        // Multi-byte content must not panic or split a char.
+        let s = "é".repeat(100);
+        let out = clamp_coder_prompt(&s, 51);
+        assert!(out.len() <= 51 + 64);
+    }
+
+    #[test]
+    fn coder_outage_notice_is_detected() {
+        // The exact 200-with-prose the service returned during the live run.
+        assert!(coder_unavailable_notice(
+            "The Tina4 coding model is currently offline or under maintenance, \
+             so this request was not processed. Please try again in a few minutes."
+        ));
+        assert!(coder_unavailable_notice("Service under maintenance"));
+    }
+
+    #[test]
+    fn coder_outage_notice_does_not_flag_real_code() {
+        // Real output always carries a ## FILE: header — never treat it as an outage.
+        assert!(!coder_unavailable_notice(
+            "## FILE: src/routes/ping.py\n```\n# offline mode: try again in a few minutes\nx = 1\n```"
+        ));
+        assert!(!coder_unavailable_notice("## FILE: src/x.py\n```\nx = 1\n```"));
+        assert!(!coder_unavailable_notice("def handler(): pass"));
     }
 
     #[test]

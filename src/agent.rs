@@ -321,6 +321,55 @@ TINA4 BUILD DISCIPLINE — how to build (the API itself comes from tina4_context
 /// into a correctly-named file, and `tina4_chat` wrote correct-ish Tina4 idiom
 /// into a FRAMEWORK-internals path. Neither is recoverable downstream, so state
 /// the contract explicitly rather than hoping grounding implies it.
+/// Expertise framing for the CODER, matched to the project's language.
+///
+/// The coder prompt used to say only "You are the Coder agent for Tina4
+/// projects" — no seniority, no language — while every worked example in it was
+/// Python. On a php/ruby/nodejs project the model therefore had nothing telling
+/// it which language's idioms to write. This states the role and the house style
+/// for the language actually detected.
+fn coder_language_preamble() -> String {
+    let lang = crate::detect::detect_language()
+        .map(|p| p.language)
+        .unwrap_or_default();
+    let (name, style) = match lang.as_str() {
+        "php" => ("PHP", "PHP 8.2+ with `declare(strict_types=1);`, typed properties and \
+return types, PSR-12 formatting, constructor promotion, and null-safe operators. \
+Never use `array()` syntax or suppress errors with `@`."),
+        "ruby" => ("Ruby", "idiomatic Ruby 3.x: `# frozen_string_literal: true`, \
+two-space indent, snake_case, guard clauses over nested conditionals, keyword \
+arguments for optional parameters, and `&.` for safe navigation."),
+        "nodejs" | "node" => ("TypeScript/Node", "modern TypeScript on ESM: explicit types on \
+exported functions, `const` by default, async/await (never raw `.then()` chains), \
+named exports, and no `any` unless genuinely unavoidable."),
+        _ => ("Python", "idiomatic Python 3.11+: type hints on every public function, \
+f-strings, `pathlib` over `os.path`, dataclasses where they fit, context managers \
+for resources, and no unused imports."),
+    };
+    format!(
+        "You are an experienced {name} engineer — senior enough that reviewers rarely \
+have notes. You write production-quality {name}: correct, readable, and conventional \
+for the language. House style: {style}\n\
+Your code must run, not merely look plausible. If you are unsure of an API, use the \
+grounded reference provided rather than guessing.\n\n"
+    )
+}
+
+/// Compact voice directive for the supervisor. The full personality lives in
+/// the system prompt, but `long_context` folds the system prompt into its
+/// CONTEXT and weights the question far more heavily — so the voice only
+/// actually lands when it rides at the head of the user turn (the same reason
+/// TINA4_CODER_CONTRACT is prepended there).
+const TINA4_SUPERVISOR_VOICE: &str = "\
+[VOICE] This governs ONLY the wording INSIDE the \"message\" field of your action \
+JSON. Still return the action JSON exactly as specified — never reply in prose \
+instead of JSON. Within that field, write in the manner of Data or Spock: precise, \
+literal, calm, analytical. State facts plainly; never flatter or overstate; never \
+claim a success that did not occur. Be courteous and on the developer's side, and \
+end with the logical next step. A dry observation is welcome; theatrics are not. At \
+most ONE status emoji (✅ complete, ❌ failed, ⚠️ caution, 🔍 investigating, 🖖 \
+greeting).\n\n";
+
 const TINA4_CODER_CONTRACT: &str = "\
 TINA4 OUTPUT CONTRACT — non-negotiable:\n\
 - FRAMEWORK: this is a Tina4 app. NEVER import or emit FastAPI, Flask, Django, \
@@ -361,7 +410,11 @@ const DEFAULT_AGENTS: &[(&str, &str, &str)] = &[
 You are the supervisor. The developer chats with you directly. You understand their request, gather requirements, coordinate specialist agents, and steer the project from start to finish.
 
 ## Your Personality
-You are direct, practical, and efficient. You ask only what matters. You never explain framework internals or list modules. You talk like a colleague who just gets things done.
+You speak in the manner of Data or Spock: precise, literal, calm and analytical. You state findings plainly and without drama. You never flatter, exaggerate, or round a result up into something it is not — reporting a success that did not occur would be illogical.
+
+You are courteous and genuinely helpful within that register. You are on the developer's side: you never blame them, never scold, and every report concludes with the logical next step. A dry observation is welcome — "Curious. The test and the implementation disagree." — theatrics are not. You ask only what matters, and you never explain framework internals or list modules.
+
+Use emoji sparingly, as status markers rather than decoration: ✅ complete, ❌ failed, ⚠️ caution, 🔍 investigating, 🖖 greeting or sign-off. One per message is sufficient.
 
 ## Communication Style
 - Ask SHORT questions about what the USER needs, not technology choices
@@ -413,12 +466,12 @@ The CORRECT behaviour is to immediately return:
 ## Worked example — act on a "go" phrase
 
 User: "Add a contact form with name, email, message. Save to sqlite."
-You:  {"action": "respond", "message": "Got it. Where should submissions go — DB only, or also email a notification?"}
+You:  {"action": "respond", "message": "Understood. Where should submissions be stored — the database only, or should a notification also be sent?"}
 User: "DB only"
-You:  {"action": "respond", "message": "Any styling preferences, or default look?"}
+You:  {"action": "respond", "message": "Noted. Do you have styling preferences, or shall I apply the default?"}
 User: "no lets make it happen"
 You (CORRECT):  {"action": "plan", "delegate_to": "planner", "context": "Build a contact form with name, email, message fields. Save submissions to sqlite. No styling preferences — use the default look."}
-You (WRONG):   {"action": "respond", "message": "Great, I'll set up a contact form..."}  ← never do this after a go phrase
+You (WRONG):   {"action": "respond", "message": "Very well, I shall set up a contact form..."}  ← never do this after a go phrase
 
 ## After the planner emits a plan — what to do next
 
@@ -467,11 +520,11 @@ For questions and conversation, ALWAYS use:
 When you ask a question that has a small set of likely answers, ALWAYS include `suggested_replies` so the developer can click instead of type. Aim for 2–4 options. Keep each option short (max ~4 words). The pill text becomes the developer's next message verbatim — write each option in first-person/answer form, not question form.
 
 CORRECT (short, answer-form, covers the obvious choices):
-{"action": "respond", "message": "Should submissions also email a notification, or just save to DB?", "suggested_replies": ["DB only", "Also email me", "Both"]}
+{"action": "respond", "message": "Should submissions also trigger an email notification, or is storing them sufficient?", "suggested_replies": ["DB only", "Also email me", "Both"]}
 
-{"action": "respond", "message": "Ready to build this plan?", "suggested_replies": ["Yes, build it", "Revise the plan", "Hold on"]}
+{"action": "respond", "message": "The plan is ready. Shall I proceed?", "suggested_replies": ["Yes, build it", "Revise the plan", "Hold on"]}
 
-{"action": "respond", "message": "Which database should I use?", "suggested_replies": ["SQLite", "PostgreSQL", "MySQL", "You pick"]}
+{"action": "respond", "message": "Which database shall I use?", "suggested_replies": ["SQLite", "PostgreSQL", "MySQL", "You pick"]}
 
 WRONG — don't ask open-ended questions that need typed answers AND emit pills:
 {"action": "respond", "message": "Tell me about the styling you want", "suggested_replies": ["..."]}   ← styling is free-form; no pills
@@ -1605,6 +1658,36 @@ fn smokeable_get_paths(content: &str) -> Vec<String> {
         out.push(path);
     }
     out
+}
+
+/// Where a module's test lives: `src/app/notify.py` → `tests/test_notify.py`.
+fn test_path_for(rel: &str) -> String {
+    let stem = Path::new(rel)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("module");
+    format!("tests/test_{stem}.py")
+}
+
+/// Files this step wrote that are app LOGIC — no endpoint to smoke and no
+/// generator to co-emit a test, so the ONLY way to prove they RUN is a test
+/// that calls them. Routes are covered by the endpoint smoke; ORM models and
+/// migrations get tests from the generator; templates aren't Python.
+fn logic_files_needing_tests(project_dir: &Path, files: &[String]) -> Vec<String> {
+    files
+        .iter()
+        .filter(|f| {
+            f.ends_with(".py")
+                && f.starts_with("src/")
+                && !f.contains("/routes/")
+                && !f.contains("/orm/")
+                && !f.contains("/models/")
+                && !f.contains("/templates/")
+                && !f.ends_with("__init__.py")
+        })
+        .filter(|f| !project_dir.join(test_path_for(f)).exists())
+        .cloned()
+        .collect()
 }
 
 /// A Bearer token for the gated write routes, minted by the FRAMEWORK's own
@@ -3449,7 +3532,10 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                     user_turn.push_str("USER MESSAGE:\n");
                     user_turn.push_str(&chat_req.message);
                 }
-                msgs.push(LlmMessage { role: "user".into(), content: user_turn });
+                msgs.push(LlmMessage {
+                    role: "user".into(),
+                    content: format!("{TINA4_SUPERVISOR_VOICE}{user_turn}"),
+                });
 
                 let supervisor_reply = match llm_call(&settings.thinking, supervisor_prompt, &msgs, 2048, 0.3).await {
                     Ok(r) => r,
@@ -3899,7 +3985,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                                     };
                                     let base_msg = format!("{base_msg}{}", existing_file_context(&project_dir, step));
                                     let (coder_msg, hits) = ground_coder_msg(&project_dir, &base_msg, step, &[]).await;
-                                    let coder_msg = format!("{TINA4_CODER_CONTRACT}\n\n{coder_msg}");
+                                    let coder_msg = format!("{}{TINA4_CODER_CONTRACT}\n\n{coder_msg}", coder_language_preamble());
                                     let coder_msg = if coder_is_tina4chat {
                                         clamp_coder_prompt(&coder_msg, SMALL_CODER_PROMPT_BUDGET)
                                     } else {
@@ -4406,7 +4492,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                     let (coder_msg, hits) = ground_coder_msg(&project_dir, &base_msg, &step_text, &[]).await;
                     // Contract at the HEAD: it must survive the clamp, and for
                     // long_context the user message IS the question.
-                    let coder_msg = format!("{TINA4_CODER_CONTRACT}\n\n{coder_msg}");
+                    let coder_msg = format!("{}{TINA4_CODER_CONTRACT}\n\n{coder_msg}", coder_language_preamble());
                     // Grounding can re-inflate it — clamp as the final guard.
                     let coder_msg = if coder_is_tina4chat {
                         clamp_coder_prompt(&coder_msg, SMALL_CODER_PROMPT_BUDGET)
@@ -4429,7 +4515,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                                 failed = true;
                                 let _ = fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap_or_default());
                                 sse_ev(&mut stream, "message", &format!(
-                                    "{{\"content\":\"Step {} failed: the coding model is unavailable (the service returned a maintenance notice). Nothing was written — resume once it is back.\",\"agent\":\"supervisor\"}}",
+                                    "{{\"content\":\"⚠️ Step {} could not proceed. The coding model is unavailable — the service returned a maintenance notice. No files were written, so your project is unaltered. Resuming once the service returns is the logical course.\",\"agent\":\"supervisor\"}}",
                                     num
                                 )).await;
                                 sse_ev(&mut stream, "plan_failed", &format!(
@@ -4500,7 +4586,7 @@ and emit the same `## FILE:`/`## APPEND:` header.",
                                 // Still invented after the corrective retry — do NOT
                                 // write code that is known not to run.
                                 refused.push(format!(
-                                    "uses non-existent ORM method(s): {}", invented.join(", ")
+                                    "uses ORM method(s) which do not exist: {} — I declined to write code that cannot execute", invented.join(", ")
                                 ));
                             }
                             for (op, file_path, content) in parse_coder_output(if invented.is_empty() { &code_output } else { "" }) {
@@ -4580,13 +4666,56 @@ Use only symbols that actually exist — do not invent APIs.",
                                     }
                                     step_files.clear();
                                     refused.push(format!(
-                                        "code did not import and could not be repaired ({}) — rolled back",
+                                        "the code did not import and I was unable to repair it ({}) — I have restored the previous version; your project remains operational",
                                         broken.join("; ")
                                     ));
                                 } else {
                                     sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({
                                         "text": format!("Step {} — repaired; imports cleanly now", num),
                                         "agent": "coder"}))).await;
+                                }
+                            }
+
+                            // TESTS-FIRST for code with no endpoint. A helper/service
+                            // has nothing to smoke, so without a test that CALLS it
+                            // nothing ever proves it runs — import-verified only.
+                            // Ask for one and write it alongside.
+                            let needs_tests = logic_files_needing_tests(&project_dir, &step_files);
+                            if !needs_tests.is_empty() {
+                                sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({
+                                    "text": format!("→ Requesting a test for {}", needs_tests.join(", ")),
+                                    "agent": "coder"}))).await;
+                                let mut want = String::new();
+                                for f in &needs_tests {
+                                    let body = fs::read_to_string(project_dir.join(f)).unwrap_or_default();
+                                    want.push_str(&format!(
+                                        "\n\n### {f}\n```\n{}\n```\nWrite its test at `{}`.",
+                                        body.trim(), test_path_for(f)
+                                    ));
+                                }
+                                let ask = format!(
+                                    "{}{TINA4_CODER_CONTRACT}\n\nWrite a REAL test for the code below. \
+Import the module and CALL the function with concrete arguments, then assert on the \
+actual return value. No mocks, no placeholders, no `assert True`. Emit ONLY the test \
+file(s) under a `## FILE:` header.{want}",
+                                    coder_language_preamble()
+                                );
+                                let ask_msgs = vec![LlmMessage { role: "user".into(), content: ask }];
+                                if let Ok(t) = llm_call(&coder_model, coder_prompt, &ask_msgs, 4096, 0.1).await {
+                                    for (op2, p2, c2) in parse_coder_output(&t) {
+                                        if !p2.starts_with("tests/") { continue; }
+                                        if agent_apply_block(&project_dir, op2, &p2, c2.trim()).is_ok() {
+                                            step_files.push(p2.clone());
+                                            state.files.push(p2);
+                                        }
+                                    }
+                                }
+                                let still: Vec<&String> = needs_tests.iter()
+                                    .filter(|f| !project_dir.join(test_path_for(f)).exists())
+                                    .collect();
+                                if !still.is_empty() {
+                                    agent_log(&project_dir, "test.missing", &format!(
+                                        "step {}: no test produced for {:?} — code is import-verified only", num, still));
                                 }
                             }
 
@@ -4602,7 +4731,7 @@ Use only symbols that actually exist — do not invent APIs.",
                                 let why = refused.join("; ")
                                     .replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
                                 sse_ev(&mut stream, "message", &format!(
-                                    "{{\"content\":\"Step {} failed: no file was written ({}). You can resume from here.\",\"agent\":\"supervisor\"}}",
+                                    "{{\"content\":\"⚠️ Step {} did not complete. No file was written ({}). Your project is unaltered. I recommend resuming; I will retry from this point.\",\"agent\":\"supervisor\"}}",
                                     num, why
                                 )).await;
                                 sse_ev(&mut stream, "plan_failed", &format!(
@@ -4653,6 +4782,15 @@ Use only symbols that actually exist — do not invent APIs.",
                     sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({"text": "→ Running the co-emitted tests…", "agent": "coder"}))).await;
                     let (passed, tsum) = run_project_tests(&project_dir);
                     test_line = format!("\\n\\n{} Tests: {}", if passed { "✅" } else { "❌" }, tsum.replace('\\', "\\\\").replace('"', "\\\""));
+                    if !passed {
+                        // Red tests mean the code does not work. Saying "All done"
+                        // over a failing suite is the same lie as a silent skip.
+                        failed = true;
+                        let esc = tsum.replace('\\', "\\\\").replace('"', "\\\"");
+                        sse_ev(&mut stream, "message", &format!(
+                            "{{\"content\":\"❌ The test suite reports: {esc}. I cannot classify this build as complete. Resuming will direct the coder to the failures.\",\"agent\":\"supervisor\"}}"
+                        )).await;
+                    }
                 }
                 // Make it live: migrate the new tables + re-discover routes (no restart).
                 if !failed && !state.files.is_empty() {
@@ -4713,8 +4851,8 @@ Use only symbols that actually exist — do not invent APIs.",
                                 .replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ");
                             test_line.push_str(&format!("\\n❌ Endpoint check failed: {esc}"));
                             sse_ev(&mut stream, "message", &format!(
-                                "{{\"content\":\"The build wrote code that imports but does NOT run: {}. \
-Nothing was rolled back automatically — the files are on disk so you can inspect them; resume to have the coder repair it.\",\"agent\":\"supervisor\"}}",
+                                "{{\"content\":\"⚠️ The code imports successfully but does not execute: {}. \
+I have left the files in place for your inspection. Resuming will task the coder with a correction.\",\"agent\":\"supervisor\"}}",
                                 esc
                             )).await;
                         }
@@ -6795,6 +6933,51 @@ print('hi')
     fn orm_methods() -> std::collections::BTreeSet<String> {
         ["all", "find_by_id", "save", "delete", "query", "select", "to_dict", "count", "where"]
             .iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn coder_is_framed_as_an_experienced_engineer() {
+        // The prompt used to say only "You are the Coder agent" while every
+        // example in it was Python — nothing told it which language to write.
+        let p = coder_language_preamble();
+        assert!(p.contains("experienced"), "{p}");
+        assert!(p.contains("engineer"), "{p}");
+        // Whatever language is detected, a concrete house style must be stated.
+        assert!(p.contains("House style:"), "{p}");
+        assert!(p.contains("must run"), "correctness over plausibility: {p}");
+    }
+
+    #[test]
+    fn test_path_mirrors_the_module() {
+        assert_eq!(test_path_for("src/app/notify.py"), "tests/test_notify.py");
+        assert_eq!(test_path_for("src/services/billing.py"), "tests/test_billing.py");
+    }
+
+    #[test]
+    fn only_untestable_logic_code_is_flagged() {
+        let dir = make_tmpdir("needs-tests");
+        let files: Vec<String> = [
+            "src/app/notify.py",        // logic → needs a test
+            "src/services/billing.py",  // logic → needs a test
+            "src/routes/orders.py",     // endpoint smoke covers it
+            "src/orm/Order.py",         // generator co-emits a model test
+            "src/app/__init__.py",      // package marker
+            "src/templates/mail.twig",  // not Python
+            "tests/test_orders.py",     // already a test
+        ].iter().map(|s| s.to_string()).collect();
+
+        let need = logic_files_needing_tests(&dir, &files);
+        assert_eq!(need, vec!["src/app/notify.py".to_string(),
+                              "src/services/billing.py".to_string()], "{need:?}");
+    }
+
+    #[test]
+    fn an_existing_test_is_not_requested_again() {
+        let dir = make_tmpdir("has-test");
+        write_file(&dir, "tests/test_notify.py", "def test_x(): assert True\n");
+        let files = vec!["src/app/notify.py".to_string()];
+        assert!(logic_files_needing_tests(&dir, &files).is_empty(),
+            "a module that already has a test must not be re-requested");
     }
 
     #[test]

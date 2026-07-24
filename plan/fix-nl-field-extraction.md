@@ -52,4 +52,35 @@
       **No phantom `Automatically` resource.** `GET /api/products` →
       `{"records":[{"id":1,"name":"Sprocket","price":9.99,...}]}` live.
 
-## Status: ✅ Complete — fields reach the schema; adverbs no longer scaffold.
+## Thread 8b — the plan-driven flow (found by live end-to-end testing)
+The first fix only worked when the ctx reaching `scaffold_first` carried the
+fields. In the REAL Threads-pane flow the planner rewrites the request into
+steps that drop them ("Use the generator to create a model named Customer"),
+keeping the detail only in the plan's goal prose. Live repro: a `customers`
+build produced a bare table (no `email`/`name`) and no route.
+
+- [x] `plan_goal(plan_content)` — the plan's prose lines (not steps/headers).
+- [x] `scaffold_first(project_dir, ctx, goal, files)` — resource/model detection
+      still from the step; **fields fall back to the goal** when the step has none.
+- [x] Same fallback for CRUD intent: a step about routes is promoted when the
+      goal says CRUD (guarded on "route" so unrelated steps never scaffold).
+- [x] Harden `detect_fields` against plan prose — `FIELD_REJECT_WORDS`
+      (generate/create/follow/steps/routes/…), a ≤3-word cap, and an explicit
+      `name:TYPE` branch that only fires for a REAL type (so "follow these
+      steps:" can't become a column).
+- [x] Wired all 3 call sites (`code` action passes `""`; both plan paths pass the goal).
+
+### Verification (live, plan whose STEPS carry no fields and no "crud")
+- [x] 113 Rust tests pass, clippy clean.
+- [x] `POST /execute` → step 1 "4 files scaffolded", step 2 "2 files scaffolded"
+      (was 0 — no route), **10 tests passed**, migrated + reloaded.
+- [x] `customer` table has `email` + `name` — sourced from the GOAL line only.
+- [x] `GET /api/customers` **404 → 200**, returns
+      `{"records":[{"id":1,"email":"ada@example.com","name":"Ada",...}]}`.
+- [x] No phantom resources, no bogus `follow_these_steps` column.
+
+Note: during the first live run `tina4_chat` returned a transient "under
+maintenance" message and the agent correctly SKIPPED those custom-code steps
+rather than crashing. External service state, recovered on its own.
+
+## Status: ✅ Complete — fields + CRUD intent survive the planner's rewrite.

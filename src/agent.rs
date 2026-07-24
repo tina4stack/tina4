@@ -2926,7 +2926,8 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                         // logic the generators can't. This is what makes the DEFAULT
                         // output textbook rather than a hand-rolled route.
                         let scaffolded = if coder_is_tina4chat_pre {
-                            scaffold_first(&project_dir, &ctx, &files)
+                            // ctx IS the whole request here — no separate goal needed.
+                            scaffold_first(&project_dir, &ctx, "", &files)
                         } else {
                             Vec::new()
                         };
@@ -3193,6 +3194,9 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                                 .collect();
 
                             let total_steps = steps.len();
+                            // Requested columns live in the plan's goal prose, not the
+                            // rewritten steps — carry it so scaffolds get their fields.
+                            let goal = plan_goal(&plan_content);
                             sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
                                 "text": format!("Executing plan — {} steps", total_steps),
                                 "agent": "supervisor"
@@ -3227,7 +3231,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                                 // path so plan-driven builds are textbook too.
                                 let mut step_files: Vec<String> = Vec::new();
                                 let scaffolded = if coder_is_tina4chat {
-                                    scaffold_first(&project_dir, step, &[])
+                                    scaffold_first(&project_dir, step, &goal, &[])
                                 } else {
                                     Vec::new()
                                 };
@@ -3620,6 +3624,9 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                 }
 
                 let total = steps.len();
+                // Requested columns live in the plan's goal prose, not the
+                // rewritten steps — carry it so scaffolds get their fields.
+                let goal = plan_goal(&plan_content);
 
                 // Load existing state for resume
                 let state_path = plan_path.with_extension("state.json");
@@ -3694,7 +3701,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                     // model, migration) goes through the framework generators; the
                     // LLM coder authors only custom logic — same as the other paths.
                     let scaffolded = if coder_is_tina4chat {
-                        scaffold_first(&project_dir, &step_text, &[])
+                        scaffold_first(&project_dir, &step_text, &goal, &[])
                     } else {
                         Vec::new()
                     };
@@ -4623,6 +4630,16 @@ const FIELD_STOPWORDS: &[&str] = &[
     "new", "it", "them", "functionality", "interface", "data", "record", "records",
 ];
 
+/// A clause containing any of these is an instruction, not a field list — e.g.
+/// a plan goal reads "…with email and name fields AND GENERATE full CRUD
+/// routes". Without this the trailing prose becomes a bogus column.
+const FIELD_REJECT_WORDS: &[&str] = &[
+    "generate", "create", "build", "add", "use", "using", "follow", "ensure",
+    "test", "tests", "secure", "run", "make", "implement", "include", "step",
+    "steps", "route", "routes", "crud", "resource", "validation", "rules",
+    "authentication", "endpoint", "endpoints", "table", "database", "migration",
+];
+
 /// Infer a generator field type from a field name by keyword. String-ish names
 /// (name/email/phone/code) are forced to `string` BEFORE the numeric checks so
 /// `phone_number` doesn't become an int.
@@ -4714,24 +4731,35 @@ fn detect_fields(ctx: &str) -> Vec<(String, String)> {
         for part in clause.split([',', '&']).flat_map(|p| p.split(" and ")) {
             let part = part.trim();
             if part.is_empty() { continue; }
+            // Only an explicit `name:TYPE` with a REAL type short-circuits here.
+            // Otherwise fall through to the word path so prose that merely
+            // contains a colon ("follow these steps:") still gets rejected.
             if let Some((n, t)) = part.split_once(':') {
-                let name = sanitize_field_name(n);
-                if !name.is_empty() {
-                    let t = t.trim().to_lowercase();
-                    let ty = if VALID_FIELD_TYPES.contains(&t.as_str()) {
-                        t
-                    } else {
-                        infer_field_type(&name).to_string()
-                    };
-                    push(name, ty);
-                    continue;
+                let t = t.trim().to_lowercase();
+                if VALID_FIELD_TYPES.contains(&t.as_str()) {
+                    let name = sanitize_field_name(n);
+                    if !name.is_empty() {
+                        push(name, t);
+                        continue;
+                    }
                 }
             }
-            let cleaned = part
+            let words: Vec<String> = part
                 .split(|c: char| !c.is_ascii_alphanumeric())
-                .filter(|w| !w.is_empty() && !fillers.contains(&w.to_lowercase().as_str()))
-                .collect::<Vec<_>>()
-                .join("_");
+                .filter(|w| !w.is_empty())
+                .map(|w| w.to_lowercase())
+                .collect();
+            // Instruction prose, not a field list — drop the whole clause.
+            if words.iter().any(|w| FIELD_REJECT_WORDS.contains(&w.as_str())) {
+                continue;
+            }
+            let kept: Vec<&String> = words
+                .iter()
+                .filter(|w| !fillers.contains(&w.as_str()))
+                .collect();
+            // Real column names are short; 4+ words means we grabbed a sentence.
+            if kept.is_empty() || kept.len() > 3 { continue; }
+            let cleaned = kept.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("_");
             let name = sanitize_field_name(&cleaned);
             if name.is_empty() { continue; }
             let ty = infer_field_type(&name).to_string();
@@ -4779,7 +4807,33 @@ fn detect_resource_name(ctx: &str) -> Option<String> {
 /// plain custom route/logic), so the caller falls through to the LLM coder —
 /// a plain route is deliberately NOT scaffolded (that would over-build a simple
 /// handler into a full CRUD skeleton).
-fn scaffold_first(project_dir: &Path, ctx: &str, files: &[String]) -> Vec<String> {
+/// The plan's overall goal — the prose lines around the numbered steps. A
+/// planner restates the request there ("…a customers resource with email and
+/// name fields…") while the individual steps drop those details ("create a
+/// model named Customer"), so this is where the requested columns survive.
+fn plan_goal(plan_content: &str) -> String {
+    plan_content
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| {
+            !l.is_empty()
+                && !l.starts_with('#')
+                && !l.starts_with("- ")
+                && !l.starts_with("* ")
+                && !(l.len() > 2
+                    && l.chars().next().is_some_and(|c| c.is_ascii_digit())
+                    && (l.contains(". ") || l.contains(") ")))
+        })
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `goal` is the plan's overall goal (empty when the ctx already IS the whole
+/// request). Resource/model detection always comes from `ctx` (the step), but
+/// fields fall back to the goal so a planner that drops "with email and name"
+/// from a step still produces those columns.
+fn scaffold_first(project_dir: &Path, ctx: &str, goal: &str, files: &[String]) -> Vec<String> {
     let lower = ctx.to_lowercase();
     let has_model = lower.contains("model");
     // Multiple distinct CRUD verbs (create/read/update/delete/list) signal a
@@ -4788,7 +4842,16 @@ fn scaffold_first(project_dir: &Path, ctx: &str, files: &[String]) -> Vec<String
         .iter()
         .filter(|v| lower.contains(**v))
         .count();
-    let wants_crud = lower.contains("crud") || lower.contains("resource") || verb_count >= 2;
+    // The planner drops the CRUD intent from a step ("create routes for the
+    // Customer model") even though the goal says "generate full CRUD routes".
+    // Let the goal promote a step that IS about routes — guarded on "route" so
+    // unrelated steps never scaffold a CRUD surface.
+    let goal_lower = goal.to_lowercase();
+    let goal_wants_crud = goal_lower.contains("crud") || goal_lower.contains("resource");
+    let wants_crud = lower.contains("crud")
+        || lower.contains("resource")
+        || verb_count >= 2
+        || (goal_wants_crud && lower.contains("route"));
 
     if !has_model && !wants_crud {
         return Vec::new();
@@ -4801,8 +4864,12 @@ fn scaffold_first(project_dir: &Path, ctx: &str, files: &[String]) -> Vec<String
 
     // Pull the requested columns out of the NL so the generator writes them into
     // the model AND the migration (and co-emits their tests). Without this the
-    // table is a bare skeleton and "name/price" never reach the schema.
-    let fields = detect_fields(ctx);
+    // table is a bare skeleton and "name/price" never reach the schema. The step
+    // often lost them to the planner's rewrite — fall back to the plan goal.
+    let mut fields = detect_fields(ctx);
+    if fields.is_empty() && !goal.is_empty() {
+        fields = detect_fields(goal);
+    }
     let field_spec = fields
         .iter()
         .map(|(n, t)| format!("{n}:{t}"))
@@ -5707,6 +5774,42 @@ print('hi')
             detect_resource_name("Ensure the framework can handle the product resource automatically"),
             Some("Product".to_string()),
         );
+    }
+
+    #[test]
+    fn detect_fields_rejects_plan_prose() {
+        // Regression: the live planner writes a goal like this. Only email +
+        // name are columns — "generate full CRUD routes" must not become one.
+        let goal = "To build a customers resource with email and name fields \
+                    and generate full CRUD routes, follow these steps:";
+        assert_eq!(detect_fields(goal), vec![
+            ("email".to_string(), "string".to_string()),
+            ("name".to_string(), "string".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn plan_goal_extracts_prose_not_steps() {
+        let plan = "# Build customers\n\
+                    To build a customers resource with email and name fields.\n\
+                    1. Use the generator to create a model named \"Customer\".\n\
+                    2. Generate the routes.\n";
+        let g = plan_goal(plan);
+        assert!(g.contains("email and name"), "goal was: {g}");
+        assert!(!g.contains("Use the generator"), "steps leaked into goal: {g}");
+    }
+
+    #[test]
+    fn plan_goal_supplies_fields_a_step_lost() {
+        // The exact live failure: the step names the model but dropped the
+        // fields; the goal still carries them.
+        let step = "Use the generator to create a model named \"Customer\".";
+        let goal = "To build a customers resource with email and name fields.";
+        assert!(detect_fields(step).is_empty(), "step should carry no fields");
+        assert_eq!(detect_fields(goal), vec![
+            ("email".to_string(), "string".to_string()),
+            ("name".to_string(), "string".to_string()),
+        ]);
     }
 
     #[test]

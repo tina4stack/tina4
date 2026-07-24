@@ -23,5 +23,10 @@ session stays free.
 - New work = new checkboxes in a plan, never an off-plan side-quest.
 
 ## Playground for trying threads live
-`tina4-dev-admin/.playground` (fresh `tina4python init`) + the new agent on 9146
-+ dev-admin on 5173. Build via the Threads pane, watch it run on 7146.
+`tina4-dev-admin/.playground` (fresh `tina4python init`) + the new agent on 9150
++ dev-admin on 5173. Build via the Threads pane, watch it run on 7150.
+
+Ports: agent = framework + 2000 (the `tina4 serve` convention). The playground
+moved off 7146/9146 — another local project holds 7146, and the SPA silently
+proxied to THAT app instead (wrong file tree, wrong routes, confusing results).
+Check `lsof -nP -iTCP:<port> -sTCP:LISTEN` before assuming a port is yours.

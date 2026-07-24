@@ -1568,6 +1568,23 @@ fn invented_model_calls(content: &str, known: &std::collections::BTreeSet<String
     bad
 }
 
+/// Undo a write: restore the pre-write backup, or delete the file when the
+/// coder created it from nothing. Used when a hallucinated change cannot be
+/// repaired — the project is left exactly as it was, never half-broken.
+pub fn rollback_write(project_dir: &Path, rel_path: &str, backup: Option<&str>) -> bool {
+    let target = project_dir.join(rel_path);
+    let ok = match backup {
+        Some(b) => fs::copy(project_dir.join(b), &target).is_ok(),
+        None => !target.exists() || fs::remove_file(&target).is_ok(),
+    };
+    agent_log(
+        project_dir,
+        if ok { "write.rolled_back" } else { "write.rollback_failed" },
+        &format!("{rel_path} (backup: {})", backup.unwrap_or("none — file removed")),
+    );
+    ok
+}
+
 /// How a coder-emitted block is applied to disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteOp {
@@ -1810,6 +1827,50 @@ pub fn agent_write_file(project_dir: &Path, rel_path: &str, content: &str) -> Re
 /// Python file. Returns Some(error) on import failure, None on
 /// success. Skips non-Python files, files outside src/, and
 /// __init__.py / test_ / conftest.py (different loading patterns).
+/// An interpreter that can actually `import tina4_python`, so import
+/// verification is meaningful. Tries the project venv, then the interpreter
+/// behind the installed `tina4python` console script (uv-tool installs put it
+/// outside any venv), then PATH. Returns None when the framework can't be
+/// imported anywhere — the caller must then treat the result as UNVERIFIED
+/// rather than as success.
+fn project_python(project_dir: &Path) -> Option<std::path::PathBuf> {
+    let mut candidates: Vec<std::path::PathBuf> = vec![
+        project_dir.join(".venv").join("bin").join("python3"),
+        project_dir.join(".venv").join("bin").join("python"),
+    ];
+    // Shebang of the `tina4python` launcher → the env the framework lives in.
+    if let Ok(out) = std::process::Command::new("sh")
+        .args(["-c", "command -v tina4python"])
+        .output()
+    {
+        let launcher = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !launcher.is_empty() {
+            if let Ok(text) = fs::read_to_string(&launcher) {
+                if let Some(first) = text.lines().next() {
+                    if let Some(bin) = first.strip_prefix("#!") {
+                        candidates.push(std::path::PathBuf::from(bin.trim()));
+                    }
+                }
+            }
+        }
+    }
+    candidates.push("python3".into());
+    candidates.push("python".into());
+
+    for py in candidates {
+        if let Ok(o) = std::process::Command::new(&py)
+            .args(["-c", "import tina4_python"])
+            .current_dir(project_dir)
+            .output()
+        {
+            if o.status.success() {
+                return Some(py);
+            }
+        }
+    }
+    None
+}
+
 fn verify_python_import(project_dir: &Path, rel_path: &str) -> Option<String> {
     if !rel_path.ends_with(".py") || !rel_path.starts_with("src/") {
         return None;
@@ -1819,10 +1880,18 @@ fn verify_python_import(project_dir: &Path, rel_path: &str) -> Option<String> {
         return None;
     }
     let module = rel_path.trim_end_matches(".py").replace('/', ".");
-    let venv_py = project_dir.join(".venv").join("bin").join("python3");
-    if !venv_py.exists() {
-        return None;
-    }
+    // Any interpreter that can import the FRAMEWORK — otherwise every file that
+    // imports tina4_python would look broken. Previously this required
+    // .venv/bin/python3 and returned None ("no error") when absent, so on a
+    // project without a venv a hallucinated import silently passed.
+    let venv_py = match project_python(project_dir) {
+        Some(p) => p,
+        None => {
+            agent_log(project_dir, "verify.skipped",
+                &format!("{rel_path}: no interpreter can import tina4_python — import NOT verified"));
+            return None;
+        }
+    };
     use std::process::{Command, Stdio};
     use std::time::Duration;
     let mut child = Command::new(&venv_py)
@@ -4172,6 +4241,8 @@ and emit the same `## FILE:`/`## APPEND:` header.",
 
                             let mut step_files = Vec::new();
                             let mut refused: Vec<String> = Vec::new();
+                            // (path, backup, import_error) for rollback + repair.
+                            let mut written: Vec<(String, Option<String>, Option<String>)> = Vec::new();
                             if !invented.is_empty() {
                                 // Still invented after the corrective retry — do NOT
                                 // write code that is known not to run.
@@ -4190,9 +4261,16 @@ and emit the same `## FILE:`/`## APPEND:` header.",
                                     // writes to .tina4/agent.log AND stderr, so the refusal
                                     // is visible without an SSE event.
                                     match agent_apply_block(&project_dir, op, file_path, content.trim()) {
-                                        Ok(_) => {
+                                        Ok(stats) => {
                                             step_files.push(file_path.to_string());
                                             state.files.push(file_path.to_string());
+                                            // Remember how to undo this write, and
+                                            // whether the file actually imports.
+                                            written.push((
+                                                file_path.to_string(),
+                                                stats.backup_path.clone(),
+                                                stats.import_error.clone(),
+                                            ));
                                         }
                                         Err(reason) => {
                                             agent_log(&project_dir, "step.skipped",
@@ -4200,6 +4278,62 @@ and emit the same `## FILE:`/`## APPEND:` header.",
                                             refused.push(reason);
                                         }
                                     }
+                                }
+                            }
+
+                            // RECOVER FROM A HALLUCINATION. The file is on disk but
+                            // does not import — an invented API, a bad import, a
+                            // wrong class. Hand the coder the REAL interpreter error
+                            // and let it repair; if it still cannot, roll every file
+                            // in this step back so the project is left working
+                            // rather than half-broken.
+                            let broken: Vec<String> = written.iter()
+                                .filter_map(|(p, _, e)| e.as_ref().map(|e| format!("{p}: {e}")))
+                                .collect();
+                            if !broken.is_empty() {
+                                agent_log(&project_dir, "coder.import_broken",
+                                    &format!("step {}: {}", num, broken.join(" | ")));
+                                sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({
+                                    "text": format!("Step {} — code does not import; repairing", num),
+                                    "agent": "coder"}))).await;
+                                let repair = format!(
+                                    "{}\n\nThe file you just wrote does NOT import. The interpreter said:\n{}\n\nFix it and re-emit the COMPLETE corrected file under the same `## FILE:` header. \
+Use only symbols that actually exist — do not invent APIs.",
+                                    coder_msg_for_retry, broken.join("\n"),
+                                );
+                                let repair_msgs = vec![LlmMessage { role: "user".into(), content: repair }];
+                                let repaired_ok = match llm_call(&coder_model, coder_prompt, &repair_msgs, 4096, 0.1).await {
+                                    Ok(fix) => {
+                                        let fix = if !fix.contains("## FILE:") && !fix.contains("## APPEND:") {
+                                            match forced_path {
+                                                Some(ref p) => format!("## FILE: {p}\n{fix}"),
+                                                None => fix,
+                                            }
+                                        } else { fix };
+                                        let mut all_ok = true;
+                                        for (op2, p2, c2) in parse_coder_output(&fix) {
+                                            match agent_apply_block(&project_dir, op2, &p2, c2.trim()) {
+                                                Ok(st) => { if st.import_error.is_some() { all_ok = false; } }
+                                                Err(_) => { all_ok = false; }
+                                            }
+                                        }
+                                        all_ok
+                                    }
+                                    Err(_) => false,
+                                };
+                                if !repaired_ok {
+                                    for (p, backup, _) in &written {
+                                        rollback_write(&project_dir, p, backup.as_deref());
+                                    }
+                                    step_files.clear();
+                                    refused.push(format!(
+                                        "code did not import and could not be repaired ({}) — rolled back",
+                                        broken.join("; ")
+                                    ));
+                                } else {
+                                    sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({
+                                        "text": format!("Step {} — repaired; imports cleanly now", num),
+                                        "agent": "coder"}))).await;
                                 }
                             }
 
@@ -6349,6 +6483,36 @@ print('hi')
     fn orm_methods() -> std::collections::BTreeSet<String> {
         ["all", "find_by_id", "save", "delete", "query", "select", "to_dict", "count", "where"]
             .iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn rollback_restores_the_previous_working_file() {
+        // Recovery: when a hallucinated change can't be repaired, the project
+        // must be left exactly as it was — not half-broken.
+        let dir = make_tmpdir("rollback-restore");
+        let good = "async def list_orders(request, response):\n    pass\n";
+        write_file(&dir, "src/routes/orders.py", good);
+
+        let stats = agent_write_file(
+            &dir, "src/routes/orders.py",
+            "async def list_orders(request, response):\n    pass\n\nasync def broken(request, response):\n    pass\n",
+        ).unwrap();
+        assert!(stats.backup_path.is_some(), "a pre-write backup is required to roll back");
+
+        assert!(rollback_write(&dir, "src/routes/orders.py", stats.backup_path.as_deref()));
+        let restored = std::fs::read_to_string(dir.join("src/routes/orders.py")).unwrap();
+        assert_eq!(restored, good, "file should be byte-identical to the pre-write version");
+    }
+
+    #[test]
+    fn rollback_removes_a_file_that_did_not_exist_before() {
+        let dir = make_tmpdir("rollback-new");
+        let stats = agent_write_file(&dir, "src/routes/brand_new.py", "x = 1\n").unwrap();
+        assert!(stats.backup_path.is_none(), "no prior file → no backup");
+        assert!(dir.join("src/routes/brand_new.py").exists());
+
+        assert!(rollback_write(&dir, "src/routes/brand_new.py", None));
+        assert!(!dir.join("src/routes/brand_new.py").exists(), "a newly-created file should be removed");
     }
 
     #[test]

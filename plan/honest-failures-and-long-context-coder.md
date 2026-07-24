@@ -60,9 +60,31 @@ got the notice while small probes always worked.
       name to driver insert/update/delete — a hand-set
       `table_name = "order"` would still break. Proper identifier quoting in
       the ORM/drivers remains open (bigger, dialect-aware change).
-- [ ] **`long_context` invents route-param file paths** — it tried to write
-      `src/routes/orders/{id}.py` instead of using tina4's `@get("/api/orders/{id}")`
-      decorator convention. The path guard correctly refused it. Needs coder
-      prompt/grounding guidance on tina4 routing.
+- [x] **Routing/file conventions** — FIXED (`774dfa7`). `TINA4_CODER_CONTRACT`
+      + guards. Both models now emit `src/routes/orders.py` with
+      `@get("/api/orders/{id}")`. (long_context had been writing FastAPI;
+      tina4_chat had been writing into `python/tina4_python/cli/__init__.py`.)
+- [x] **Edits rewrote whole files and lost code** — FIXED (`2a73ffe`).
+      Patch-based `## APPEND:`, concatenation done by the agent, plus intent
+      inference when the model ignores the instruction. Verified: 5 → 6
+      handlers, none lost.
+- [x] **Invented ORM methods** — FIXED (`7da4f41`). Verified against the
+      installed framework + one corrective retry.
+
+## Still open
+- [ ] **Misuse of a REAL method isn't caught.** Symbol verification proves a
+      method exists, not that it's called correctly. Live: the retry produced
+      `Order.select("SUM(total) as total_revenue").first()` — `select` is real
+      but takes a COMPLETE SQL query (`near "SUM": syntax error`), and `.first()`
+      is not a list method. Static checking can't close this; the fix is
+      EXECUTION — require a co-emitted test for an appended handler, or smoke
+      the new endpoint after reload and fail the step on a 500.
+- [ ] **Reload does not re-import EDITED modules.** `POST /__dev/api/reload`
+      discovers NEW route files but an already-imported module stays cached in
+      `sys.modules`, so an edited handler keeps serving the OLD code (observed:
+      the endpoint kept raising `'Order' has no attribute 'sum'` after the file
+      no longer said `sum`). "live (no restart)" is therefore only true for NEW
+      files. Framework fix: drop/reload changed modules on reload.
+- [ ] ORM identifier quoting, so a hand-set `table_name = "order"` works.
 
 ## Status: ✅ Complete for the reporting + coder switch; two findings logged above.

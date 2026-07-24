@@ -15,4 +15,7 @@ ENV PATH="/app/.venv/bin:$PATH" \
 COPY --from=deps /app/.venv /app/.venv
 COPY . /app
 EXPOSE 7146
-CMD ["python", "-m", "tina4_python.cli", "serve", "--production"]
+# The console script declared by tina4-python ([project.scripts]
+# tina4python = "tina4_python.cli:main"). NOT `python -m tina4_python.cli`:
+# tina4_python.cli is a PACKAGE with no __main__.py, so -m cannot execute it.
+CMD ["tina4python", "serve", "--production"]

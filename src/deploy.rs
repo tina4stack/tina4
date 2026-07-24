@@ -221,4 +221,119 @@ mod tests {
         assert!(Target::parse("kubernetes").is_none());
         assert!(Target::parse("").is_none());
     }
+
+    // ── Dockerfile CMD contract ───────────────────────────────────────────
+    //
+    // These templates are baked in with include_str!, so nothing at build time
+    // notices when a framework's entry point moves. That is exactly how
+    // `tina4 deploy docker` shipped a Python image whose CMD could never
+    // execute: tina4_python/cli.py (a MODULE, where `python -m` is valid)
+    // became tina4_python/cli/ (a PACKAGE with no __main__.py) in the v3
+    // restructure, and the hard-coded string never followed. The container died
+    // instantly with "'tina4_python.cli' is a package and cannot be directly
+    // executed" and no gate anywhere caught it.
+    //
+    // Each test below encodes one way a generated CMD can be un-runnable. They
+    // are pure string assertions over templates we own -- no dependency, no
+    // double. The docker-build job in CI is the end-to-end partner to these.
+
+    fn all_dockerfiles() -> [(&'static str, &'static str); 4] {
+        [
+            ("python", DOCKERFILE_PYTHON),
+            ("php", DOCKERFILE_PHP),
+            ("ruby", DOCKERFILE_RUBY),
+            ("nodejs", DOCKERFILE_NODEJS),
+        ]
+    }
+
+    fn cmd_line(dockerfile: &str) -> &str {
+        dockerfile
+            .lines()
+            .find(|l| l.starts_with("CMD "))
+            .expect("every Dockerfile template must declare a CMD")
+    }
+
+    /// `python -m <pkg>` only works when <pkg> is a module, or a package with a
+    /// __main__.py. Naming a package without one is silently accepted at
+    /// generate time and fails at container start, so ban the form outright.
+    #[test]
+    fn no_dash_m_on_a_package() {
+        for (lang, body) in all_dockerfiles() {
+            let cmd = cmd_line(body);
+            assert!(
+                !cmd.contains("\"-m\""),
+                "{lang}: CMD uses `python -m <pkg>`, which cannot execute a \
+                 package without __main__.py. Use the console script instead: {cmd}"
+            );
+        }
+    }
+
+    /// tsx is a devDependency. The production stage installs with
+    /// `npm ci --omit=dev`, which strips it, so `npx tsx` would have to fetch
+    /// tsx off the network at container start (and fails when there isn't any).
+    #[test]
+    fn no_dev_only_runner_in_production_cmd() {
+        for (lang, body) in all_dockerfiles() {
+            let cmd = cmd_line(body);
+            assert!(
+                !cmd.contains("\"tsx\""),
+                "{lang}: CMD invokes tsx, a devDependency stripped by the \
+                 production install: {cmd}"
+            );
+        }
+    }
+
+    /// A CMD must name the entry point the framework actually publishes. These
+    /// are the verified-real ones: the tina4python console script
+    /// ([project.scripts]), composer's vendor/bin/tina4php symlink, the
+    /// tina4ruby gem exe, and the tina4nodejs package `bin`.
+    #[test]
+    fn cmd_names_a_real_published_entry_point() {
+        let expected = [
+            ("python", "tina4python"),
+            ("php", "vendor/bin/tina4php"),
+            ("ruby", "tina4ruby"),
+            ("nodejs", "tina4nodejs"),
+        ];
+        for (lang, entry) in expected {
+            let body = all_dockerfiles()
+                .into_iter()
+                .find(|(l, _)| *l == lang)
+                .map(|(_, b)| b)
+                .unwrap();
+            let cmd = cmd_line(body);
+            assert!(
+                cmd.contains(entry),
+                "{lang}: CMD does not name the published entry point `{entry}`: {cmd}"
+            );
+        }
+    }
+
+    /// A deploy image is production. Every CMD must ask for it, or the server
+    /// boots in dev mode (watchers, dev toolbar, no production HTTP server).
+    #[test]
+    fn every_cmd_requests_production() {
+        for (lang, body) in all_dockerfiles() {
+            let cmd = cmd_line(body);
+            assert!(
+                cmd.contains("--production"),
+                "{lang}: CMD never requests production mode: {cmd}"
+            );
+        }
+    }
+
+    /// The frameworks refuse to boot unless launched by the `tina4` client,
+    /// which is not in the image. TINA4_OVERRIDE_CLIENT is the documented
+    /// escape hatch, so every template has to set it or the container cannot
+    /// start at all.
+    #[test]
+    fn every_template_sets_override_client() {
+        for (lang, body) in all_dockerfiles() {
+            assert!(
+                body.contains("TINA4_OVERRIDE_CLIENT=true"),
+                "{lang}: template never sets TINA4_OVERRIDE_CLIENT=true, so the \
+                 framework will refuse to boot without the tina4 client"
+            );
+        }
+    }
 }

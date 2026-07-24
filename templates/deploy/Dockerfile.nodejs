@@ -13,4 +13,9 @@ ENV NODE_ENV=production \
 COPY --from=deps /app/node_modules /app/node_modules
 COPY . /app
 EXPOSE 7148
-CMD ["npx", "tsx", "packages/cli/src/bin.ts", "serve", "--production"]
+# The `bin` declared by the tina4-nodejs package. NOT
+# `npx tsx packages/cli/src/bin.ts`: that path exists only inside the
+# tina4-nodejs monorepo (an installed project has node_modules/tina4-nodejs/),
+# and tsx is a devDependency that `npm ci --omit=dev` strips, so npx would
+# have to fetch it off the network at container start.
+CMD ["npx", "tina4nodejs", "serve", "--production"]

@@ -18,4 +18,8 @@ COPY . /app
 ENV TINA4_OVERRIDE_CLIENT=true \
     TINA4_DEBUG=false
 EXPOSE 7145
-CMD ["php", "index.php", "0.0.0.0:7145"]
+# Drive the framework CLI, which really parses --host/--port/--production.
+# `php index.php <host:port>` does NOT work: index.php calls $app->run(),
+# whose signature is run(?string \$host, int \$port) -- it never reads argv,
+# so the address was silently ignored and production mode never engaged.
+CMD ["php", "vendor/bin/tina4php", "serve", "--host", "0.0.0.0", "--port", "7145", "--production"]

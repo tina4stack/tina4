@@ -1476,6 +1476,98 @@ fn defined_symbols(src: &str) -> std::collections::BTreeSet<String> {
     out
 }
 
+/// Safety net if the installed framework can't be introspected. Kept small and
+/// obviously-core; the authoritative list comes from `known_orm_methods`.
+const ORM_CORE_METHODS: &[&str] = &[
+    "all", "count", "create", "create_table", "delete", "exists", "find",
+    "find_by_id", "find_or_fail", "load", "query", "save", "select",
+    "select_one", "to_array", "to_dict", "to_json", "to_list", "where",
+];
+
+/// Public methods the ORM base class ACTUALLY exposes, introspected from the
+/// installed framework so the list can never drift from the code. Falls back to
+/// ORM_CORE_METHODS when no interpreter can import the framework.
+fn known_orm_methods(project_dir: &Path) -> std::collections::BTreeSet<String> {
+    const SNIPPET: &str =
+        "from tina4_python.orm import ORM; print(' '.join(m for m in dir(ORM) if not m.startswith('_')))";
+    for py in [".venv/bin/python", "python3", "python"] {
+        let bin = if py.starts_with('.') {
+            project_dir.join(py)
+        } else {
+            std::path::PathBuf::from(py)
+        };
+        if let Ok(o) = std::process::Command::new(&bin)
+            .arg("-c")
+            .arg(SNIPPET)
+            .current_dir(project_dir)
+            .output()
+        {
+            if o.status.success() {
+                let set: std::collections::BTreeSet<String> = String::from_utf8_lossy(&o.stdout)
+                    .split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect();
+                if set.len() > 5 {
+                    return set;
+                }
+            }
+        }
+    }
+    ORM_CORE_METHODS.iter().map(|s| s.to_string()).collect()
+}
+
+/// Calls on an app model that the ORM does not define — the coder wrote
+/// `Order.sum("total")` when there is no `sum`, so the route registered and then
+/// 500'd at runtime. Only names imported from `src.orm.` are treated as models,
+/// so ordinary Python (`json.dumps`) is never flagged.
+fn invented_model_calls(content: &str, known: &std::collections::BTreeSet<String>) -> Vec<String> {
+    let mut models: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for line in content.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("from src.orm.") {
+            if let Some((_, imported)) = rest.split_once(" import ") {
+                for name in imported.split(',') {
+                    let n = name.trim().trim_end_matches(&[')', '\\'][..]).trim();
+                    if !n.is_empty() && n.chars().next().is_some_and(|c| c.is_uppercase()) {
+                        models.insert(n.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if models.is_empty() {
+        return Vec::new();
+    }
+    let mut bad: Vec<String> = Vec::new();
+    for line in content.lines() {
+        let bytes = line.as_bytes();
+        for m in &models {
+            let pat = format!("{m}.");
+            let mut from = 0usize;
+            while let Some(pos) = line[from..].find(&pat) {
+                let at = from + pos;
+                // Must be a standalone identifier (not `MyOrder.`).
+                let prev_ok = at == 0
+                    || !(bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_');
+                let start = at + pat.len();
+                let method: String = line[start..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                let is_call = line[start + method.len()..].starts_with('(');
+                if prev_ok && is_call && !method.is_empty() && !known.contains(&method) {
+                    let call = format!("{m}.{method}()");
+                    if !bad.contains(&call) {
+                        bad.push(call);
+                    }
+                }
+                from = start.max(at + 1);
+            }
+        }
+    }
+    bad
+}
+
 /// How a coder-emitted block is applied to disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteOp {
@@ -3999,6 +4091,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                     } else {
                         coder_msg
                     };
+                    let coder_msg_for_retry = coder_msg.clone();
                     let coder_msgs = vec![LlmMessage { role: "user".into(), content: coder_msg }];
                     let coder_result = if coder_is_mcp {
                         llm_call(&coder_model, coder_prompt, &coder_msgs, 4096, 0.1).await
@@ -4034,9 +4127,59 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                             } else {
                                 code_output
                             };
+
+                            // SYMBOL VERIFY — the coder invents ORM methods
+                            // (`Order.sum("total")` when the ORM has no `sum`), which
+                            // lands code that registers then 500s. Check against the
+                            // INSTALLED framework and give it one corrective retry
+                            // naming the real methods before refusing.
+                            let known_methods = known_orm_methods(&project_dir);
+                            let mut code_output = code_output;
+                            let mut invented = invented_model_calls(&code_output, &known_methods);
+                            if !invented.is_empty() {
+                                agent_log(&project_dir, "coder.invented_symbols",
+                                    &format!("step {}: {}", num, invented.join(", ")));
+                                sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({
+                                    "text": format!("Step {} — retrying: {} do not exist", num, invented.join(", ")),
+                                    "agent": "coder"}))).await;
+                                let fix_msg = format!(
+                                    "{}\n\nYour previous answer called {} — {} do NOT exist on a Tina4 ORM model. \
+The ONLY methods available are: {}. Rewrite using those (or a raw `<Model>.query(...)`/`select(...)`), \
+and emit the same `## FILE:`/`## APPEND:` header.",
+                                    coder_msg_for_retry,
+                                    invented.join(", "),
+                                    if invented.len() == 1 { "it does" } else { "they do" },
+                                    known_methods.iter().cloned().collect::<Vec<_>>().join(", "),
+                                );
+                                let retry_msgs = vec![LlmMessage { role: "user".into(), content: fix_msg }];
+                                if let Ok(fixed) = llm_call(&coder_model, coder_prompt, &retry_msgs, 4096, 0.1).await {
+                                    let fixed = if !fixed.contains("## FILE:") && !fixed.contains("## APPEND:") {
+                                        match forced_path {
+                                            Some(ref p) => format!("## FILE: {p}\n{fixed}"),
+                                            None => fixed,
+                                        }
+                                    } else { fixed };
+                                    let still = invented_model_calls(&fixed, &known_methods);
+                                    if still.is_empty() {
+                                        code_output = fixed;
+                                        invented.clear();
+                                    } else {
+                                        invented = still;
+                                    }
+                                }
+                            }
+                            let code_output = code_output;
+
                             let mut step_files = Vec::new();
                             let mut refused: Vec<String> = Vec::new();
-                            for (op, file_path, content) in parse_coder_output(&code_output) {
+                            if !invented.is_empty() {
+                                // Still invented after the corrective retry — do NOT
+                                // write code that is known not to run.
+                                refused.push(format!(
+                                    "uses non-existent ORM method(s): {}", invented.join(", ")
+                                ));
+                            }
+                            for (op, file_path, content) in parse_coder_output(if invented.is_empty() { &code_output } else { "" }) {
                                 let file_path = file_path.as_str();
                                 let content = content.as_str();
                                 {
@@ -6201,6 +6344,56 @@ print('hi')
             detect_resource_name("Ensure the framework can handle the product resource automatically"),
             Some("Product".to_string()),
         );
+    }
+
+    fn orm_methods() -> std::collections::BTreeSet<String> {
+        ["all", "find_by_id", "save", "delete", "query", "select", "to_dict", "count", "where"]
+            .iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn catches_the_invented_orm_method() {
+        // The live failure: Order.sum("total") — the ORM has no `sum`, so the
+        // route registered and then 500'd.
+        let src = "\
+from src.orm.Order import Order\n\
+async def order_revenue(request, response):\n\
+    return response(Order.sum(\"total\"))\n";
+        let bad = invented_model_calls(src, &orm_methods());
+        assert_eq!(bad, vec!["Order.sum()".to_string()], "{bad:?}");
+    }
+
+    #[test]
+    fn real_orm_calls_are_not_flagged() {
+        let src = "\
+from src.orm.Order import Order\n\
+async def get_order(request, response):\n\
+    order = Order.find_by_id(request.params[\"id\"])\n\
+    rows = Order.all()\n\
+    return response(order.to_dict())\n";
+        assert!(invented_model_calls(src, &orm_methods()).is_empty());
+    }
+
+    #[test]
+    fn non_model_calls_are_ignored() {
+        // Ordinary Python must never be flagged — only names imported from src.orm.
+        let src = "\
+import json\n\
+from src.orm.Order import Order\n\
+async def h(request, response):\n\
+    payload = json.dumps({})\n\
+    text = payload.strip()\n\
+    return response(Order.all())\n";
+        assert!(invented_model_calls(src, &orm_methods()).is_empty());
+    }
+
+    #[test]
+    fn a_similarly_named_class_is_not_confused_for_the_model() {
+        let src = "\
+from src.orm.Order import Order\n\
+x = MyOrder.sum(1)\n\
+y = Order.all()\n";
+        assert!(invented_model_calls(src, &orm_methods()).is_empty(), "MyOrder must not match Order");
     }
 
     #[test]

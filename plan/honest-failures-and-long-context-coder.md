@@ -50,12 +50,16 @@ got the notice while small probes always worked.
 - [x] `tina4python test` exit code: installed tool was stale (exited 0 on a red
       suite); reinstalled → now exits 1. Agent no longer trusts it either.
 
-## Open findings (surfaced by the honest reporting — NOT yet fixed)
-- [ ] **`order` is a SQL reserved word.** The generator emits
-      `CREATE TABLE IF NOT EXISTS order (...)` unquoted → syntax error, table
-      never created, endpoint 404. Needs identifier quoting (or pluralised
-      table names) in tina4-python's generator. Fields themselves were correct
-      (`total REAL, status VARCHAR(255)`).
+## Open findings (surfaced by the honest reporting)
+- [x] **`order` is a SQL reserved word** — FIXED in tina4-python `9563815`.
+      `_to_table()` now pluralises a reserved name (Order → orders); every
+      generator routes through it so model/migration/routes/tests agree.
+      Verified: table creates, suite 15 passed (was 4 failed),
+      `GET /api/orders` → `{"id":1,"total":99.5,"status":"paid"}`.
+      Note the ORM still interpolates table names UNQUOTED and passes the raw
+      name to driver insert/update/delete — a hand-set
+      `table_name = "order"` would still break. Proper identifier quoting in
+      the ORM/drivers remains open (bigger, dialect-aware change).
 - [ ] **`long_context` invents route-param file paths** — it tried to write
       `src/routes/orders/{id}.py` instead of using tina4's `@get("/api/orders/{id}")`
       decorator convention. The path guard correctly refused it. Needs coder

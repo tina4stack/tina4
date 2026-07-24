@@ -95,7 +95,11 @@ smoke matched reality exactly (2×200, 1×500).
   purged before re-import). Live: renamed path → new 200, old path 404.
 
 ## Still open
-- [ ] Smoke covers GET only — POST/PUT/DELETE need an auth token and mutate.
+- [x] **Write-route smoke** — DONE (`39a454f`). Token minted via the framework's
+      own `get_token` signed with the project `TINA4_SECRET`; POST→PUT→DELETE
+      round-trip is self-cleaning (rows 1→1). A 401 is reported as a smoke-setup
+      problem, not a code defect. Also fixed a connection-reuse flake (undrained
+      response body left a stale pooled socket, so DELETE "failed to send").
 - [ ] Non-route code (helpers/services) is only import-verified; proving it RUNS
       needs a co-emitted test.
 - [x] **ORM identifier quoting** — DONE in tina4-python `7d87a28`.

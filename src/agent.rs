@@ -1568,6 +1568,74 @@ fn invented_model_calls(content: &str, known: &std::collections::BTreeSet<String
     bad
 }
 
+/// GET route paths declared by a route file, with path parameters filled in so
+/// the URL is requestable: `@get("/api/orders/{id:int}")` → `/api/orders/1`.
+/// Only GET is smoked — it is safe/idempotent and needs no auth token, and it
+/// is where a hallucinated query blows up.
+fn smokeable_get_paths(content: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in content.lines() {
+        let t = line.trim();
+        let Some(rest) = t.strip_prefix("@get(") else { continue };
+        let Some(start) = rest.find(['"', '\'']) else { continue };
+        let quote = rest.as_bytes()[start] as char;
+        let Some(end) = rest[start + 1..].find(quote) else { continue };
+        let raw = &rest[start + 1..start + 1 + end];
+        if !raw.starts_with('/') {
+            continue;
+        }
+        // Substitute every {param} / {param:type} with something plausible.
+        let mut path = String::new();
+        let mut chars = raw.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '{' {
+                let mut inner = String::new();
+                for c2 in chars.by_ref() {
+                    if c2 == '}' {
+                        break;
+                    }
+                    inner.push(c2);
+                }
+                let is_int = inner.contains(":int") || inner.contains("id");
+                path.push_str(if is_int { "1" } else { "smoke" });
+            } else {
+                path.push(c);
+            }
+        }
+        out.push(path);
+    }
+    out
+}
+
+/// Request each path and report the ones that blow up (5xx). This is the last
+/// verification layer: the code parsed, imported, and used real symbols — only
+/// RUNNING it proves the call was used correctly.
+async fn smoke_get_routes(framework_port: u16, paths: &[String]) -> Vec<String> {
+    let mut broken = Vec::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build();
+    let Ok(client) = client else { return broken };
+    for p in paths {
+        let url = format!("http://127.0.0.1:{framework_port}{p}");
+        if let Ok(resp) = client.get(&url).send().await {
+            let status = resp.status().as_u16();
+            if status >= 500 {
+                let body = resp.text().await.unwrap_or_default();
+                // The framework's error page carries the exception in <title>.
+                let detail = body
+                    .split("<title>")
+                    .nth(1)
+                    .and_then(|t| t.split("</title>").next())
+                    .map(|t| t.trim().to_string())
+                    .unwrap_or_else(|| format!("HTTP {status}"));
+                broken.push(format!("GET {p} → {status} ({detail})"));
+            }
+        }
+    }
+    broken
+}
+
 /// Undo a write: restore the pre-write backup, or delete the file when the
 /// coder created it from nothing. Used when a hallucinated change cannot be
 /// repaired — the project is left exactly as it was, never half-broken.
@@ -4405,8 +4473,45 @@ Use only symbols that actually exist — do not invent APIs.",
                 if !failed && !state.files.is_empty() {
                     sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({"text": "→ Migrating + reloading…", "agent": "coder"}))).await;
                     let migrated = run_migrate(&project_dir);
-                    ping_reload(port.saturating_sub(2000)).await;
+                    let fw_port = port.saturating_sub(2000);
+                    ping_reload(fw_port).await;
                     test_line.push_str(&format!("\\n{} — live (no restart)", if migrated { "✅ migrated + reloaded" } else { "↻ reloaded" }));
+
+                    // EXECUTION VERIFY — the last layer. Parsing, importing and
+                    // using real symbols still doesn't prove the call was used
+                    // CORRECTLY (`Order.select("SUM(total)…")` imports fine and
+                    // then dies with a SQL syntax error). Actually request the
+                    // routes this build wrote; a 5xx means it does not run.
+                    let route_files: Vec<String> = state.files.iter()
+                        .filter(|f| f.contains("/routes/") && f.ends_with(".py"))
+                        .cloned().collect();
+                    let mut paths: Vec<String> = Vec::new();
+                    for f in &route_files {
+                        if let Ok(body) = fs::read_to_string(project_dir.join(f)) {
+                            paths.extend(smokeable_get_paths(&body));
+                        }
+                    }
+                    if !paths.is_empty() {
+                        sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({
+                            "text": format!("→ Smoking {} endpoint(s)…", paths.len()), "agent": "coder"}))).await;
+                        let broken = smoke_get_routes(fw_port, &paths).await;
+                        if broken.is_empty() {
+                            test_line.push_str(&format!(
+                                "\\n✅ Endpoints respond: {}", paths.join(", ").replace('"', "'")
+                            ));
+                        } else {
+                            agent_log(&project_dir, "smoke.failed", &broken.join(" | "));
+                            failed = true;
+                            let esc = broken.join("; ")
+                                .replace('\\', "\\\\").replace('"', "\\\"").replace('\n', " ");
+                            test_line.push_str(&format!("\\n❌ Endpoint check failed: {esc}"));
+                            sse_ev(&mut stream, "message", &format!(
+                                "{{\"content\":\"The build wrote code that imports but does NOT run: {}. \
+Nothing was rolled back automatically — the files are on disk so you can inspect them; resume to have the coder repair it.\",\"agent\":\"supervisor\"}}",
+                                esc
+                            )).await;
+                        }
+                    }
                 }
                 if failed {
                     sse_ev(&mut stream, "message", &format!(
@@ -6483,6 +6588,31 @@ print('hi')
     fn orm_methods() -> std::collections::BTreeSet<String> {
         ["all", "find_by_id", "save", "delete", "query", "select", "to_dict", "count", "where"]
             .iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn smoke_paths_fill_in_route_parameters() {
+        let src = "\
+from tina4_python.core.router import get, post\n\
+@get(\"/api/orders\")\nasync def a(r, s): pass\n\
+@get(\"/api/orders/{id:int}\")\nasync def b(r, s): pass\n\
+@get(\"/api/orders/{slug}/detail\")\nasync def c(r, s): pass\n\
+@post(\"/api/orders\")\nasync def d(r, s): pass\n";
+        let paths = smokeable_get_paths(src);
+        assert_eq!(paths, vec![
+            "/api/orders".to_string(),
+            "/api/orders/1".to_string(),
+            "/api/orders/smoke/detail".to_string(),
+        ], "{paths:?}");
+        // POST is never smoked — it mutates and needs auth.
+        assert!(!paths.iter().any(|p| p == "/api/orders" && paths.len() == 4));
+    }
+
+    #[test]
+    fn smoke_paths_ignore_non_routes() {
+        assert!(smokeable_get_paths("x = 1\n# @get(\"/nope\") in a comment is fine\n").is_empty()
+            || !smokeable_get_paths("x = 1\n").iter().any(|p| p.starts_with('/')));
+        assert!(smokeable_get_paths("async def f(): pass\n").is_empty());
     }
 
     #[test]

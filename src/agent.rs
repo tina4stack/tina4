@@ -1607,6 +1607,190 @@ fn smokeable_get_paths(content: &str) -> Vec<String> {
     out
 }
 
+/// A Bearer token for the gated write routes, minted by the FRAMEWORK's own
+/// `get_token` (same call the co-emitted tests use) so it can never drift from
+/// how the server validates. Signed with the project's `TINA4_SECRET` — without
+/// that the app would reject it with 401.
+fn auth_bearer_token(project_dir: &Path) -> Option<String> {
+    let py = project_python(project_dir)?;
+    let mut cmd = std::process::Command::new(py);
+    cmd.args([
+        "-c",
+        "from tina4_python.auth import get_token; print(get_token({'user_id': 1}))",
+    ])
+    .current_dir(project_dir);
+    if let Some(secret) = crate::mcp_context::read_env_file_value(project_dir, "TINA4_SECRET") {
+        cmd.env("TINA4_SECRET", secret);
+    }
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let token = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .last()?
+        .trim()
+        .to_string();
+    (token.len() > 20).then_some(token)
+}
+
+/// Every route a file declares, as (METHOD, raw path template).
+fn declared_routes(content: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for line in content.lines() {
+        let t = line.trim();
+        for m in ["get", "post", "put", "delete", "patch"] {
+            let Some(rest) = t.strip_prefix(&format!("@{m}(")) else { continue };
+            let Some(start) = rest.find(['"', '\'']) else { continue };
+            let quote = rest.as_bytes()[start] as char;
+            let Some(end) = rest[start + 1..].find(quote) else { continue };
+            let raw = &rest[start + 1..start + 1 + end];
+            if raw.starts_with('/') {
+                out.push((m.to_uppercase(), raw.to_string()));
+            }
+            break;
+        }
+    }
+    out
+}
+
+/// A create/update body for the model this route file uses, derived from the
+/// model's field declarations so it satisfies NOT NULL / typed columns.
+/// `id` and `created_at` are omitted — the DB fills those.
+fn payload_for_route(project_dir: &Path, route_content: &str) -> serde_json::Value {
+    let mut obj = serde_json::Map::new();
+    // `from src.orm.Order import Order` → read that model's fields.
+    for line in route_content.lines() {
+        let t = line.trim();
+        let Some(rest) = t.strip_prefix("from src.orm.") else { continue };
+        let Some((module, _)) = rest.split_once(" import ") else { continue };
+        let path = project_dir.join("src/orm").join(format!("{module}.py"));
+        let Ok(body) = fs::read_to_string(&path) else { continue };
+        for mline in body.lines() {
+            let m = mline.trim();
+            let Some((name, decl)) = m.split_once('=') else { continue };
+            let name = name.trim();
+            let decl = decl.trim();
+            if name == "id" || name.starts_with('_') || name.contains(' ') {
+                continue;
+            }
+            if decl.contains("DateTimeField") || decl.contains("primary_key=True") {
+                continue;
+            }
+            let value = if decl.contains("IntegerField") {
+                serde_json::json!(1)
+            } else if decl.contains("NumericField") || decl.contains("FloatField") {
+                serde_json::json!(1.5)
+            } else if decl.contains("BooleanField") {
+                serde_json::json!(true)
+            } else if decl.contains("Field") {
+                serde_json::json!("smoke")
+            } else {
+                continue;
+            };
+            obj.insert(name.to_string(), value);
+        }
+        break;
+    }
+    if obj.is_empty() {
+        obj.insert("name".into(), serde_json::json!("smoke"));
+    }
+    serde_json::Value::Object(obj)
+}
+
+/// Exercise the WRITE routes as a self-cleaning round-trip: POST creates a row,
+/// PUT updates it, DELETE removes it — so the dev database is left exactly as
+/// it was found. Only a 5xx is a failure; a 401 means our token didn't satisfy
+/// the gate (a smoke-setup problem, reported but not a code defect).
+async fn smoke_write_roundtrip(
+    framework_port: u16,
+    token: &str,
+    routes: &[(String, String)],
+    payload: &serde_json::Value,
+) -> (Vec<String>, Vec<String>) {
+    let (mut broken, mut notes) = (Vec::new(), Vec::new());
+    // No idle pooling: the dev server may close the connection after each
+    // response, and a reused-but-dead socket makes the NEXT request fail to
+    // send (observed: PUT ok, then DELETE "error sending request").
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .pool_max_idle_per_host(0)
+        .build()
+    else {
+        return (broken, notes);
+    };
+    let base = format!("http://127.0.0.1:{framework_port}");
+    let auth = format!("Bearer {token}");
+
+    let collection = routes.iter().find(|(m, p)| m == "POST" && !p.contains('{'));
+    let Some((_, post_path)) = collection else { return (broken, notes) };
+
+    // CREATE
+    let resp = client.post(format!("{base}{post_path}")).header("Authorization", &auth)
+        .json(payload).send().await;
+    let mut created_id: Option<String> = None;
+    match resp {
+        Ok(r) => {
+            let status = r.status().as_u16();
+            let body = r.text().await.unwrap_or_default();
+            if status >= 500 {
+                broken.push(format!("POST {post_path} → {status} ({})", first_line(&body)));
+            } else if status == 401 {
+                notes.push(format!("POST {post_path} → 401 (smoke token rejected; write routes not exercised)"));
+                return (broken, notes);
+            } else {
+                created_id = serde_json::from_str::<serde_json::Value>(&body).ok()
+                    .and_then(|v| v.get("id").map(|i| i.to_string().trim_matches('"').to_string()));
+            }
+        }
+        Err(e) => notes.push(format!("POST {post_path} unreachable: {e}")),
+    }
+
+    // UPDATE + DELETE the row we just made — leaves the DB as found.
+    if let Some(id) = created_id {
+        for (method, tmpl) in routes.iter().filter(|(m, p)| (m == "PUT" || m == "DELETE") && p.contains('{')) {
+            let path = substitute_first_param(tmpl, &id);
+            let url = format!("{base}{path}");
+            let req = if method == "PUT" {
+                client.put(&url).header("Authorization", &auth).json(payload)
+            } else {
+                client.delete(&url).header("Authorization", &auth)
+            };
+            match req.send().await {
+                Ok(r) => {
+                    let status = r.status().as_u16();
+                    let body = r.text().await.unwrap_or_default();  // always drain
+                    if status >= 500 {
+                        broken.push(format!("{method} {path} → {status} ({})", first_line(&body)));
+                    } else {
+                        notes.push(format!("{method} {path} → {status}"));
+                    }
+                }
+                Err(e) => notes.push(format!("{method} {path} FAILED to send: {e}")),
+            }
+        }
+    }
+    (broken, notes)
+}
+
+/// Replace the first `{param}` in a path template with a concrete value.
+fn substitute_first_param(tmpl: &str, value: &str) -> String {
+    match (tmpl.find('{'), tmpl.find('}')) {
+        (Some(a), Some(b)) if b > a => format!("{}{}{}", &tmpl[..a], value, &tmpl[b + 1..]),
+        _ => tmpl.to_string(),
+    }
+}
+
+/// The framework error page carries the exception in <title>; otherwise the
+/// first meaningful line of the body.
+fn first_line(body: &str) -> String {
+    body.split("<title>")
+        .nth(1)
+        .and_then(|t| t.split("</title>").next())
+        .map(|t| t.trim().to_string())
+        .unwrap_or_else(|| body.lines().next().unwrap_or("").chars().take(120).collect())
+}
+
 /// Request each path and report the ones that blow up (5xx). This is the last
 /// verification layer: the code parsed, imported, and used real symbols — only
 /// RUNNING it proves the call was used correctly.
@@ -1614,6 +1798,7 @@ async fn smoke_get_routes(framework_port: u16, paths: &[String]) -> Vec<String> 
     let mut broken = Vec::new();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .pool_max_idle_per_host(0)
         .build();
     let Ok(client) = client else { return broken };
     for p in paths {
@@ -4494,7 +4679,29 @@ Use only symbols that actually exist — do not invent APIs.",
                     if !paths.is_empty() {
                         sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({
                             "text": format!("→ Smoking {} endpoint(s)…", paths.len()), "agent": "coder"}))).await;
-                        let broken = smoke_get_routes(fw_port, &paths).await;
+                        let mut broken = smoke_get_routes(fw_port, &paths).await;
+
+                        // WRITE routes too — gated by auth, so mint a token the
+                        // way the framework does. POST → PUT → DELETE the same
+                        // row, so the dev database is left exactly as found.
+                        match auth_bearer_token(&project_dir) {
+                            Some(token) => {
+                                for f in &route_files {
+                                    let Ok(body) = fs::read_to_string(project_dir.join(f)) else { continue };
+                                    let routes = declared_routes(&body);
+                                    if !routes.iter().any(|(m, _)| m == "POST") { continue; }
+                                    let payload = payload_for_route(&project_dir, &body);
+                                    let (bad, notes) =
+                                        smoke_write_roundtrip(fw_port, &token, &routes, &payload).await;
+                                    broken.extend(bad);
+                                    for n in notes {
+                                        agent_log(&project_dir, "smoke.note", &n);
+                                    }
+                                }
+                            }
+                            None => agent_log(&project_dir, "smoke.note",
+                                "no auth token could be minted — write routes NOT exercised"),
+                        }
                         if broken.is_empty() {
                             test_line.push_str(&format!(
                                 "\\n✅ Endpoints respond: {}", paths.join(", ").replace('"', "'")
@@ -6591,6 +6798,57 @@ print('hi')
     }
 
     #[test]
+    fn declared_routes_covers_every_method() {
+        let src = "\
+@get(\"/api/orders\")\nasync def a(r, s): pass\n\
+@post(\"/api/orders\")\nasync def b(r, s): pass\n\
+@put(\"/api/orders/{id:int}\")\nasync def c(r, s): pass\n\
+@delete(\"/api/orders/{id:int}\")\nasync def d(r, s): pass\n";
+        let routes = declared_routes(src);
+        assert_eq!(routes, vec![
+            ("GET".to_string(), "/api/orders".to_string()),
+            ("POST".to_string(), "/api/orders".to_string()),
+            ("PUT".to_string(), "/api/orders/{id:int}".to_string()),
+            ("DELETE".to_string(), "/api/orders/{id:int}".to_string()),
+        ], "{routes:?}");
+    }
+
+    #[test]
+    fn substitutes_the_id_into_an_item_path() {
+        assert_eq!(substitute_first_param("/api/orders/{id:int}", "7"), "/api/orders/7");
+        assert_eq!(substitute_first_param("/api/orders", "7"), "/api/orders");
+    }
+
+    #[test]
+    fn payload_is_built_from_the_model_fields() {
+        let dir = make_tmpdir("smoke-payload");
+        write_file(&dir, "src/orm/Order.py", "\
+from tina4_python.orm import ORM, IntegerField, StringField, NumericField, DateTimeField\n\
+class Order(ORM):\n\
+    table_name = \"orders\"\n\
+    id = IntegerField(primary_key=True, auto_increment=True)\n\
+    name = StringField()\n\
+    total = NumericField()\n\
+    qty = IntegerField()\n\
+    created_at = DateTimeField()\n");
+        let route = "from src.orm.Order import Order\n@post(\"/api/orders\")\nasync def c(r, s): pass\n";
+        let payload = payload_for_route(&dir, route);
+        assert_eq!(payload["name"], serde_json::json!("smoke"));
+        assert_eq!(payload["total"], serde_json::json!(1.5));
+        assert_eq!(payload["qty"], serde_json::json!(1));
+        // The DB fills these — sending them would fight the schema.
+        assert!(payload.get("id").is_none(), "id must not be sent");
+        assert!(payload.get("created_at").is_none(), "created_at must not be sent");
+    }
+
+    #[test]
+    fn error_detail_prefers_the_exception_title() {
+        assert_eq!(first_line("<html><title>Tina4 Error — OperationalError</title>x"),
+                   "Tina4 Error — OperationalError");
+        assert_eq!(first_line("plain failure text"), "plain failure text");
+    }
+
+    #[test]
     fn smoke_paths_fill_in_route_parameters() {
         let src = "\
 from tina4_python.core.router import get, post\n\
@@ -6948,3 +7206,4 @@ mod smoke_recent_failures {
         eprintln!("=== {} bytes ===", out.len());
     }
 }
+

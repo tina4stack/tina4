@@ -81,7 +81,7 @@ pub fn is_configured(project_dir: &Path) -> bool {
 /// Read a single `KEY=VALUE` from the project `.env`. Deliberately tiny — the
 /// agent only needs one key, so we don't pull in a dotenv dependency (zero-dep
 /// discipline). Ignores comments and surrounding quotes/whitespace.
-fn read_env_file_value(project_dir: &Path, key: &str) -> Option<String> {
+pub fn read_env_file_value(project_dir: &Path, key: &str) -> Option<String> {
     let content = std::fs::read_to_string(project_dir.join(".env")).ok()?;
     for line in content.lines() {
         let line = line.trim();

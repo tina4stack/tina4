@@ -98,6 +98,11 @@ smoke matched reality exactly (2×200, 1×500).
 - [ ] Smoke covers GET only — POST/PUT/DELETE need an auth token and mutate.
 - [ ] Non-route code (helpers/services) is only import-verified; proving it RUNS
       needs a co-emitted test.
-- [ ] ORM identifier quoting, so a hand-set `table_name = "order"` works.
+- [x] **ORM identifier quoting** — DONE in tina4-python `7d87a28`.
+      `DatabaseAdapter.quote_identifier()` (ANSI default; MySQL backticks, SQL
+      Server brackets), drivers quote table+columns in insert/update/delete,
+      and `ORM._get_table_sql()` quotes for statement interpolation while
+      `_get_table()` stays raw for metadata lookups. A hand-set
+      `table_name = "order"` now does full CRUD; full suite 3677 passed.
 
 ## Status: ✅ Complete for the reporting + coder switch; two findings logged above.

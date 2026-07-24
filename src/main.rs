@@ -767,34 +767,45 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
     //      (code re-imports, assets refresh) -- the server is NOT restarted
     //   3. The framework then pushes a reload to the browser via its
     //      WebSocket / mtime endpoint
-    match info.language.as_str() {
-        "tina4js" => println!(
-            "{} Vite HMR active — press Ctrl+C to stop",
-            icon_eye().green()
-        ),
-        _ => println!(
-            "{} File watcher active (changes hot-reload in-process) — press Ctrl+C to stop",
-            icon_eye().green()
-        ),
-    }
+    // Production runs NO watchers. File/SCSS watching burns CPU, contends with
+    // the single server process (measurably throttling throughput), and there is
+    // nothing to hot-reload in production. SCSS was already compiled once above.
+    // The CLI stays only to supervise the child server + clean-shutdown its tree.
+    if force_production {
+        println!(
+            "{} Production mode — file watching + hot-reload disabled; press Ctrl+C to stop",
+            icon_play().green()
+        );
+    } else {
+        match info.language.as_str() {
+            "tina4js" => println!(
+                "{} Vite HMR active — press Ctrl+C to stop",
+                icon_eye().green()
+            ),
+            _ => println!(
+                "{} File watcher active (changes hot-reload in-process) — press Ctrl+C to stop",
+                icon_eye().green()
+            ),
+        }
 
-    // SCSS compile-on-save in a background thread
-    if std::path::Path::new(scss_dir).exists() {
-        let scss_in = scss_dir.to_string();
-        let css_out = css_dir.to_string();
-        std::thread::spawn(move || {
-            watcher::watch_scss(&scss_in, &css_out, false);
-        });
-    }
+        // SCSS compile-on-save in a background thread (dev only)
+        if std::path::Path::new(scss_dir).exists() {
+            let scss_in = scss_dir.to_string();
+            let css_out = css_dir.to_string();
+            std::thread::spawn(move || {
+                watcher::watch_scss(&scss_in, &css_out, false);
+            });
+        }
 
-    // File change watcher — gets a shared atomic flag it can set on
-    // code-file changes. Main polls the flag below.
-    if info.language != "tina4js" {
-        let reload_port = port;
-        let watcher_flag = Arc::clone(&respawn_requested);
-        std::thread::spawn(move || {
-            watcher::watch_and_reload(reload_port, Some(watcher_flag));
-        });
+        // File change watcher — gets a shared atomic flag it can set on
+        // code-file changes. Main polls the flag below. (dev only)
+        if info.language != "tina4js" {
+            let reload_port = port;
+            let watcher_flag = Arc::clone(&respawn_requested);
+            std::thread::spawn(move || {
+                watcher::watch_and_reload(reload_port, Some(watcher_flag));
+            });
+        }
     }
 
     // ── Respawn loop ───────────────────────────────────────────────

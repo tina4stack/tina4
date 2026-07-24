@@ -316,6 +316,39 @@ TINA4 BUILD DISCIPLINE — how to build (the API itself comes from tina4_context
 - Secure by default: parameterized queries only, escape output, verify JWTs, writes require auth unless explicitly public.\n\
 - Tests first and REAL — no mocks; cover the happy path AND a negative case. A change isn't done until it runs green for real.";
 
+/// Hard output contract for the CODER only. Both MCP models were observed
+/// breaking it in complementary ways: `long_context` wrote FastAPI/SQLAlchemy
+/// into a correctly-named file, and `tina4_chat` wrote correct-ish Tina4 idiom
+/// into a FRAMEWORK-internals path. Neither is recoverable downstream, so state
+/// the contract explicitly rather than hoping grounding implies it.
+const TINA4_CODER_CONTRACT: &str = "\
+TINA4 OUTPUT CONTRACT — non-negotiable:\n\
+- FRAMEWORK: this is a Tina4 app. NEVER import or emit FastAPI, Flask, Django, \
+Starlette, SQLAlchemy, Pydantic, Express, Laravel or Rails. No APIRouter, no \
+Depends(), no session/engine, no db.query(). Use ONLY Tina4 symbols returned by \
+tina4_context.\n\
+- ROUTES: one file per resource at `src/routes/<plural>.py`. A URL parameter is \
+part of the DECORATOR PATTERN, never a file or folder: write \
+`@get(\"/api/orders/{id}\")` inside `src/routes/orders.py`. NEVER create a path \
+like `src/routes/orders/{id}.py` — `{` is not legal in a filename.\n\
+- HANDLERS: `async def name(request, response)` and always RETURN \
+`response(payload)` or `response(payload, status)`. Read a URL parameter with \
+`request.params[\"id\"]`, a JSON body with `request.body` (already parsed). Do \
+not hand-serialize JSON.\n\
+- IMPORTS (python) are exactly these — never `tina4.*`, never a made-up module:\n\
+    from tina4_python.core.router import get, post, put, delete\n\
+    from tina4_python.swagger import description, tags\n\
+    from src.orm.<Model> import <Model>\n\
+- ORM: call the model class directly — `<Model>.find_by_id(id)`, `<Model>.all()`, \
+`<Model>(**request.body).save()`, `item.to_dict()`. There is no session, no \
+engine, no `context.orm`. Anything beyond this comes from tina4_context.\n\
+- FILE PLACEMENT: app code ONLY, always project-relative — routes \
+`src/routes/`, models `src/orm/<Model>.py`, migrations `migrations/`, tests \
+`tests/`, templates `src/templates/`. NEVER write to framework internals \
+(`tina4_python/`, `python/tina4_python/`, `vendor/`, `site-packages/`, \
+`node_modules/`) — those are the installed library, not this app.\n\
+- Emit every file under its own `## FILE: <path>` header, then one fenced block.";
+
 // ── Default agent configs ──
 
 const DEFAULT_AGENTS: &[(&str, &str, &str)] = &[
@@ -774,6 +807,13 @@ pub fn load_agents(project_dir: &Path) -> Vec<Agent> {
             if matches!(name.as_str(), "supervisor" | "planner" | "coder" | "debug") {
                 system_prompt.push_str("\n\n");
                 system_prompt.push_str(TINA4_ESSENCE);
+            }
+            // The coder additionally gets the hard output contract — which
+            // framework to write, where files go, and that a URL parameter is a
+            // decorator pattern rather than a filename.
+            if name == "coder" {
+                system_prompt.push_str("\n\n");
+                system_prompt.push_str(TINA4_CODER_CONTRACT);
             }
 
             agents.push(Agent { name, config, system_prompt });
@@ -1336,6 +1376,18 @@ fn looks_like_prose_path(rel_path: &str) -> Option<String> {
             return Some(format!("contains illegal token {bad:?} — looks like prose, not a filename"));
         }
     }
+    // The installed framework/library is NOT this app. tina4_chat was observed
+    // emitting `python/tina4_python/cli/__init__.py` for a route task; writing
+    // there would shadow the library with app code.
+    let norm = rel_path.trim_start_matches("./").to_lowercase();
+    for lib in &["tina4_python/", "tina4-python/", "vendor/", "site-packages/",
+                 "node_modules/", ".venv/", "tina4_ruby/", "tina4_nodejs/"] {
+        if norm.starts_with(lib) || norm.contains(&format!("/{lib}")) {
+            return Some(format!(
+                "{lib:?} is the installed framework, not this app — write app code under src/"
+            ));
+        }
+    }
     for seg in rel_path.split('/') {
         if seg.is_empty() || seg == "." || seg == ".." { continue; }
         if seg.len() > 80 {
@@ -1398,6 +1450,29 @@ fn normalize_coder_path(rel_path: &str) -> Option<String> {
     None
 }
 
+/// Names defined at any nesting level, across the Tina4 languages: `def name(`,
+/// `async def name(`, `function name(`, `class name`, `const name =`. Used to
+/// prove an edit didn't quietly delete existing code.
+fn defined_symbols(src: &str) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for line in src.lines() {
+        let t = line.trim();
+        for kw in ["async def ", "def ", "function ", "class ", "const ", "fn "] {
+            if let Some(rest) = t.strip_prefix(kw) {
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if name.len() > 1 {
+                    out.insert(name);
+                }
+                break;
+            }
+        }
+    }
+    out
+}
+
 pub fn agent_write_file(project_dir: &Path, rel_path: &str, content: &str) -> Result<WriteStats, String> {
     // Prose-path guard — refuse writes whose "path" is actually a
     // narration sentence (e.g. "I'll implement Step 1 by creating
@@ -1438,6 +1513,26 @@ pub fn agent_write_file(project_dir: &Path, rel_path: &str, content: &str) -> Re
         );
         agent_log(project_dir, "write.refused", &msg);
         return Err(msg);
+    }
+
+    // Symbol-preservation guard. Rewriting a file to "add" something must not
+    // silently DROP existing functions — observed: an edit to add a detail
+    // route came back missing delete_order, at 76% of the original size, so the
+    // byte-ratio guard above let it through. Losing working code is worse than
+    // refusing the edit.
+    if let Some(ref old) = old_content {
+        let lost: Vec<String> = defined_symbols(old)
+            .into_iter()
+            .filter(|name| !defined_symbols(content).contains(name))
+            .collect();
+        if !lost.is_empty() {
+            let msg = format!(
+                "REFUSED {} (would drop existing definition(s): {} — return the COMPLETE file, keeping what is already there)",
+                rel_path, lost.join(", "),
+            );
+            agent_log(project_dir, "write.refused", &msg);
+            return Err(msg);
+        }
     }
 
     // Backup before overwrite.
@@ -3265,7 +3360,9 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                                             step_num, step, plan_content, project_dir.display()
                                         )
                                     };
+                                    let base_msg = format!("{base_msg}{}", existing_file_context(&project_dir, step));
                                     let (coder_msg, hits) = ground_coder_msg(&project_dir, &base_msg, step, &[]).await;
+                                    let coder_msg = format!("{TINA4_CODER_CONTRACT}\n\n{coder_msg}");
                                     let coder_msg = if coder_is_tina4chat {
                                         clamp_coder_prompt(&coder_msg, SMALL_CODER_PROMPT_BUDGET)
                                     } else {
@@ -3768,7 +3865,11 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                             framework_ctx, project_ctx, num, total, step_text, plan_content
                         )
                     };
+                    let base_msg = format!("{base_msg}{}", existing_file_context(&project_dir, &step_text));
                     let (coder_msg, hits) = ground_coder_msg(&project_dir, &base_msg, &step_text, &[]).await;
+                    // Contract at the HEAD: it must survive the clamp, and for
+                    // long_context the user message IS the question.
+                    let coder_msg = format!("{TINA4_CODER_CONTRACT}\n\n{coder_msg}");
                     // Grounding can re-inflate it — clamp as the final guard.
                     let coder_msg = if coder_is_tina4chat {
                         clamp_coder_prompt(&coder_msg, SMALL_CODER_PROMPT_BUDGET)
@@ -4544,17 +4645,8 @@ fn derive_coder_path(ctx: &str, files: &[String]) -> Option<String> {
     }
     // An explicit path in the step wins — "Add a slugify helper in
     // src/app/helpers.py" should target exactly that file.
-    if let Some(p) = ctx
-        .split(|c: char| c.is_whitespace() || c == ',' || c == '"' || c == '`')
-        .map(|w| w.trim_end_matches(['.', ')', ':', ';']))
-        .find(|w| {
-            w.contains('/')
-                && std::path::Path::new(w).extension().is_some()
-                && !w.starts_with("http")
-                && !w.starts_with('/')
-        })
-    {
-        return Some(p.to_string());
+    if let Some(p) = explicit_path_in(ctx) {
+        return Some(p);
     }
     let lower = ctx.to_lowercase();
     // A "/segment" route path → its last segment is the resource name.
@@ -4998,11 +5090,50 @@ fn plan_goal(plan_content: &str) -> String {
         .join(" ")
 }
 
+/// When a step targets a file that already exists, the coder must see the
+/// CURRENT contents and return the COMPLETE updated file. Otherwise it emits
+/// only the new fragment and the anti-shrink guard (correctly) refuses the
+/// write, so the edit silently never lands.
+fn existing_file_context(project_dir: &Path, ctx: &str) -> String {
+    let Some(rel) = explicit_path_in(ctx) else { return String::new() };
+    let full = project_dir.join(&rel);
+    if !full.exists() { return String::new(); }
+    let Ok(body) = fs::read_to_string(&full) else { return String::new() };
+    format!(
+        "\n\n## Existing file — {rel}\nThis file ALREADY EXISTS. Return the COMPLETE \
+updated file (all existing code PLUS your change) under `## FILE: {rel}` — never \
+just the new fragment, or the write is rejected as truncated.\n```\n{body}\n```"
+    )
+}
+
+/// A concrete project-relative file path mentioned in the text
+/// ("…in src/app/helpers.py"), if any.
+fn explicit_path_in(ctx: &str) -> Option<String> {
+    ctx.split(|c: char| c.is_whitespace() || c == ',' || c == '"' || c == '`')
+        .map(|w| w.trim_end_matches(['.', ')', ':', ';']))
+        .find(|w| {
+            w.contains('/')
+                && std::path::Path::new(w).extension().is_some()
+                && !w.starts_with("http")
+                && !w.starts_with('/')
+        })
+        .map(|w| w.to_string())
+}
+
 /// `goal` is the plan's overall goal (empty when the ctx already IS the whole
 /// request). Resource/model detection always comes from `ctx` (the step), but
 /// fields fall back to the goal so a planner that drops "with email and name"
 /// from a step still produces those columns.
 fn scaffold_first(project_dir: &Path, ctx: &str, goal: &str, files: &[String]) -> Vec<String> {
+    // A step naming a file that already exists is an EDIT, not a scaffold:
+    // "Add a GET handler to src/routes/orders.py" must not generate a resource.
+    // (Without this the goal-promotion below fires on the "routes" inside the
+    // PATH and detect_resource_name grabs a word out of the trailing prose.)
+    if let Some(p) = explicit_path_in(ctx) {
+        if project_dir.join(&p).exists() {
+            return Vec::new();
+        }
+    }
     let lower = ctx.to_lowercase();
     let has_model = lower.contains("model");
     // Multiple distinct CRUD verbs (create/read/update/delete/list) signal a
@@ -5017,10 +5148,16 @@ fn scaffold_first(project_dir: &Path, ctx: &str, goal: &str, files: &[String]) -
     // unrelated steps never scaffold a CRUD surface.
     let goal_lower = goal.to_lowercase();
     let goal_wants_crud = goal_lower.contains("crud") || goal_lower.contains("resource");
+    // "route" must appear as a WORD, not inside a path like src/routes/orders.py
+    // — otherwise a step that merely edits a route file looks like a scaffold.
+    let mentions_route_word = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|w| w == "route" || w == "routes")
+        && explicit_path_in(ctx).is_none();
     let wants_crud = lower.contains("crud")
         || lower.contains("resource")
         || verb_count >= 2
-        || (goal_wants_crud && lower.contains("route"));
+        || (goal_wants_crud && mentions_route_word);
 
     if !has_model && !wants_crud {
         return Vec::new();
@@ -5943,6 +6080,74 @@ print('hi')
             detect_resource_name("Ensure the framework can handle the product resource automatically"),
             Some("Product".to_string()),
         );
+    }
+
+    #[test]
+    fn an_edit_may_not_drop_existing_definitions() {
+        // Regression: an "add a detail route" edit came back missing
+        // delete_order at 76% of the original size — inside the byte-ratio
+        // guard, so working code was silently lost.
+        let dir = make_tmpdir("no-symbol-loss");
+        let before = "\
+async def list_orders(request, response):\n    pass\n\n\
+async def get_order(request, response):\n    pass\n\n\
+async def delete_order(request, response):\n    pass\n";
+        write_file(&dir, "src/routes/orders.py", before);
+
+        // Rewrite that quietly drops delete_order.
+        let lossy = "\
+async def list_orders(request, response):\n    pass\n\n\
+async def get_order(request, response):\n    pass\n";
+        let err = agent_write_file(&dir, "src/routes/orders.py", lossy).unwrap_err();
+        assert!(err.contains("delete_order"), "error should name the lost symbol: {err}");
+
+        // A genuine addition that keeps everything is accepted.
+        let good = format!("{before}\nasync def order_detail(request, response):\n    pass\n");
+        assert!(agent_write_file(&dir, "src/routes/orders.py", &good).is_ok());
+    }
+
+    #[test]
+    fn editing_an_existing_file_never_scaffolds() {
+        // Regression: "Add a GET handler to src/routes/orders.py ... when missing"
+        // scaffolded a phantom `Missing` model — "routes" matched inside the PATH
+        // and the resource noun came from trailing prose.
+        let dir = make_tmpdir("edit-not-scaffold");
+        write_file(&dir, "src/routes/orders.py", "# existing route\n");
+        let out = scaffold_first(
+            &dir,
+            "Add a GET handler to src/routes/orders.py that fetches a single order by id and returns 404 when missing.",
+            "Add a detail endpoint to the existing orders resource.",
+            &[],
+        );
+        assert!(out.is_empty(), "an edit step must not scaffold, got {out:?}");
+        assert!(!dir.join("src/orm/Missing.py").exists(), "phantom model was generated");
+    }
+
+    #[test]
+    fn framework_internals_are_never_writable() {
+        // tina4_chat emitted exactly this for a route task.
+        assert!(looks_like_prose_path("python/tina4_python/cli/__init__.py").is_some());
+        assert!(looks_like_prose_path("tina4_python/orm/model.py").is_some());
+        assert!(looks_like_prose_path("vendor/tina4/src/Router.php").is_some());
+        assert!(looks_like_prose_path("node_modules/tina4-nodejs/index.js").is_some());
+        // Real app paths stay writable.
+        assert!(looks_like_prose_path("src/routes/orders.py").is_none());
+        assert!(looks_like_prose_path("src/orm/Order.py").is_none());
+        assert!(looks_like_prose_path("tests/test_orders.py").is_none());
+    }
+
+    #[test]
+    fn route_param_is_not_a_filename() {
+        // long_context tried to write this instead of using the decorator.
+        assert!(looks_like_prose_path("src/routes/orders/{id}.py").is_some());
+    }
+
+    #[test]
+    fn coder_contract_states_the_observed_failures() {
+        // Both real failure modes must be named explicitly in the contract.
+        assert!(TINA4_CODER_CONTRACT.contains("FastAPI"));
+        assert!(TINA4_CODER_CONTRACT.contains("src/routes/orders/{id}.py"));
+        assert!(TINA4_CODER_CONTRACT.contains("tina4_python/"));
     }
 
     #[test]

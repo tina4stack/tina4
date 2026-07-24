@@ -347,7 +347,10 @@ engine, no `context.orm`. Anything beyond this comes from tina4_context.\n\
 `tests/`, templates `src/templates/`. NEVER write to framework internals \
 (`tina4_python/`, `python/tina4_python/`, `vendor/`, `site-packages/`, \
 `node_modules/`) — those are the installed library, not this app.\n\
-- Emit every file under its own `## FILE: <path>` header, then one fenced block.";
+- OUTPUT: a NEW file goes under `## FILE: <path>` with its complete content. \
+Adding to a file that ALREADY EXISTS goes under `## APPEND: <path>` with ONLY \
+the new code (one handler/function/test) — do NOT restate the existing file. \
+Either way, one fenced block per header.";
 
 // ── Default agent configs ──
 
@@ -1471,6 +1474,126 @@ fn defined_symbols(src: &str) -> std::collections::BTreeSet<String> {
         }
     }
     out
+}
+
+/// How a coder-emitted block is applied to disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteOp {
+    /// `## FILE:` — whole-file content (new files, or a full rewrite).
+    Replace,
+    /// `## APPEND:` — add a block to the end of an existing file. The safe form
+    /// for edits: a model asked to restate a whole file drops parts of it, so
+    /// for edits we ask only for the NEW code and concatenate it ourselves.
+    Append,
+}
+
+/// Content between the first ``` fence and its closing fence. Falls back to the
+/// raw text when the model omitted the fence.
+fn extract_fenced_block(body: &str) -> String {
+    if let Some(start) = body.find("```") {
+        let after = &body[start + 3..];
+        // Skip the info string ("python") on the opening fence.
+        let after = after.find('\n').map(|n| &after[n + 1..]).unwrap_or(after);
+        if let Some(end) = after.find("```") {
+            return after[..end].trim_end().to_string();
+        }
+        return after.trim_end().to_string();
+    }
+    body.trim().to_string()
+}
+
+/// Split coder output into `(op, path, content)` blocks. Understands both
+/// `## FILE: <path>` and `## APPEND: <path>`.
+pub fn parse_coder_output(out: &str) -> Vec<(WriteOp, String, String)> {
+    let mut blocks: Vec<(WriteOp, String, Vec<&str>)> = Vec::new();
+    let mut in_fence = false;
+    for line in out.lines() {
+        let t = line.trim();
+        let header = if in_fence {
+            None
+        } else {
+            t.strip_prefix("## FILE:")
+                .map(|p| (WriteOp::Replace, p))
+                .or_else(|| t.strip_prefix("## APPEND:").map(|p| (WriteOp::Append, p)))
+        };
+        if let Some((op, path)) = header {
+            blocks.push((op, path.trim().to_string(), Vec::new()));
+            continue;
+        }
+        if t.starts_with("```") {
+            in_fence = !in_fence;
+        }
+        if let Some(last) = blocks.last_mut() {
+            last.2.push(line);
+        }
+    }
+    blocks
+        .into_iter()
+        .map(|(op, path, lines)| (op, path, extract_fenced_block(&lines.join("\n"))))
+        .filter(|(_, path, content)| !path.is_empty() && !content.trim().is_empty())
+        .collect()
+}
+
+/// Append a block to an existing file. Concatenation happens HERE, so the model
+/// never has to restate code it might drop; the merged text then goes through
+/// `agent_write_file`, keeping every guard (path, prose, shrink, symbol-loss).
+pub fn agent_append_file(project_dir: &Path, rel_path: &str, content: &str) -> Result<WriteStats, String> {
+    let resolved = normalize_coder_path(rel_path).unwrap_or_else(|| rel_path.to_string());
+    let old = fs::read_to_string(project_dir.join(&resolved)).unwrap_or_default();
+
+    // Appending something already defined would create a duplicate definition —
+    // that's a re-run, not an edit. Refuse instead of silently doubling it.
+    let incoming = defined_symbols(content);
+    let dup: Vec<String> = defined_symbols(&old)
+        .into_iter()
+        .filter(|s| incoming.contains(s))
+        .collect();
+    if !dup.is_empty() {
+        let msg = format!(
+            "REFUSED append to {rel_path} (already defines: {}) — nothing to add",
+            dup.join(", ")
+        );
+        agent_log(project_dir, "write.refused", &msg);
+        return Err(msg);
+    }
+
+    let merged = if old.trim().is_empty() {
+        format!("{}\n", content.trim())
+    } else {
+        format!("{}\n\n\n{}\n", old.trim_end(), content.trim())
+    };
+    agent_write_file(project_dir, rel_path, &merged)
+}
+
+/// Apply one parsed coder block.
+///
+/// Models routinely ignore the `## APPEND:` instruction and send only the new
+/// function under `## FILE:`. Rather than trust compliance, infer intent: if the
+/// target already exists and the block introduces NEW definitions without
+/// restating the existing ones, it is an addition — apply it as an append. That
+/// turns "REFUSED … looks truncated" into the edit the user actually asked for,
+/// while a genuine full rewrite (which restates everything) still replaces.
+pub fn agent_apply_block(project_dir: &Path, op: WriteOp, rel_path: &str, content: &str) -> Result<WriteStats, String> {
+    if op == WriteOp::Append {
+        return agent_append_file(project_dir, rel_path, content);
+    }
+    let resolved = normalize_coder_path(rel_path).unwrap_or_else(|| rel_path.to_string());
+    let old = fs::read_to_string(project_dir.join(&resolved)).unwrap_or_default();
+    if !old.trim().is_empty() {
+        let old_syms = defined_symbols(&old);
+        let new_syms = defined_symbols(content);
+        let drops_existing = old_syms.iter().any(|s| !new_syms.contains(s));
+        let adds_new = new_syms.iter().any(|s| !old_syms.contains(s));
+        if drops_existing && adds_new {
+            let added: Vec<String> = new_syms.difference(&old_syms).cloned().collect();
+            agent_log(project_dir, "write.coerced_append", &format!(
+                "{rel_path}: '## FILE:' block adds {} without restating existing code — applying as APPEND",
+                added.join(", ")
+            ));
+            return agent_append_file(project_dir, rel_path, content);
+        }
+    }
+    agent_write_file(project_dir, rel_path, content)
 }
 
 pub fn agent_write_file(project_dir: &Path, rel_path: &str, content: &str) -> Result<WriteStats, String> {
@@ -3913,25 +4036,17 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                             };
                             let mut step_files = Vec::new();
                             let mut refused: Vec<String> = Vec::new();
-                            for section in code_output.split("## FILE:") {
-                                let section = section.trim();
-                                if section.is_empty() { continue; }
-                                let mut lines = section.lines();
-                                if let Some(file_path) = lines.next() {
-                                    let file_path = file_path.trim();
-                                    let remaining: String = lines.collect::<Vec<&str>>().join("\n");
-                                    let content = if let Some(start) = remaining.find("```") {
-                                        let after = &remaining[start + 3..];
-                                        let after = if let Some(nl) = after.find('\n') { &after[nl+1..] } else { after };
-                                        if let Some(end) = after.find("```") { &after[..end] } else { after }
-                                    } else { remaining.as_str() };
+                            for (op, file_path, content) in parse_coder_output(&code_output) {
+                                let file_path = file_path.as_str();
+                                let content = content.as_str();
+                                {
 
                                     // Defensive write — backup + truncation guard + log.
                                     // sse_event isn't in scope here (this branch executes
                                     // outside the streaming HTTP loop) — agent_log already
                                     // writes to .tina4/agent.log AND stderr, so the refusal
                                     // is visible without an SSE event.
-                                    match agent_write_file(&project_dir, file_path, content.trim()) {
+                                    match agent_apply_block(&project_dir, op, file_path, content.trim()) {
                                         Ok(_) => {
                                             step_files.push(file_path.to_string());
                                             state.files.push(file_path.to_string());
@@ -5099,10 +5214,16 @@ fn existing_file_context(project_dir: &Path, ctx: &str) -> String {
     let full = project_dir.join(&rel);
     if !full.exists() { return String::new(); }
     let Ok(body) = fs::read_to_string(&full) else { return String::new() };
+    let existing = defined_symbols(&body)
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
-        "\n\n## Existing file — {rel}\nThis file ALREADY EXISTS. Return the COMPLETE \
-updated file (all existing code PLUS your change) under `## FILE: {rel}` — never \
-just the new fragment, or the write is rejected as truncated.\n```\n{body}\n```"
+        "\n\n## Existing file — {rel}\nThis file ALREADY EXISTS and already defines: \
+{existing}.\nReturn ONLY the new code under `## APPEND: {rel}` — a single new \
+function/handler, matching the style below. Do NOT restate or re-emit the \
+existing code; it is kept automatically. Do not redefine anything listed above.\n\
+\n### Current contents (for style and to avoid duplicates)\n```\n{body}\n```"
     )
 }
 
@@ -6080,6 +6201,87 @@ print('hi')
             detect_resource_name("Ensure the framework can handle the product resource automatically"),
             Some("Product".to_string()),
         );
+    }
+
+    #[test]
+    fn parses_file_and_append_blocks() {
+        let out = "\
+## FILE: src/orm/Order.py\n```python\nclass Order:\n    pass\n```\n\
+## APPEND: src/routes/orders.py\n```python\nasync def order_detail(request, response):\n    pass\n```\n";
+        let got = parse_coder_output(out);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0].0, WriteOp::Replace);
+        assert_eq!(got[0].1, "src/orm/Order.py");
+        assert!(got[0].2.contains("class Order"));
+        assert_eq!(got[1].0, WriteOp::Append);
+        assert_eq!(got[1].1, "src/routes/orders.py");
+        assert!(got[1].2.contains("order_detail"));
+        // The append block must NOT carry the other file's content.
+        assert!(!got[1].2.contains("class Order"));
+    }
+
+    #[test]
+    fn append_adds_without_touching_existing_code() {
+        // The whole point: an edit can no longer drop code, because the model
+        // never restates it — we concatenate.
+        let dir = make_tmpdir("append-edit");
+        let before = "\
+async def list_orders(request, response):\n    pass\n\n\
+async def delete_order(request, response):\n    pass\n";
+        write_file(&dir, "src/routes/orders.py", before);
+
+        let added = "async def order_detail(request, response):\n    pass";
+        agent_append_file(&dir, "src/routes/orders.py", added).expect("append should succeed");
+
+        let after = std::fs::read_to_string(dir.join("src/routes/orders.py")).unwrap();
+        for kept in ["list_orders", "delete_order", "order_detail"] {
+            assert!(after.contains(kept), "{kept} missing after append:\n{after}");
+        }
+        assert!(after.len() > before.len());
+    }
+
+    #[test]
+    fn a_file_block_that_only_adds_is_treated_as_an_append() {
+        // The live failure: the coder ignored `## APPEND:` and sent ONLY the new
+        // handler under `## FILE:`, so the shrink guard refused and the edit
+        // never landed. Intent is inferable — apply it as an append.
+        let dir = make_tmpdir("coerce-append");
+        let before = "\
+async def list_orders(request, response):\n    pass\n\n\
+async def delete_order(request, response):\n    pass\n";
+        write_file(&dir, "src/routes/orders.py", before);
+
+        let only_new = "async def order_revenue(request, response):\n    pass";
+        agent_apply_block(&dir, WriteOp::Replace, "src/routes/orders.py", only_new)
+            .expect("an additive ## FILE: block should be coerced to append");
+
+        let after = std::fs::read_to_string(dir.join("src/routes/orders.py")).unwrap();
+        for kept in ["list_orders", "delete_order", "order_revenue"] {
+            assert!(after.contains(kept), "{kept} missing:\n{after}");
+        }
+    }
+
+    #[test]
+    fn a_genuine_full_rewrite_still_replaces() {
+        // Restates everything + adds one → a real rewrite, not an append.
+        let dir = make_tmpdir("real-rewrite");
+        write_file(&dir, "src/routes/orders.py", "async def list_orders(r, s):\n    pass\n");
+        let full = "async def list_orders(r, s):\n    return 1\n\nasync def order_revenue(r, s):\n    pass\n";
+        agent_apply_block(&dir, WriteOp::Replace, "src/routes/orders.py", full).unwrap();
+        let after = std::fs::read_to_string(dir.join("src/routes/orders.py")).unwrap();
+        assert!(after.contains("return 1"), "rewrite should apply:\n{after}");
+        assert_eq!(after.matches("async def list_orders").count(), 1, "no duplication:\n{after}");
+    }
+
+    #[test]
+    fn append_refuses_a_duplicate_definition() {
+        let dir = make_tmpdir("append-dup");
+        write_file(&dir, "src/routes/orders.py", "async def order_detail(request, response):\n    pass\n");
+        let err = agent_append_file(
+            &dir, "src/routes/orders.py",
+            "async def order_detail(request, response):\n    return 1",
+        ).unwrap_err();
+        assert!(err.contains("order_detail"), "{err}");
     }
 
     #[test]

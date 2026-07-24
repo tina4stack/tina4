@@ -71,20 +71,33 @@ got the notice while small probes always worked.
 - [x] **Invented ORM methods** — FIXED (`7da4f41`). Verified against the
       installed framework + one corrective retry.
 
+## The verification ladder (each layer catches a strictly later failure)
+1. **Path guard** — no prose paths, no framework internals, no `{id}.py`.
+2. **Symbol verify** (`7da4f41`) — `<Model>.<method>` must exist, checked against
+   the INSTALLED framework; one corrective retry.
+3. **Import verify + recovery** (`f95eee8`) — the file must import; the real
+   interpreter error goes back to the coder; unrepairable ⇒ rolled back.
+4. **Execution verify** (`142c4be`) — after migrate+reload the build REQUESTS the
+   GET routes it wrote; a 5xx fails the build. This is the only layer that
+   catches a REAL method used WRONGLY
+   (`Order.select("SUM(total)…")` imports, then dies with a SQL syntax error).
+
+Verified live end-to-end: "Smoking 3 endpoint(s)" → `GET /api/orders/revenue →
+500 (Tina4 Error — OperationalError)`, build reported failed + resumable. The
+smoke matched reality exactly (2×200, 1×500).
+
+## Corrections to earlier entries in this file
+- **"Reload does not re-import EDITED modules" was WRONG.** Re-import works
+  (verified: ONE→TWO after edit+reload). The real defect was narrower: a
+  RENAMED/DELETED route left its old path serving a stale handler, because
+  replace-semantics only overwrite an identical (method, path). Fixed in
+  tina4-python `85a7ead` (routes record their module; the module's routes are
+  purged before re-import). Live: renamed path → new 200, old path 404.
+
 ## Still open
-- [ ] **Misuse of a REAL method isn't caught.** Symbol verification proves a
-      method exists, not that it's called correctly. Live: the retry produced
-      `Order.select("SUM(total) as total_revenue").first()` — `select` is real
-      but takes a COMPLETE SQL query (`near "SUM": syntax error`), and `.first()`
-      is not a list method. Static checking can't close this; the fix is
-      EXECUTION — require a co-emitted test for an appended handler, or smoke
-      the new endpoint after reload and fail the step on a 500.
-- [ ] **Reload does not re-import EDITED modules.** `POST /__dev/api/reload`
-      discovers NEW route files but an already-imported module stays cached in
-      `sys.modules`, so an edited handler keeps serving the OLD code (observed:
-      the endpoint kept raising `'Order' has no attribute 'sum'` after the file
-      no longer said `sum`). "live (no restart)" is therefore only true for NEW
-      files. Framework fix: drop/reload changed modules on reload.
+- [ ] Smoke covers GET only — POST/PUT/DELETE need an auth token and mutate.
+- [ ] Non-route code (helpers/services) is only import-verified; proving it RUNS
+      needs a co-emitted test.
 - [ ] ORM identifier quoting, so a hand-set `table_name = "order"` works.
 
 ## Status: ✅ Complete for the reporting + coder switch; two findings logged above.

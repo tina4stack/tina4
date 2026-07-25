@@ -3321,6 +3321,17 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                                 serde_json::json!({"content": [{"type": "text",
                                     "text": serde_json::to_string(&proof).unwrap_or_default()}]})
                             }
+                        } else if tool == "tina4_build_page" {
+                            let pname = args.get("name").and_then(|s| s.as_str()).unwrap_or("");
+                            let api = args.get("api").and_then(|s| s.as_str());
+                            if pname.is_empty() {
+                                serde_json::json!({"isError": true,
+                                    "content": [{"type": "text", "text": "name is required"}]})
+                            } else {
+                                let proof = mcp_build_page(&project_dir, framework_port, pname, api).await;
+                                serde_json::json!({"content": [{"type": "text",
+                                    "text": serde_json::to_string(&proof).unwrap_or_default()}]})
+                            }
                         } else {
                             serde_json::json!({"isError": true,
                                 "content": [{"type": "text", "text": format!("unknown tool: {tool}")}]})
@@ -5637,8 +5648,8 @@ fn supervisor_mcp_tools() -> serde_json::Value {
     serde_json::json!([
         {
             "name": "tina4_scaffold_verify",
-            "description": "Scaffold a resource in the local project and return PROOF it works \
-(files created, tests, live endpoint status). Never returns source, data, or secrets.",
+            "description": "Scaffold a BACKEND resource in the local project and return PROOF it \
+works (files created, tests, live endpoint status). Never returns source, data, or secrets.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -5649,6 +5660,20 @@ fn supervisor_mcp_tools() -> serde_json::Value {
                                "description": "optional, e.g. \"name:string,price:float\""}
                 },
                 "required": ["kind", "name"]
+            }
+        },
+        {
+            "name": "tina4_build_page",
+            "description": "Build a reactive tina4-js FRONTEND page in the local project and return \
+PROOF it works (files created, JS valid, page + API served). Use for a UI/website/page bound to a \
+resource. Never returns source or secrets.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "resource/page name, e.g. products"},
+                    "api": {"type": "string", "description": "optional API to list, e.g. /api/products"}
+                },
+                "required": ["name"]
             }
         }
     ])
@@ -5712,6 +5737,61 @@ async fn mcp_scaffold_verify(
         "test_summary": test_summary,     // "15 passed" — not the test source
         "endpoints": endpoints,           // {path, status} — not the response body
         "source_bytes": 0                 // invariant: no source ever leaves
+    })
+}
+
+/// Build a tina4-js FRONTEND page and return a PROOF-ONLY payload: files
+/// created, whether the JS parses, and the served page + API status. Never the
+/// page source. Lets a connected AI turn "build me a website" into a real,
+/// verified page instead of the advice a bare model gives.
+async fn mcp_build_page(
+    project_dir: &Path,
+    framework_port: u16,
+    name: &str,
+    api: Option<&str>,
+) -> serde_json::Value {
+    let created = run_frontend_generate(project_dir, "page", name, api);
+
+    // Verify: the generated JS must PARSE (node --check).
+    let js_valid = created.iter().filter(|f| f.ends_with(".js")).all(|f| {
+        std::process::Command::new("node")
+            .args(["--check", f]).current_dir(project_dir).output()
+            .map(|o| o.status.success()).unwrap_or(false)
+    });
+
+    // Reload so a brand-new static file is served, then check the page + API.
+    ping_reload(framework_port).await;
+    let kebab = created.iter().find(|f| f.ends_with(".html"))
+        .and_then(|f| Path::new(f).file_stem().and_then(|s| s.to_str()))
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| name.to_lowercase());
+    let page_path = format!("/{kebab}.html");
+
+    let mut page_status = 0u16;
+    let mut api_status = 0u16;
+    if let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8)).pool_max_idle_per_host(0).build()
+    {
+        if let Ok(r) = client.get(format!("http://127.0.0.1:{framework_port}{page_path}")).send().await {
+            page_status = r.status().as_u16();
+        }
+        if let Some(a) = api {
+            if let Ok(r) = client.get(format!("http://127.0.0.1:{framework_port}{a}")).send().await {
+                api_status = r.status().as_u16();
+            }
+        }
+    }
+
+    let ok = !created.is_empty() && js_valid && page_status == 200
+        && (api.is_none() || api_status < 500);
+
+    serde_json::json!({
+        "ok": ok,
+        "created": created,           // file NAMES
+        "js_valid": js_valid,
+        "page": {"path": page_path, "status": page_status},
+        "api": api.map(|a| serde_json::json!({"path": a, "status": api_status})),
+        "source_bytes": 0
     })
 }
 
@@ -7251,6 +7331,7 @@ print('hi')
                 "outward surface must not publish {leaky}");
         }
         assert!(names.contains(&"tina4_scaffold_verify".to_string()));
+        assert!(names.contains(&"tina4_build_page".to_string()));
         // The published tool's contract must promise proof, not source.
         let desc = tools[0]["description"].as_str().unwrap();
         assert!(desc.to_lowercase().contains("proof"));

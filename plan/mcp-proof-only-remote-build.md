@@ -104,6 +104,24 @@ Additive (no existing route touched); 154 tests + clippy green.
       (Slice 0 is localhost-only — bound to 127.0.0.1, unreachable without the
       tunnel — so it needs no auth.)
 
+### Slice 3 — supervisor reaches OUT (the AI as reasoning intermediate)
+Bidirectional: not just AI→supervisor (tools), but supervisor→AI. In MCP terms
+this is **sampling** — the server sends `sampling/createMessage` to the connected
+client and borrows its LLM. The supervisor becomes the orchestrator that owns the
+project + verification ladder and delegates THINKING to whatever brain is
+connected.
+- [ ] Bidirectional transport (streamable/SSE) so the supervisor can initiate a
+      message mid-session (Slice 0's HTTP req/resp can't).
+- [ ] `sampling/createMessage` from the supervisor when it needs reasoning
+      (plan a step, repair a hallucinated symbol), degrading to `long_context`
+      when the client doesn't support sampling.
+- [ ] The build LOOP: supervisor asks the connected AI to reason → scaffolds →
+      verifies → on failure sends the REAL error back and asks again. The AI
+      reasons; the supervisor keeps it honest with proof each turn.
+- [ ] OUTBOUND privacy: what the supervisor SENDS the AI is minimal context (a
+      step, an error, a status) — NEVER the codebase or secrets. Proof-only in;
+      context-only out.
+
 ## Validation scenarios (the concept, proven from several angles)
 - Slice 0: localhost curl acting as an MCP client → proof, zero source.
 - **Local Ollama → supervisor MCP**: a fully-OFFLINE proof — a local Ollama model

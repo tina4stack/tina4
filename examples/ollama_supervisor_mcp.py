@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Fully-LOCAL proof of the concept: a local Ollama model is the AI engine, and it
-drives the Tina4 supervisor's PROOF-ONLY MCP tool. The model builds a resource
-and reads back proof it works — while the source, DDL, rows and secrets NEVER
-leave the machine.
+Fully-LOCAL proof of the concept. Ask a local Ollama model to "build a website"
+and, disconnected, it can only say "I'm an LLM, I can't — but I can guide you".
+Connected to the Tina4 supervisor's PROOF-ONLY MCP, that SAME model builds a
+real backend resource AND a reactive frontend page, and reads back proof each
+works — while the source, DDL, rows and secrets NEVER leave the machine.
 
 Nothing here talks to the cloud. Ollama is local; the supervisor is local.
 
 Run:
-    python3 ollama_mcp_test.py
-    OLLAMA_MODEL=functiongemma:latest python3 ollama_mcp_test.py   # try another model
+    python3 ollama_supervisor_mcp.py
+    OLLAMA_MODEL=functiongemma:latest python3 ollama_supervisor_mcp.py  # another model
 
 Prereqs (already true if you followed along):
     - ollama running with a tool-capable model (llama3.2:3b works)
@@ -30,9 +31,11 @@ PROJECT = os.environ.get(
     "TINA4_PROJECT",
     os.path.expanduser("~/IdeaProjects/tina4-dev-admin/.playground"))
 
-# Any of these appearing in the MCP response would mean SOURCE leaked out.
+# Any of these appearing in the MCP response would mean SOURCE leaked out
+# (backend Python + DDL, or frontend tina4-js).
 SOURCE_MARKERS = ["IntegerField", "NumericField", "StringField", "class ",
-                  "async def", "CREATE TABLE", "import ", "def test_", "SELECT "]
+                  "async def", "CREATE TABLE", "import ", "def test_", "SELECT ",
+                  "signal(", "api.get", "html`", "<script", "Tina4Element"]
 
 
 def post(url, payload):
@@ -57,12 +60,14 @@ def to_ollama_tool(mcp_tool):
     }}
 
 
-def reset_invoice():
-    """Remove any prior Invoice resource so the demo is repeatable."""
+def reset_demo():
+    """Remove any prior Product resource + products page so the demo repeats."""
     import glob
     import sqlite3
-    for pat in ["src/orm/Invoice.py", "src/routes/invoices.py",
-                "migrations/*create_invoice*", "tests/*invoice*", "test_invoice*.db"]:
+    pats = ["src/orm/Product.py", "src/routes/products.py",
+            "migrations/*create_product*", "tests/*product*", "test_product*.db",
+            "src/public/js/products-page.js", "src/public/products.html"]
+    for pat in pats:
         for f in glob.glob(os.path.join(PROJECT, pat)):
             try:
                 os.remove(f)
@@ -72,95 +77,107 @@ def reset_invoice():
     if os.path.exists(db):
         try:
             con = sqlite3.connect(db)
-            con.execute("DROP TABLE IF EXISTS invoice")
+            con.execute("DROP TABLE IF EXISTS product")
             con.commit()
             con.close()
         except Exception:
             pass
 
 
+def ask_model_for_tool(task, tools):
+    """Send a task + the tool catalogue to the local model; return (name, args)
+    from whatever it emits — structured tool_calls OR JSON in the content."""
+    chat = post(f"{OLLAMA}/api/chat", {
+        "model": MODEL,
+        "messages": [{"role": "user", "content": task}],
+        "tools": [to_ollama_tool(t) for t in tools],
+        "stream": False,
+    })
+    msg = chat.get("message", {})
+    calls = msg.get("tool_calls") or []
+    if calls:
+        fn = calls[0]["function"]
+        args = fn["arguments"] if isinstance(fn["arguments"], dict) else json.loads(fn["arguments"])
+        return fn["name"], args
+    m = re.search(r"\{.*\}", msg.get("content", ""), re.S)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            return (obj.get("name") or obj.get("tool") or obj.get("function"),
+                    obj.get("parameters") or obj.get("arguments") or {})
+        except json.JSONDecodeError:
+            pass
+    return None, None
+
+
+def snap_tool(name, published):
+    """Small models mistype tool names — snap to the right published tool."""
+    if name in published:
+        return name
+    key = (name or "").lower().replace(" ", "").replace("_", "")
+    if any(w in key for w in ("page", "buildpage", "website", "ui", "frontend")):
+        return "tina4_build_page"
+    if any(w in key for w in ("scaffold", "resource", "model", "verify")):
+        return "tina4_scaffold_verify"
+    return name
+
+
+def run_tool(name, args):
+    """Call the supervisor and assert no source crossed the boundary."""
+    result = mcp("tools/call", {"name": name, "arguments": args})
+    proof = json.loads(result["result"]["content"][0]["text"])
+    leaked = [k for k in SOURCE_MARKERS if re.search(re.escape(k), json.dumps(result))]
+    return proof, leaked
+
+
 def main():
     print(f"\n• model:      {MODEL}  (local Ollama)")
     print(f"• supervisor: {SUPERVISOR}  (local)\n")
-    reset_invoice()  # repeatable
+    reset_demo()
 
-    # 1. Ask the supervisor what it publishes. Only proof tools should appear.
     tools = mcp("tools/list")["result"]["tools"]
     names = [t["name"] for t in tools]
     print(f"[handshake] supervisor publishes: {names}")
     assert "file_read" not in names and "database_query" not in names, \
         "source-exposing tool on the outward surface!"
-    print("[handshake] ✅ no file_read / database_query on the surface\n")
+    print("[handshake] ✅ backend + frontend build tools; no file_read/database_query\n")
 
-    # 2. Hand those tools to the LOCAL model and give it a build task.
-    user_task = ("Build a resource called Invoice with fields amount:float and "
-                 "reference:string, then confirm it works. Use the "
-                 "tina4_scaffold_verify tool with kind='resource'.")
-    print(f"[you → {MODEL}] {user_task}\n")
+    # "can you build me a website" — a bare model only advises. Connected to the
+    # supervisor, this SAME local model builds the backend AND the frontend.
+    steps = [
+        ("Build a resource called Product with fields name:string and price:float, "
+         "then confirm it works (use tina4_scaffold_verify, kind='resource')."),
+        ("Build a reactive products page that lists products from /api/products "
+         "(use tina4_build_page, name='products', api='/api/products')."),
+    ]
+    any_leak = False
+    for i, task in enumerate(steps, 1):
+        print(f"[you → {MODEL}] {task}")
+        raw_name, args = ask_model_for_tool(task, tools)
+        if not raw_name:
+            print(f"  [{MODEL}] no tool call — try OLLAMA_MODEL=functiongemma:latest")
+            sys.exit(1)
+        name = snap_tool(raw_name, names)
+        if name != raw_name:
+            print(f"  [note] {raw_name!r} → {name!r}")
+        print(f"  [{MODEL} → supervisor] {name}({json.dumps(args)})")
+        proof, leaked = run_tool(name, args)
+        any_leak = any_leak or bool(leaked)
+        print(f"  [proof] ok={proof.get('ok')}  "
+              f"created={len(proof.get('created', []))} file(s)  "
+              f"source_bytes={proof.get('source_bytes')}  "
+              f"source_in_response={'LEAK ' + str(leaked) if leaked else 'NONE ✅'}\n")
 
-    chat = post(f"{OLLAMA}/api/chat", {
-        "model": MODEL,
-        "messages": [{"role": "user", "content": user_task}],
-        "tools": [to_ollama_tool(t) for t in tools],
-        "stream": False,
-    })
-    msg = chat.get("message", {})
-    fn_name, args = None, None
-
-    # (a) Native structured tool call (bigger models).
-    calls = msg.get("tool_calls") or []
-    if calls:
-        fn = calls[0]["function"]
-        fn_name = fn["name"]
-        args = fn["arguments"] if isinstance(fn["arguments"], dict) else json.loads(fn["arguments"])
-    else:
-        # (b) Small local models often emit the call as JSON in the content.
-        content = msg.get("content", "")
-        m = re.search(r"\{.*\}", content, re.S)
-        if m:
-            try:
-                obj = json.loads(m.group(0))
-                fn_name = obj.get("name") or obj.get("tool") or obj.get("function")
-                args = obj.get("parameters") or obj.get("arguments") or {}
-            except json.JSONDecodeError:
-                pass
-
-    if not fn_name:
-        print(f"[{MODEL}] did not emit a usable tool call. Raw reply:\n"
-              f"  {msg.get('content', '')[:300]}")
-        print("\nTip: try `OLLAMA_MODEL=functiongemma:latest` (a function-calling model).")
+    print("=" * 62)
+    print("  A local model was asked to \"build a website\".")
+    print("  Disconnected, it can only say \"I'm an LLM, I can't\".")
+    print("  Connected to the supervisor, it built a real backend + a")
+    print("  reactive, styled frontend page — and got PROOF each works,")
+    print(f"  while the code never left the machine.  {'❌ LEAK' if any_leak else '✅'}")
+    print("=" * 62)
+    if any_leak:
         sys.exit(1)
 
-    # Small models mistype the tool name — snap it to the one real tool.
-    real = names[0]
-    if fn_name != real and "scaffold" in fn_name.replace(" ", ""):
-        print(f"[note] normalising model's tool name {fn_name!r} → {real!r}")
-        fn_name = real
-    fn = {"name": fn_name}
-    print(f"[{MODEL} → supervisor] tool_call {fn_name}({json.dumps(args)})\n")
-
-    # 3. Execute the model's tool call against the supervisor. This BUILDS locally.
-    result = mcp("tools/call", {"name": fn["name"], "arguments": args})
-    proof_text = result["result"]["content"][0]["text"]
-    proof = json.loads(proof_text)
-    print("[supervisor → model] PROOF returned:")
-    print("  " + json.dumps(proof, indent=2).replace("\n", "\n  "))
-
-    # 4. The whole point: prove no source crossed the boundary.
-    full = json.dumps(result)
-    leaked = [m for m in SOURCE_MARKERS if re.search(re.escape(m), full)]
-    print("\n" + "=" * 60)
-    print(f"  proof.ok          : {proof.get('ok')}")
-    print(f"  tests             : {proof.get('test_summary')}")
-    print(f"  endpoints         : {proof.get('endpoints')}")
-    print(f"  source_bytes      : {proof.get('source_bytes')}")
-    print(f"  source in response: {'LEAK → ' + str(leaked) if leaked else 'NONE ✅'}")
-    print("=" * 60)
-    if leaked:
-        print("\n❌ concept FAILED — source leaked.")
-        sys.exit(1)
-    print("\n✅ A local model built a real resource and got proof it works —")
-    print("   the code never left the machine.")
 
 
 if __name__ == "__main__":

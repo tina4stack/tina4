@@ -3291,6 +3291,50 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                     status, body.len(), body
                 );
                 let _ = stream.write_all(resp.as_bytes()).await;
+            } else if first_line.starts_with("POST /mcp/rpc") {
+                // PROOF-ONLY MCP surface published by the supervisor. JSON-RPC:
+                // tools/list + tools/call. This is the OUTWARD surface a remote
+                // AI talks to — it never exposes file_read/database_query, and
+                // every tool result is proof (names/summary/status), not source.
+                let body_start = request.find("\r\n\r\n").unwrap_or(n) + 4;
+                let body_str = &request[body_start..];
+                let req_json: serde_json::Value = serde_json::from_str(body_str).unwrap_or(serde_json::json!({}));
+                let id = req_json.get("id").cloned().unwrap_or(serde_json::json!(1));
+                let method = req_json.get("method").and_then(|m| m.as_str()).unwrap_or("");
+                let framework_port = port.saturating_sub(2000);
+
+                let result = match method {
+                    "tools/list" => serde_json::json!({"tools": supervisor_mcp_tools()}),
+                    "tools/call" => {
+                        let params = req_json.get("params").cloned().unwrap_or_default();
+                        let tool = params.get("name").and_then(|s| s.as_str()).unwrap_or("");
+                        let args = params.get("arguments").cloned().unwrap_or_default();
+                        if tool == "tina4_scaffold_verify" {
+                            let kind = args.get("kind").and_then(|s| s.as_str()).unwrap_or("resource");
+                            let rname = args.get("name").and_then(|s| s.as_str()).unwrap_or("");
+                            let fields = args.get("fields").and_then(|s| s.as_str());
+                            if rname.is_empty() {
+                                serde_json::json!({"isError": true,
+                                    "content": [{"type": "text", "text": "name is required"}]})
+                            } else {
+                                let proof = mcp_scaffold_verify(&project_dir, framework_port, kind, rname, fields).await;
+                                serde_json::json!({"content": [{"type": "text",
+                                    "text": serde_json::to_string(&proof).unwrap_or_default()}]})
+                            }
+                        } else {
+                            serde_json::json!({"isError": true,
+                                "content": [{"type": "text", "text": format!("unknown tool: {tool}")}]})
+                        }
+                    }
+                    _ => serde_json::json!({"error": {"code": -32601, "message": "method not found"}}),
+                };
+                let envelope = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result});
+                let body = serde_json::to_string(&envelope).unwrap_or_default();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = stream.write_all(resp.as_bytes()).await;
             } else if first_line.starts_with("GET /thoughts") {
                 let thoughts = load_thoughts(&project_dir);
                 let body = serde_json::to_string(&thoughts).unwrap_or_default();
@@ -5586,6 +5630,91 @@ fn kind_name_from_path(path: &str) -> Option<(String, String)> {
 /// artifacts (complete, secure-by-default, swagger-annotated). Returns the
 /// project-relative paths of the files it created (parsed from the generator's
 /// `✓ Created <path>` output). Empty on failure — best-effort.
+/// The outward, PROOF-ONLY MCP tool catalogue published by the supervisor.
+/// Deliberately tiny and NON-source-exposing: no file_read/write, no
+/// database_query. A remote AI gets to prove work, never to read code.
+fn supervisor_mcp_tools() -> serde_json::Value {
+    serde_json::json!([
+        {
+            "name": "tina4_scaffold_verify",
+            "description": "Scaffold a resource in the local project and return PROOF it works \
+(files created, tests, live endpoint status). Never returns source, data, or secrets.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["model", "route", "resource"],
+                             "description": "resource = model + CRUD routes"},
+                    "name": {"type": "string", "description": "singular resource name, e.g. Product"},
+                    "fields": {"type": "string",
+                               "description": "optional, e.g. \"name:string,price:float\""}
+                },
+                "required": ["kind", "name"]
+            }
+        }
+    ])
+}
+
+/// Run scaffold-first + the verification ladder for one resource and return a
+/// PROOF-ONLY payload. The invariant this whole thread rests on: the returned
+/// JSON contains file NAMES, a test summary and endpoint STATUS codes — never a
+/// file body, a DB row, or a secret. `source_bytes` is asserted 0 by the caller.
+async fn mcp_scaffold_verify(
+    project_dir: &Path,
+    framework_port: u16,
+    kind: &str,
+    name: &str,
+    fields: Option<&str>,
+) -> serde_json::Value {
+    let mut created: Vec<String> = Vec::new();
+    let field_spec = fields.unwrap_or("").to_string();
+    let model = singular_pascal(name);
+
+    // Model (with fields when given) — and, for a resource, the CRUD routes.
+    if kind == "model" || kind == "resource" {
+        let extra: Vec<&str> = if field_spec.is_empty() {
+            Vec::new()
+        } else {
+            vec!["--fields", field_spec.as_str()]
+        };
+        created.extend(run_framework_generate(project_dir, "model", &model, &extra));
+    }
+    if kind == "route" || kind == "resource" {
+        let plural = pluralize(&model.to_lowercase());
+        created.extend(run_framework_generate(project_dir, "route", &plural, &["--model", &model]));
+    }
+
+    // Verify: run the co-emitted tests, migrate + reload, smoke the GET routes.
+    let (tests_passed, test_summary) = run_project_tests(project_dir);
+    run_migrate(project_dir);
+    ping_reload(framework_port).await;
+
+    let mut endpoints: Vec<serde_json::Value> = Vec::new();
+    let plural = pluralize(&model.to_lowercase());
+    for path in [format!("/api/{plural}"), format!("/api/{plural}/1")] {
+        if let Ok(client) = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(8))
+            .pool_max_idle_per_host(0)
+            .build()
+        {
+            if let Ok(r) = client.get(format!("http://127.0.0.1:{framework_port}{path}")).send().await {
+                endpoints.push(serde_json::json!({"path": path, "status": r.status().as_u16()}));
+            }
+        }
+    }
+
+    let ok = !created.is_empty() && tests_passed
+        && endpoints.iter().all(|e| e["status"].as_u64().is_none_or(|s| s < 500));
+
+    // PROOF ONLY — names + summary + status codes. No content whatsoever.
+    serde_json::json!({
+        "ok": ok,
+        "created": created,               // relative paths, not bodies
+        "test_summary": test_summary,     // "15 passed" — not the test source
+        "endpoints": endpoints,           // {path, status} — not the response body
+        "source_bytes": 0                 // invariant: no source ever leaves
+    })
+}
+
 /// A detected tina4-js frontend request: which generator to run and its args.
 struct FrontendGen {
     kind: &'static str, // "page" | "component"
@@ -7107,6 +7236,25 @@ print('hi')
     fn orm_methods() -> std::collections::BTreeSet<String> {
         ["all", "find_by_id", "save", "delete", "query", "select", "to_dict", "count", "where"]
             .iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn supervisor_mcp_surface_is_proof_only() {
+        // The outward MCP surface must NEVER publish a source- or data-exposing
+        // tool. This is the privacy boundary of the whole thread.
+        let tools = supervisor_mcp_tools();
+        let names: Vec<String> = tools.as_array().unwrap().iter()
+            .map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        for leaky in ["file_read", "file_write", "file_patch", "database_query",
+                      "template_render", "database_execute", "orm_describe"] {
+            assert!(!names.contains(&leaky.to_string()),
+                "outward surface must not publish {leaky}");
+        }
+        assert!(names.contains(&"tina4_scaffold_verify".to_string()));
+        // The published tool's contract must promise proof, not source.
+        let desc = tools[0]["description"].as_str().unwrap();
+        assert!(desc.to_lowercase().contains("proof"));
+        assert!(desc.to_lowercase().contains("never returns source"));
     }
 
     #[test]

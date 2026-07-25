@@ -55,7 +55,22 @@ supervisor consumes; they are simply never published on the outward surface.)
 
 ## Scope (tiered — validation FIRST)
 
-### Slice 0 — CONCEPT VALIDATION (smallest falsifiable test)
+Registration gate (Slice 2): the supervisor MCP can only be UNLOCKED by a
+REGISTERED user. Handshake → dev-admin consent → per-session hash lock, and the
+whole surface is inert unless the dev is registered. Unregistered = no unlock.
+
+### Slice 0 — CONCEPT VALIDATION ✅ DONE (feature/supervisor-mcp)
+Published `POST /mcp/rpc` on the supervisor (JSON-RPC tools/list + tools/call),
+one proof-only tool `tina4_scaffold_verify`. Validated on localhost:
+- tools/list published ONLY `tina4_scaffold_verify` — `file_read` /
+  `database_query` absent from the outward surface.
+- tools/call built a real Invoice resource → `{ok:true, created:[6 files],
+  test_summary:"22 passed", endpoints:[/api/invoices→200], source_bytes:0}`.
+- A grep of the FULL response for `IntegerField`/`class Invoice`/`async def`/
+  `CREATE TABLE`/`import` → nothing. Proof crossed; source did NOT.
+Additive (no existing route touched); 154 tests + clippy green.
+
+### Slice 0 (original scoping below) —
 - [ ] Publish a minimal MCP server ON THE SUPERVISOR (JSON-RPC `tools/list` +
       `tools/call`) with ONE tool: `tina4_scaffold_verify(kind, name, fields?)`.
       It reuses the supervisor's existing scaffold-first + tests + endpoint-smoke
@@ -76,10 +91,25 @@ supervisor consumes; they are simply never published on the outward surface.)
 - [ ] A response linter: a `remote_safe` tool's output is scanned and rejected
       if it contains a file body / secret pattern before it leaves.
 
-### Slice 2 — tunnel + registration (Rust)
+### Slice 2 — tunnel + consent auth (Rust + dev-admin)
 - [ ] Rust agent manages the ngrok-type tunnel; each registered dev gets a
-      wildcard subdomain `<user>.dev.tina4.com` → their local `/__dev/mcp`.
-- [ ] Registration token auth; per-token tool allow-list.
+      wildcard subdomain `<user>.dev.tina4.com` → their supervisor MCP.
+- [ ] AUTH = human consent, no token juggling: when a remote AI (Copilot/Grok)
+      sends the MCP `initialize` handshake, the supervisor HOLDS it pending and
+      prompts IN THE DEV-ADMIN ("Copilot wants to connect — Allow / Deny"). The
+      user clicks Allow; the connection proceeds. Per-connection, revocable.
+- [ ] On Allow, a per-SESSION hash is generated and the session is LOCKED to it:
+      every subsequent MCP call must carry that hash (bound to the approved
+      connection). Revoke = drop the hash. No long-lived tokens.
+      (Slice 0 is localhost-only — bound to 127.0.0.1, unreachable without the
+      tunnel — so it needs no auth.)
+
+## Validation scenarios (the concept, proven from several angles)
+- Slice 0: localhost curl acting as an MCP client → proof, zero source.
+- **Local Ollama → supervisor MCP**: a fully-OFFLINE proof — a local Ollama model
+  is the AI engine calling the supervisor's proof-only tools. Nothing leaves the
+  box at all; the strongest form of the privacy claim.
+- Cloud AI (Claude/Copilot/Grok) over ngrok → proof, zero source (Slice 2).
 
 ## Tests / verification (real)
 - [ ] `tina4_scaffold_verify` returns proof; the response contains none of the
@@ -88,4 +118,18 @@ supervisor consumes; they are simply never published on the outward surface.)
 - [ ] Live over ngrok: external curl builds + validates; `wireshark`-simple check
       = the response body carries no source.
 
-## Status: 🟡 Scoping — Slice 0 is the concept validation
+## tina4-js MCP module (user direction)
+Build the MCP capability into **tina4-js** as a first-class module, alongside the
+existing client modules (`api`, `ws`, `sse`). Two possible shapes — CONFIRM which:
+- **`mcp` CLIENT** (`Tina4.mcp`): a browser/JS MCP client so any tina4-js app —
+  starting with the dev-admin SPA — connects to the supervisor's proof-only MCP
+  and calls `tools/list` / `tools/call`. Mirrors `api`/`ws`/`sse`. (Most likely.)
+- **`mcp` SERVER helpers**: JS-side building blocks for exposing MCP tools, if a
+  Node/tina4-js supervisor should PUBLISH the surface (vs the Rust agent).
+
+DECIDED: the proof-only SERVER lives in the **Rust supervisor** — most efficient
+(it already owns the verification ladder; no new runtime; the proof payload it
+emits IS the tool result). The tina4-js `mcp` CLIENT module is a later slice so
+the dev-admin SPA (and any tina4-js app) can call it.
+
+## Status: 🟡 Building Slice 0 in the Rust supervisor

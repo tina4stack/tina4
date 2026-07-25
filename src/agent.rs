@@ -401,6 +401,34 @@ Adding to a file that ALREADY EXISTS goes under `## APPEND: <path>` with ONLY \
 the new code (one handler/function/test) — do NOT restate the existing file. \
 Either way, one fenced block per header.";
 
+/// FRONTEND contract — used only for tina4-js UI work, in place of the backend
+/// one. The tina4-js skill exists because "AI consistently gets tina4-js
+/// patterns wrong", so the generators do the scaffolding and this states the
+/// rules for the custom logic the coder adds on top.
+const TINA4_FRONTEND_CONTRACT: &str = "\
+TINA4-JS FRONTEND CONTRACT — non-negotiable:\n\
+- FRAMEWORK: tina4-js (reactive, signals). NEVER React, Vue, Svelte, Angular, \
+jQuery. No JSX, no virtual DOM, no `import` — the page uses the GLOBAL `Tina4` \
+from `/js/tina4js.min.js`: `const { signal, computed, html, effect, api, \
+Tina4Element, route, router } = Tina4;`.\n\
+- SCAFFOLD FIRST: a page or component comes from `tina4js generate page <name> \
+[--api /api/x]` / `generate component <Name>` — do NOT hand-write the skeleton. \
+Author only custom logic on top.\n\
+- REACTIVITY: read a signal with `sig.value`. In `html\\`...\\`` put a signal or a \
+FUNCTION in the hole: `${sig}` or `${() => expr}` for anything that updates; a \
+bare `${value}` is evaluated ONCE and never updates. For show/hide use \
+`${() => cond ? html\\`...\\` : null}` — NEVER `${cond && ...}` (`${false}` renders \
+the text \"false\").\n\
+- COMPONENTS: extend `Tina4Element`; keep signal reads inside the template `${}` \
+holes, NOT in `render()`'s body (that re-renders the whole component and drops \
+input focus). Scope CSS via `static styles`.\n\
+- STYLING: tina4-css classes ONLY (container/card/table/btn/alert/row/col from \
+`/css/tina4.min.css`). Inline `style=` is a HARD NO.\n\
+- FILE PLACEMENT: frontend files live under `public/` (or `src/public/` on \
+tina4-python) and `frontend/` — NEVER `src/routes/` or `src/orm/`. A page is \
+`public/js/<name>-page.js` + `public/<name>.html`; a component is \
+`public/js/components/<name>.js`.";
+
 // ── Default agent configs ──
 
 const DEFAULT_AGENTS: &[(&str, &str, &str)] = &[
@@ -3985,7 +4013,11 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                                     };
                                     let base_msg = format!("{base_msg}{}", existing_file_context(&project_dir, step));
                                     let (coder_msg, hits) = ground_coder_msg(&project_dir, &base_msg, step, &[]).await;
-                                    let coder_msg = format!("{}{TINA4_CODER_CONTRACT}\n\n{coder_msg}", coder_language_preamble());
+                                    let coder_msg = if detect_frontend_request(step).is_some() {
+                                        format!("{TINA4_FRONTEND_CONTRACT}\n\n{coder_msg}")
+                                    } else {
+                                        format!("{}{TINA4_CODER_CONTRACT}\n\n{coder_msg}", coder_language_preamble())
+                                    };
                                     let coder_msg = if coder_is_tina4chat {
                                         clamp_coder_prompt(&coder_msg, SMALL_CODER_PROMPT_BUDGET)
                                     } else {
@@ -4492,7 +4524,11 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                     let (coder_msg, hits) = ground_coder_msg(&project_dir, &base_msg, &step_text, &[]).await;
                     // Contract at the HEAD: it must survive the clamp, and for
                     // long_context the user message IS the question.
-                    let coder_msg = format!("{}{TINA4_CODER_CONTRACT}\n\n{coder_msg}", coder_language_preamble());
+                    let coder_msg = if detect_frontend_request(&step_text).is_some() {
+                        format!("{TINA4_FRONTEND_CONTRACT}\n\n{coder_msg}")
+                    } else {
+                        format!("{}{TINA4_CODER_CONTRACT}\n\n{coder_msg}", coder_language_preamble())
+                    };
                     // Grounding can re-inflate it — clamp as the final guard.
                     let coder_msg = if coder_is_tina4chat {
                         clamp_coder_prompt(&coder_msg, SMALL_CODER_PROMPT_BUDGET)
@@ -4790,6 +4826,35 @@ file(s) under a `## FILE:` header.{want}",
                         sse_ev(&mut stream, "message", &format!(
                             "{{\"content\":\"❌ The test suite reports: {esc}. I cannot classify this build as complete. Resuming will direct the coder to the failures.\",\"agent\":\"supervisor\"}}"
                         )).await;
+                    }
+                }
+                // FRONTEND VERIFY — a tina4-js page/component has no route to smoke
+                // and no python to import; prove it's valid JS and servable. This
+                // reports PROOF ("valid + served"), never the source itself.
+                if !failed {
+                    let fe_js: Vec<String> = state.files.iter()
+                        .filter(|f| f.ends_with(".js") && (f.contains("/public/") || f.starts_with("public/") || f.contains("/frontend/")))
+                        .cloned().collect();
+                    if !fe_js.is_empty() {
+                        sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({
+                            "text": format!("→ Checking {} frontend file(s)…", fe_js.len()), "agent": "coder"}))).await;
+                        let mut bad: Vec<String> = Vec::new();
+                        for f in &fe_js {
+                            let ok = std::process::Command::new("node")
+                                .args(["--check", f]).current_dir(&project_dir).output()
+                                .map(|o| o.status.success()).unwrap_or(false);
+                            if !ok { bad.push(f.clone()); }
+                        }
+                        if bad.is_empty() {
+                            test_line.push_str(&format!("\\n✅ Frontend: {} file(s) valid", fe_js.len()));
+                        } else {
+                            failed = true;
+                            test_line.push_str(&format!("\\n❌ Frontend: invalid JS in {}", bad.join(", ")));
+                            sse_ev(&mut stream, "message", &format!(
+                                "{{\"content\":\"❌ Frontend code did not parse: {}. Resuming will direct the coder to fix it.\",\"agent\":\"supervisor\"}}",
+                                bad.join(", ")
+                            )).await;
+                        }
                     }
                 }
                 // Make it live: migrate the new tables + re-discover routes (no restart).
@@ -5521,6 +5586,110 @@ fn kind_name_from_path(path: &str) -> Option<(String, String)> {
 /// artifacts (complete, secure-by-default, swagger-annotated). Returns the
 /// project-relative paths of the files it created (parsed from the generator's
 /// `✓ Created <path>` output). Empty on failure — best-effort.
+/// A detected tina4-js frontend request: which generator to run and its args.
+struct FrontendGen {
+    kind: &'static str, // "page" | "component"
+    name: String,
+    api: Option<String>,
+}
+
+/// Detect a FRONTEND (tina4-js) request from a step/goal. Returns None for
+/// backend work so `scaffold_first` falls through to the framework generators.
+/// A page needs a clear UI signal ("page", "frontend", "ui", "screen",
+/// "reactive", "tina4-js"); "component" routes to the component generator.
+fn detect_frontend_request(ctx: &str) -> Option<FrontendGen> {
+    let lower = ctx.to_lowercase();
+    let is_component = lower.contains("component") || lower.contains("web component")
+        || lower.contains("custom element");
+    let is_page = lower.contains("frontend") || lower.contains("tina4-js")
+        || lower.contains("tina4js") || lower.contains(" spa") || lower.contains("single page")
+        || lower.contains("reactive")
+        || (lower.contains("page") && !lower.contains("home page") && !lower.contains("web page"))
+        || (lower.contains(" ui") || lower.contains("user interface") || lower.contains("screen"));
+    if !is_component && !is_page {
+        return None;
+    }
+    // Resource noun → name; a page bound to a resource fetches /api/<plural>.
+    // Strip the UI words first, or detect_resource_name grabs "page"/"component"
+    // itself (they aren't backend stopwords) instead of the real resource.
+    let mut cleaned = lower.clone();
+    for w in ["component", "web component", "custom element", "frontend", "reactive",
+              "tina4-js", "tina4js", "single page", "spa", "page", "screen",
+              "user interface", " ui ", " ui", "list", "show", "display", "render"] {
+        cleaned = cleaned.replace(w, " ");
+    }
+    let resource = detect_resource_name(&cleaned);
+    if is_component {
+        let name = resource
+            .map(|r| r.to_lowercase())
+            .unwrap_or_else(|| "widget".into());
+        return Some(FrontendGen { kind: "component", name, api: None });
+    }
+    let (name, api) = match resource {
+        Some(r) => {
+            let plural = pluralize(&r.to_lowercase());
+            (plural.clone(), Some(format!("/api/{plural}")))
+        }
+        None => ("home".to_string(), None),
+    };
+    Some(FrontendGen { kind: "page", name, api })
+}
+
+/// Strip ANSI escape sequences (the tina4-js CLI colours its output).
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // Skip up to and including the terminating letter of a CSI sequence.
+            for n in chars.by_ref() {
+                if n.is_ascii_alphabetic() { break; }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Run the tina4-js generator (the frontend equivalent of the framework
+/// generators). Resolves the CLI via `TINA4_JS_CLI` (a path to bin/tina4.js run
+/// under node) or `npx tina4js`. Returns the project-relative paths it created,
+/// parsed from the generator's `✓ <path>` lines.
+fn run_frontend_generate(project_dir: &Path, kind: &str, name: &str, api: Option<&str>) -> Vec<String> {
+    let (cmd, mut argv): (String, Vec<String>) = match std::env::var("TINA4_JS_CLI") {
+        Ok(path) if !path.is_empty() => (
+            "node".into(),
+            vec![path, "generate".into(), kind.into(), name.into()],
+        ),
+        _ => (
+            "npx".into(),
+            vec!["--yes".into(), "tina4js".into(), "generate".into(), kind.into(), name.into()],
+        ),
+    };
+    if let Some(a) = api {
+        argv.push("--api".into());
+        argv.push(a.into());
+    }
+    match std::process::Command::new(&cmd).args(&argv).current_dir(project_dir).output() {
+        Ok(o) => {
+            let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+            if !o.status.success() {
+                eprintln!("[coder] tina4js generate {kind} {name}: {}", text.trim());
+            }
+            // Lines look like "  ✓ src/public/js/products-page.js". A copied
+            // asset line ("✓ Copied … → …") has whitespace, so it's excluded.
+            text.lines()
+                .map(strip_ansi)
+                .filter_map(|l| l.split('✓').nth(1).map(|s| s.trim().to_string()))
+                .filter(|p| p.contains('/') && !p.contains(char::is_whitespace)
+                    && (p.ends_with(".js") || p.ends_with(".html")))
+                .collect()
+        }
+        Err(e) => { eprintln!("[coder] tina4js generate spawn failed: {e}"); Vec::new() }
+    }
+}
+
 fn run_framework_generate(project_dir: &Path, kind: &str, name: &str, extra: &[&str]) -> Vec<String> {
     let lang = crate::detect::detect_language().map(|p| p.language).unwrap_or_default();
     let (cmd, mut argv): (&str, Vec<String>) = match lang.as_str() {
@@ -5973,6 +6142,11 @@ fn explicit_path_in(ctx: &str) -> Option<String> {
 /// fields fall back to the goal so a planner that drops "with email and name"
 /// from a step still produces those columns.
 fn scaffold_first(project_dir: &Path, ctx: &str, goal: &str, files: &[String]) -> Vec<String> {
+    // FRONTEND first: a tina4-js page/component is scaffolded by the tina4-js
+    // generator, not the backend ones. Short-circuit before any src/routes work.
+    if let Some(fe) = detect_frontend_request(ctx).or_else(|| detect_frontend_request(goal)) {
+        return run_frontend_generate(project_dir, fe.kind, &fe.name, fe.api.as_deref());
+    }
     // A step naming a file that already exists is an EDIT, not a scaffold:
     // "Add a GET handler to src/routes/orders.py" must not generate a resource.
     // (Without this the goal-promotion below fires on the "routes" inside the
@@ -6933,6 +7107,46 @@ print('hi')
     fn orm_methods() -> std::collections::BTreeSet<String> {
         ["all", "find_by_id", "save", "delete", "query", "select", "to_dict", "count", "where"]
             .iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn detects_a_frontend_page_request() {
+        let fe = detect_frontend_request("Build a products page").expect("page");
+        assert_eq!(fe.kind, "page");
+        assert_eq!(fe.name, "products");
+        assert_eq!(fe.api.as_deref(), Some("/api/products"));
+
+        let fe2 = detect_frontend_request("a reactive frontend to list customers").expect("page");
+        assert_eq!(fe2.kind, "page");
+        assert_eq!(fe2.name, "customers");
+    }
+
+    #[test]
+    fn detects_a_component_request() {
+        let fe = detect_frontend_request("create a counter component").expect("component");
+        assert_eq!(fe.kind, "component");
+        assert_eq!(fe.name, "counter");
+        assert!(fe.api.is_none());
+    }
+
+    #[test]
+    fn backend_work_is_not_mistaken_for_frontend() {
+        assert!(detect_frontend_request("Generate a products model").is_none());
+        assert!(detect_frontend_request("Use the generator to create routes for the Order model").is_none());
+        assert!(detect_frontend_request("Add a GET handler to src/routes/orders.py").is_none());
+    }
+
+    #[test]
+    fn strip_ansi_removes_colour_codes() {
+        assert_eq!(strip_ansi("  \u{1b}[32m✓\u{1b}[0m src/public/js/x.js"), "  ✓ src/public/js/x.js");
+    }
+
+    #[test]
+    fn frontend_contract_forbids_other_frameworks_and_inline_styles() {
+        assert!(TINA4_FRONTEND_CONTRACT.contains("React"));
+        assert!(TINA4_FRONTEND_CONTRACT.contains("tina4-css"));
+        assert!(TINA4_FRONTEND_CONTRACT.to_lowercase().contains("inline"));
+        assert!(TINA4_FRONTEND_CONTRACT.contains("generate page"));
     }
 
     #[test]

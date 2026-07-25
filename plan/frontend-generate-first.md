@@ -52,13 +52,23 @@ alert/...` from `/css/tina4.min.css`). **Inline `style=` is a hard NO.**
 Components scope CSS via `Tina4Element.static styles` (shadow DOM), never inline.
 The generator bakes this in; a test asserts `style=` never appears.
 
-### Slice 2 — wire the coder (separate thread)
-- [ ] `TINA4_FRONTEND_CONTRACT` (mirror of the backend contract): which APIs,
-      the binding rules, file placement (`frontend/` or `public/js/`, never
-      `src/routes/`), no React/Vue.
-- [ ] Detect a frontend/page/component/UI request; scaffold-first via the new
-      generators; ground against the tina4-js skill.
-- [ ] Render-verify replaces endpoint-smoke for frontend files.
+### Slice 2 — wire the coder  ✅ DONE (tina4 `src/agent.rs`)
+- [x] `TINA4_FRONTEND_CONTRACT` — tina4-js only (no React/Vue), signal/`${() =>}`
+      binding rules, `Tina4Element`, tina4-css only (inline `style=` forbidden),
+      file placement under `public/`/`frontend/` never `src/routes/`.
+- [x] `detect_frontend_request(ctx)` → page/component + resource + `/api/<plural>`;
+      strips UI words so the resource noun isn't "page"/"component". Backend work
+      is never misdetected (3 negative tests).
+- [x] `run_frontend_generate` shells to the tina4-js CLI (`TINA4_JS_CLI` or
+      `npx tina4js`), parses `✓ <path>`. `scaffold_first` short-circuits to it —
+      generate-first for the frontend too.
+- [x] Contract prepend is frontend-aware at both coder sites.
+- [x] FRONTEND VERIFY: generated `public/**/*.js` are `node --check`ed; invalid
+      JS fails the build. Reports PROOF (valid + served), never the source.
+- [x] Proven live: `/execute` a "reactive frontend page that lists customers"
+      plan → agent scaffolded `customers-page.js` + `customers.html`, verified,
+      served; RENDERED in the browser listing the real `/api/customers` row,
+      tina4-css styled, zero inline styles. 154 Rust tests, clippy clean.
 
 ## Tests / verification (real — no mocks)
 - [ ] Generator unit: `generate page products --api /api/products` writes a file

@@ -2614,6 +2614,119 @@ pub fn parse_supervisor_action(response: &str) -> Option<SupervisorAction> {
     })
 }
 
+/// Short affirmations that mean "act now". Mirrors the go-phrase list in the
+/// supervisor system prompt — kept in CODE so a weaker model that narrates
+/// instead of acting still gets routed. Matched against the whole normalised
+/// user message, so these stay genuine stand-alone affirmations.
+const SIGNOFF_PHRASES: &[&str] = &[
+    "go", "go ahead", "go for it", "ok go", "alright go", "ok", "okay",
+    "yes", "yep", "yup", "yeah", "sure", "do it", "just do it", "yes do it",
+    "build it", "just build it", "make it", "make it happen",
+    "lets make it happen", "let's make it happen", "lets do it", "let's do it",
+    "ship it", "proceed", "execute", "looks good", "lgtm", "sounds good",
+    "you decide", "your call", "no just do it", "no lets make it happen",
+    "no let's make it happen",
+];
+
+/// Revision cues that VETO a sign-off — "yes but change the price" is a
+/// revision request, not an approval. Checked as substrings on the padded,
+/// normalised message (spaces baked in where a word boundary matters).
+const REVISION_CUES: &[&str] = &[
+    "but ", "however", "change", "instead", "actually", "wait", "hold on",
+    "except", "rather", " add ", "remove", "also ", " not ",
+];
+
+/// Lowercase, trim, and strip trailing punctuation/emoji so "Go ahead! 🚀"
+/// and "go ahead" compare equal.
+fn normalise_signoff(msg: &str) -> String {
+    msg.trim()
+        .to_lowercase()
+        .trim_end_matches(|c: char| !c.is_alphanumeric())
+        .trim()
+        .to_string()
+}
+
+/// True when the user's message is a bare go-ahead. Revision cues veto it, and
+/// anything longer than a few words is treated as substance, not a sign-off.
+fn is_signoff(msg: &str) -> bool {
+    let norm = normalise_signoff(msg);
+    if norm.is_empty() {
+        return false;
+    }
+    let padded = format!(" {norm} ");
+    if REVISION_CUES.iter().any(|c| padded.contains(c)) {
+        return false;
+    }
+    if SIGNOFF_PHRASES.contains(&norm.as_str()) {
+        return true;
+    }
+    // Allow a couple of trailing filler words ("go ahead please", "yes do it
+    // now") but reject longer messages — those carry real content.
+    if norm.split_whitespace().count() > 5 {
+        return false;
+    }
+    SIGNOFF_PHRASES
+        .iter()
+        .any(|p| norm == *p || norm.starts_with(&format!("{p} ")))
+}
+
+/// True when a plan is waiting for the user's go-ahead: the last assistant turn
+/// came from the planner, or reads as a plan (≥3 numbered steps).
+fn plan_awaiting_signoff(recent: &[&ChatMessage]) -> bool {
+    let Some(last) = recent.iter().rev().find(|m| m.role == "assistant") else {
+        return false;
+    };
+    if last.agent.as_deref() == Some("planner") {
+        return true;
+    }
+    let numbered = last
+        .content
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            t.len() > 2
+                && t.chars().next().is_some_and(|c| c.is_ascii_digit())
+                && (t.contains(". ") || t.contains(") "))
+        })
+        .count();
+    numbered >= 3
+}
+
+/// Deterministic sign-off guard (Thread 4). Routing lives in the prompt, but
+/// the `long_context` supervisor does not reliably obey it — after a plan it
+/// often returns `{"action":"respond"}` with narration instead of executing.
+/// Don't trust compliance: if the user plainly signed off AND a plan is waiting
+/// AND a plan file exists, coerce the action to `execute_plan` (context "plan/"
+/// so the newest-plan fallback resolves the file). Returns the (possibly
+/// rewritten) action and whether it fired, so the caller can log the override.
+fn coerce_signoff_to_execute(
+    action: Option<SupervisorAction>,
+    user_msg: &str,
+    recent: &[&ChatMessage],
+    plan_file_exists: bool,
+) -> (Option<SupervisorAction>, bool) {
+    let kind = action.as_ref().map(|a| a.action.as_str()).unwrap_or("UNPARSED");
+    let already_acting = matches!(kind, "execute_plan" | "plan" | "code");
+    if already_acting
+        || !plan_file_exists
+        || !is_signoff(user_msg)
+        || !plan_awaiting_signoff(recent)
+    {
+        return (action, false);
+    }
+    let coerced = SupervisorAction {
+        action: "execute_plan".into(),
+        delegate_to: Some("coder".into()),
+        context: Some("plan/".into()),
+        message: None,
+        files: None,
+        prompt: None,
+        error: None,
+        suggested_replies: None,
+    };
+    (Some(coerced), true)
+}
+
 /// Load escalations from `.tina4/chat/escalations.json`.
 pub fn load_escalations(project_dir: &Path) -> Vec<Escalation> {
     let path = project_dir.join(".tina4").join("chat").join("escalations.json");
@@ -3643,6 +3756,21 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                         action_kind,
                         chat_req.thread_id.as_deref().unwrap_or("-"),
                         supervisor_reply.chars().take(140).collect::<String>()));
+
+                // Deterministic sign-off guard (Thread 4): if the user plainly
+                // signed off on a waiting plan but the model narrated instead of
+                // acting, force execute_plan. Infer intent — don't trust the
+                // model to obey the prompt's go-phrase rules.
+                let pre_coerce_kind = action_kind.to_string();
+                let (action, coerced_signoff) = coerce_signoff_to_execute(
+                    action, &chat_req.message, &recent, latest_plan.is_some());
+                if coerced_signoff {
+                    agent_log(&project_dir, "supervisor.signoff_coerce",
+                        &format!("was={} thread={} msg={:?}",
+                            pre_coerce_kind,
+                            chat_req.thread_id.as_deref().unwrap_or("-"),
+                            chat_req.message.chars().take(80).collect::<String>()));
+                }
 
                 match action {
                     Some(SupervisorAction { action: ref a, .. }) if a == "plan" => {
@@ -6686,6 +6814,112 @@ mod tests {
             metadata: RagMetadata { title: title.into(), ..Default::default() },
             distance: 0.3,
         }
+    }
+
+    // ── Thread 4: sign-off guard ─────────────────────────────────────
+    fn msg(role: &str, agent: Option<&str>, content: &str) -> ChatMessage {
+        ChatMessage {
+            id: "1".into(),
+            role: role.into(),
+            content: content.into(),
+            timestamp: String::new(),
+            thread_id: Some("t".into()),
+            agent: agent.map(|a| a.into()),
+        }
+    }
+
+    fn respond_action(text: &str) -> Option<SupervisorAction> {
+        Some(SupervisorAction {
+            action: "respond".into(),
+            delegate_to: None,
+            context: None,
+            message: Some(text.into()),
+            files: None,
+            prompt: None,
+            error: None,
+            suggested_replies: None,
+        })
+    }
+
+    #[test]
+    fn signoff_recognises_bare_go_ahead() {
+        for m in ["go", "go ahead", "Go ahead!", "ok", "yes", "do it",
+                  "LGTM", "ship it 🚀", "yes do it now", "go ahead please"] {
+            assert!(is_signoff(m), "should be a sign-off: {m:?}");
+        }
+    }
+
+    #[test]
+    fn signoff_rejects_revisions_and_questions() {
+        for m in ["yes but change the price", "actually add email",
+                  "no", "what about auth?", "can you also add a filter",
+                  "wait, use postgres instead", "hold on"] {
+            assert!(!is_signoff(m), "should NOT be a sign-off: {m:?}");
+        }
+    }
+
+    #[test]
+    fn plan_awaiting_detects_planner_turn_and_numbered_list() {
+        let planner = [msg("assistant", Some("planner"), "here is the plan")];
+        let refs: Vec<&ChatMessage> = planner.iter().collect();
+        assert!(plan_awaiting_signoff(&refs));
+
+        let numbered = [msg("assistant", Some("supervisor"),
+            "1. Create model\n2. Add routes\n3. Write tests")];
+        let refs: Vec<&ChatMessage> = numbered.iter().collect();
+        assert!(plan_awaiting_signoff(&refs));
+    }
+
+    #[test]
+    fn plan_awaiting_false_for_plain_question_or_empty() {
+        let q = [msg("assistant", Some("supervisor"), "Which database shall I use?")];
+        let refs: Vec<&ChatMessage> = q.iter().collect();
+        assert!(!plan_awaiting_signoff(&refs));
+        assert!(!plan_awaiting_signoff(&[]));
+    }
+
+    #[test]
+    fn coerce_fires_on_signoff_with_pending_plan() {
+        let hist = [
+            msg("user", None, "build a products resource"),
+            msg("assistant", Some("planner"), "1. model\n2. routes\n3. tests"),
+        ];
+        let refs: Vec<&ChatMessage> = hist.iter().collect();
+        let (out, fired) = coerce_signoff_to_execute(respond_action("I'll set that up"), "go", &refs, true);
+        assert!(fired);
+        let a = out.unwrap();
+        assert_eq!(a.action, "execute_plan");
+        assert_eq!(a.context.as_deref(), Some("plan/"));
+    }
+
+    #[test]
+    fn coerce_leaves_action_untouched_when_gates_fail() {
+        let planner = [msg("assistant", Some("planner"), "1. a\n2. b\n3. c")];
+        let refs: Vec<&ChatMessage> = planner.iter().collect();
+
+        // No plan file on disk → nothing to execute.
+        let (_, fired) = coerce_signoff_to_execute(respond_action("go"), "go", &refs, false);
+        assert!(!fired, "no plan file → no coerce");
+
+        // A revision, not a sign-off.
+        let (_, fired) = coerce_signoff_to_execute(respond_action("go"), "yes but rename it", &refs, true);
+        assert!(!fired, "revision → no coerce");
+
+        // No plan waiting (last turn is a plain question).
+        let q = [msg("assistant", Some("supervisor"), "Which DB?")];
+        let qrefs: Vec<&ChatMessage> = q.iter().collect();
+        let (_, fired) = coerce_signoff_to_execute(respond_action("go"), "go", &qrefs, true);
+        assert!(!fired, "no pending plan → no coerce");
+
+        // Model already acting — never override a real execute_plan.
+        let already = Some(SupervisorAction {
+            action: "execute_plan".into(), delegate_to: Some("coder".into()),
+            context: Some("plan/x.md".into()), message: None, files: None,
+            prompt: None, error: None, suggested_replies: None,
+        });
+        let (out, fired) = coerce_signoff_to_execute(already, "go", &refs, true);
+        assert!(!fired);
+        assert_eq!(out.unwrap().context.as_deref(), Some("plan/x.md"));
     }
 
     #[test]

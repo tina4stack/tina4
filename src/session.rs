@@ -777,7 +777,7 @@ mod tests {
         // First line is the subject.
         assert_eq!(msg.lines().next().unwrap(), "coder: step 2 — add POST /contact");
         // Trailer reconstructs cleanly.
-        let body = msg.splitn(2, "\n\n").nth(1).unwrap_or("");
+        let body = msg.split_once("\n\n").map(|x| x.1).unwrap_or("");
         let t = parse_trailer(body);
         assert_eq!(t.get("plan").map(String::as_str), Some("contact-form"));
         assert_eq!(t.get("step").map(String::as_str), Some("2"));

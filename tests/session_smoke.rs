@@ -68,7 +68,7 @@ fn worktree_roundtrip_mirrors_session_module_behavior() {
 
     // 1. Create a branch + worktree off HEAD.
     let worktree = root.join(".tina4/sessions/abc/tree");
-    fs::create_dir_all(&root.join(".tina4/sessions/abc")).unwrap();
+    fs::create_dir_all(root.join(".tina4/sessions/abc")).unwrap();
     git(
         &root,
         &[
@@ -125,7 +125,7 @@ fn worktree_roundtrip_mirrors_session_module_behavior() {
     //    session artefacts.
     git(&root, &["worktree", "remove", "--force", worktree.to_str().unwrap()]);
     git(&root, &["branch", "-D", "tina4/supervise/abc"]);
-    let _ = fs::remove_dir_all(&root.join(".tina4"));
+    let _ = fs::remove_dir_all(root.join(".tina4"));
     assert!(!worktree.exists(), "worktree should be gone after remove");
     let branches = git(&root, &["branch", "--list"]);
     assert!(

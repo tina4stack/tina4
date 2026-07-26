@@ -9,6 +9,7 @@ mod init;
 mod install;
 mod manifest;
 mod mcp_context;
+mod metrics;
 mod rag;
 mod scss;
 mod session;
@@ -199,9 +200,28 @@ enum Commands {
         yes: bool,
     },
 
+    /// Report code-health top offenders — NATIVE, language-agnostic (ADR-0002).
+    /// Scans SOURCE directly (Python/PHP/Ruby/TypeScript+JS) with NO Tina4 project
+    /// and NO running framework required: per-file LOC, cyclomatic complexity,
+    /// maintainability index, coupling, function count, offenders + `--fail-on`.
+    Metrics {
+        /// Directory OR file to scan (default: cwd, auto-detecting src/ or packages/*/src)
+        #[arg(long)]
+        path: Option<String>,
+        /// Exit 1 when any offender is at/above this severity (CI gate)
+        #[arg(long = "fail-on", value_name = "warn|error")]
+        fail_on: Option<String>,
+        /// Machine-readable JSON (matches the dev-admin dashboard shape)
+        #[arg(long)]
+        json: bool,
+        /// Show only the worst N offenders (default: 20)
+        #[arg(long)]
+        top: Option<usize>,
+    },
+
     /// Any command the client doesn't own is forwarded verbatim to the detected
     /// framework CLI: `tina4 <cmd> <args...>` -> `<framework-cli> <cmd> <args...>`.
-    /// This covers migrate/migrate:create/seed/test/routes/metrics/queue/
+    /// This covers migrate/migrate:create/seed/test/routes/queue/
     /// generate/console and anything a framework adds later. The framework owns
     /// arg parsing and rejects unknowns; dispatch pays zero manifest cost.
     #[command(external_subcommand)]
@@ -380,8 +400,15 @@ fn main() {
             }
         }
 
+        // Native, language-agnostic metrics engine (ADR-0002). No longer
+        // forwarded to the framework CLI — scans SOURCE directly, no project
+        // or running framework required.
+        Commands::Metrics { path, fail_on, json, top } => {
+            std::process::exit(metrics::run(path, top, json, fail_on));
+        }
+
         // Any non-native command (migrate, migrate:create, seed, test, routes,
-        // metrics, queue, generate, console, ...) is forwarded verbatim to the
+        // queue, generate, console, ...) is forwarded verbatim to the
         // framework CLI. The framework owns arg parsing and rejects unknowns, so
         // the client carries no per-command flag knowledge and can never drift
         // out of parity with the framework's command surface.

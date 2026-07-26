@@ -834,18 +834,21 @@ fn severity_rank(sev: &str) -> u8 {
     }
 }
 
-/// Build the ranked offender list, mirroring `offenders()` in metrics.py rule for
-/// rule: function complexity (top-15 cap), large_file, too_many_functions,
+/// Build the ranked offender list, mirroring `offenders()` in metrics.py: one
+/// rule each for function complexity, large_file, too_many_functions,
 /// low_maintainability, untested.
 fn build_offenders(files: &[FileMetrics], functions: &[FunctionInfo]) -> Vec<Offender> {
     let mut items: Vec<Offender> = Vec::new();
 
-    // Function-level complexity — only the 15 most-complex functions, exactly as
-    // metrics.py truncates most_complex_functions to [:15]. (Faithful port of a
-    // Python quirk; see the note in the report.)
+    // Function-level complexity — EVERY function over the threshold becomes an
+    // offender, mirroring the Python master fix (fee4385): offenders() reads the
+    // FULL, uncapped, complexity-sorted function list, not a display top-15 slice,
+    // so a 16th+ over-threshold function is never silently dropped from the
+    // offenders list OR from --fail-on. Display truncation is the CLI's `--top N`
+    // (applied after the full set drives the exit code); it is not done here.
     let mut by_cc: Vec<&FunctionInfo> = functions.iter().collect();
     by_cc.sort_by(|a, b| b.complexity.cmp(&a.complexity));
-    for fn_info in by_cc.iter().take(15) {
+    for fn_info in by_cc.iter() {
         let cc = fn_info.complexity;
         if cc > 10 {
             items.push(Offender {
@@ -1206,12 +1209,40 @@ mod tests {
         assert!(clean.is_empty());
     }
 
+    /// Named regression (parity with Python master fee4385). The old code capped
+    /// the complexity offenders to the 15 most-complex functions (`by_cc.take(15)`),
+    /// so a file with >15 over-threshold functions silently dropped the 16th+ from
+    /// the offenders list AND from `--fail-on` — a too-complex function passed the
+    /// gate. No mocks: builds REAL Python source with 18 functions each at
+    /// cyclomatic complexity > 20 and drives it through the real tree-sitter
+    /// analyzer, then asserts every one surfaces as an "error" complexity offender.
     #[test]
-    fn offender_complexity_capped_at_top_15_like_python() {
-        // 20 functions all at CC 12; metrics.py only surfaces the top 15.
-        let funcs: Vec<FunctionInfo> = (0..20).map(|_| func_with(12)).collect();
-        let offs = build_offenders(&[], &funcs);
-        assert_eq!(offs.iter().filter(|o| o.kind == "complexity").count(), 15);
+    fn offender_complexity_not_capped_all_over_threshold_surface() {
+        let n: usize = 18; // > 15, so the old [:15] cap would have dropped fn15..fn17
+        // 24 independent `if` statements => cyclomatic complexity = 1 + 24 = 25 (> 20).
+        let body: String = (0..24).map(|j| format!("    if x == {j}:\n        x += 1\n")).collect();
+        let src: String = (0..n)
+            .map(|i| format!("def fn{i}(x):\n{body}    return x\n"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let (_fm, fns) = analyze_py(&src);
+        assert_eq!(fns.len(), n, "all {n} functions must parse");
+        assert!(fns.iter().all(|f| f.complexity == 25), "each function is CC 25 (1 + 24 ifs)");
+
+        let offs = build_offenders(&[], &fns);
+        let complexity: Vec<&Offender> = offs.iter().filter(|o| o.kind == "complexity").collect();
+        // Old capped behaviour surfaced exactly 15; the fix surfaces all 18.
+        assert_eq!(
+            complexity.len(),
+            n,
+            "expected {n} complexity offenders (was capped at 15), got {}",
+            complexity.len()
+        );
+        assert!(
+            complexity.iter().all(|o| o.severity == "error"),
+            "CC 25 > 20 => every complexity offender is severity error"
+        );
     }
 
     #[test]

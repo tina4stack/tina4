@@ -58,6 +58,10 @@ pub(crate) struct FunctionInfo {
     pub file: String,
     pub line: usize,
     pub complexity: u32,
+    /// Code lines spanned by the function body. The dev dashboard's
+    /// "most complex functions" table has a LOC column, so omitting this
+    /// rendered a literal `undefined` in every row.
+    pub loc: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -914,11 +918,22 @@ pub(crate) fn analyze_source(
     let mut file_complexity: u32 = 0;
     for (node, cc) in &fn_nodes {
         file_complexity += *cc;
+        let start = node.start_position().row;
+        let end = node.end_position().row;
+        // Count CODE lines in the function's span, using the same is_code_line
+        // rule as the file-level LOC so the two numbers are comparable.
+        let fn_loc = source
+            .lines()
+            .skip(start)
+            .take(end.saturating_sub(start) + 1)
+            .filter(|l| is_code_line(l, lang))
+            .count();
         functions.push(FunctionInfo {
             name: function_display_name(*node, lang, src),
             file: rel_path.to_string(),
-            line: node.start_position().row + 1,
+            line: start + 1,
             complexity: *cc,
+            loc: fn_loc,
         });
     }
 
@@ -1597,7 +1612,7 @@ mod tests {
         }
     }
     fn func_with(cc: u32) -> FunctionInfo {
-        FunctionInfo { name: "f".into(), file: "x.py".into(), line: 1, complexity: cc }
+        FunctionInfo { name: "f".into(), file: "x.py".into(), line: 1, complexity: cc, loc: 1 }
     }
 
     #[test]
@@ -1768,6 +1783,24 @@ mod tests {
             resolve_import("Tina4\\Database\\Database", "Frond.php", Lang::Php, &paths, Some("Tina4")),
             Some("Database/Database.php".to_string())
         );
+    }
+
+    #[test]
+    fn every_function_reports_its_own_loc() {
+        // The dashboard's most-complex-functions table has a LOC column; without
+        // this field every row rendered a literal "undefined".
+        let py = "def small():\n    return 1\n\ndef bigger(a):\n    # comment line\n    if a:\n        return 2\n    return 3\n";
+        let (_fm, fns) = analyze_py(py);
+        let small = fns.iter().find(|f| f.name == "small").unwrap();
+        let bigger = fns.iter().find(|f| f.name == "bigger").unwrap();
+        assert_eq!(small.loc, 2, "def + return");
+        // def + if + two returns = 4 code lines; the comment does NOT count,
+        // matching the file-level is_code_line rule.
+        assert_eq!(bigger.loc, 4, "comment excluded, same rule as file LOC");
+        assert!(bigger.loc > small.loc);
+        // and it is serialised, so the UI column can read it
+        let json = serde_json::to_string(&bigger).unwrap();
+        assert!(json.contains("\"loc\""), "loc must be in the JSON: {json}");
     }
 
     // ---- Generated-asset exclusion -------------------------------------------

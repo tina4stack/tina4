@@ -12,7 +12,7 @@
 // `--fail-on` gate thresholds carry over unchanged. The parity is locked by
 // `parity_matches_python_master` below, which invokes the real metrics.py.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -52,7 +52,7 @@ impl Lang {
 
 // ── Per-file result ──────────────────────────────────────────────────────────
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct FunctionInfo {
     pub name: String,
     pub file: String,
@@ -60,7 +60,7 @@ pub(crate) struct FunctionInfo {
     pub complexity: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct FileMetrics {
     pub path: String,
     pub loc: usize,
@@ -68,8 +68,27 @@ pub(crate) struct FileMetrics {
     pub avg_complexity: f64,  // rounded to 2 dp
     pub functions: usize,
     pub maintainability: f64, // rounded to 1 dp, clamped [0, 100]
-    pub coupling_efferent: usize,
     pub has_tests: bool,
+
+    // ── Coupling ─────────────────────────────────────────────────────────────
+    // `dep_count` is EVERY import the file writes, stdlib and third-party
+    // included. It is the number the dev dashboard badges on a bubble, so its
+    // meaning is deliberately unchanged.
+    //
+    // The coupling TRIPLE below is INTERNAL-only: it counts edges between files
+    // inside the scanned tree, because that is the only thing an architectural
+    // coupling number can mean. Efferent = files I depend on. Afferent = files
+    // that depend on me. Instability = ce / (ca + ce), the Martin metric: 0.0 is
+    // maximally stable (everyone depends on me, I depend on nobody), 1.0 is
+    // maximally unstable (I depend on others, nobody depends on me).
+    //
+    // Mixing the two is what made the previous implementation meaningless: it
+    // divided a total-import efferent count (up to 119) by an afferent count
+    // that was always 0, so instability was the constant 1.0 everywhere.
+    pub dep_count: usize,
+    pub coupling_efferent: usize,
+    pub coupling_afferent: usize,
+    pub instability: f64, // rounded to 3 dp
 }
 
 // ── Rounding + MI formula (mirror metrics.py exactly) ─────────────────────────
@@ -568,25 +587,308 @@ fn is_import_node(kind: &str, lang: Lang) -> bool {
     }
 }
 
-fn count_imports(root: Node, lang: Lang, src: &[u8]) -> usize {
-    let mut count = 0usize;
-    let mut stack = vec![root];
-    while let Some(node) = stack.pop() {
-        if is_import_node(node.kind(), lang) {
-            count += 1;
-        } else if lang == Lang::Ruby && node.kind() == "call" {
-            if let Some(m) = node.child_by_field_name("method").and_then(|n| n.utf8_text(src).ok()) {
-                if matches!(m, "require" | "require_relative" | "load" | "autoload") {
-                    count += 1;
+/// Strip one layer of quoting from a string-literal node's text.
+fn unquote(raw: &str) -> String {
+    let t = raw.trim();
+    let t = t.strip_prefix("b").unwrap_or(t); // php b"" / rb byte-ish prefixes
+    for q in ['"', '\'', '`'] {
+        if let Some(inner) = t.strip_prefix(q).and_then(|s| s.strip_suffix(q)) {
+            return inner.to_string();
+        }
+    }
+    t.to_string()
+}
+
+/// The first string literal anywhere under `node` (import/require argument).
+fn first_string_literal(node: Node, src: &[u8]) -> Option<String> {
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if n.kind().contains("string") && n.child_count() == 0 || n.kind() == "string" {
+            if let Ok(t) = n.utf8_text(src) {
+                let u = unquote(t);
+                if !u.is_empty() {
+                    return Some(u);
                 }
             }
+        }
+        let mut c = n.walk();
+        for child in n.children(&mut c) {
+            stack.push(child);
+        }
+    }
+    None
+}
+
+/// Every import SPECIFIER the file writes, as written in the source: a Python
+/// dotted module, a TS module specifier, a Ruby require argument, a PHP `use`
+/// path or include target. Resolution to a file happens later, in
+/// `analyze_targets`, because it needs to know every file in the scan.
+fn extract_import_specs(root: Node, lang: Lang, src: &[u8]) -> Vec<String> {
+    let mut specs: Vec<String> = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let kind = node.kind();
+        match lang {
+            Lang::Python if kind == "import_from_statement" => {
+                // `from X import y` -> X (may be relative: `.`, `..pkg`)
+                if let Some(m) = node.child_by_field_name("module_name") {
+                    if let Ok(t) = m.utf8_text(src) {
+                        specs.push(t.trim().to_string());
+                    }
+                } else if let Ok(t) = node.utf8_text(src) {
+                    // bare `from . import x` — module_name absent in some grammars
+                    if let Some(rest) = t.trim().strip_prefix("from ") {
+                        let dots: String =
+                            rest.chars().take_while(|c| *c == '.').collect();
+                        if !dots.is_empty() {
+                            specs.push(dots);
+                        }
+                    }
+                }
+            }
+            Lang::Python if kind == "import_statement" => {
+                // `import a.b, c` -> each dotted_name
+                let mut c = node.walk();
+                for child in node.children(&mut c) {
+                    match child.kind() {
+                        "dotted_name" => {
+                            if let Ok(t) = child.utf8_text(src) {
+                                specs.push(t.trim().to_string());
+                            }
+                        }
+                        "aliased_import" => {
+                            if let Some(n) = child.child_by_field_name("name") {
+                                if let Ok(t) = n.utf8_text(src) {
+                                    specs.push(t.trim().to_string());
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Lang::Ts if kind == "import_statement" => {
+                if let Some(s) = node.child_by_field_name("source") {
+                    if let Ok(t) = s.utf8_text(src) {
+                        specs.push(unquote(t));
+                    }
+                } else if let Some(s) = first_string_literal(node, src) {
+                    specs.push(s);
+                }
+            }
+            // `use Tina4\Frond;` and `use Tina4\{A, B};` nest the path one level
+            // down, inside a namespace_use_clause / -group-clause - matching only
+            // the outer declaration's DIRECT children found nothing at all, which
+            // is why PHP produced zero edges across 138 files.
+            Lang::Php
+                if matches!(kind, "namespace_use_clause" | "namespace_use_group_clause") =>
+            {
+                let mut c = node.walk();
+                for child in node.children(&mut c) {
+                    if child.kind().contains("qualified_name") || child.kind() == "name" {
+                        if let Ok(t) = child.utf8_text(src) {
+                            let t = t.trim();
+                            if !t.is_empty() {
+                                specs.push(t.to_string());
+                            }
+                            break; // the first name is the path; the rest is `as Alias`
+                        }
+                    }
+                }
+            }
+            Lang::Php
+                if matches!(
+                    kind,
+                    "require_once_expression"
+                        | "require_expression"
+                        | "include_expression"
+                        | "include_once_expression"
+                ) =>
+            {
+                if let Some(s) = first_string_literal(node, src) {
+                    specs.push(s);
+                }
+            }
+            // PHP's DOMINANT idiom is not `use` at all - it is an inline
+            // fully-qualified reference, `\Tina4\Database::create(...)`, resolved
+            // by the autoloader. In the real framework that is 243 references
+            // against 72 `use` statements, so counting only `use` understated
+            // PHP coupling by roughly 3-4x. A namespaced reference IS a
+            // dependency; require a backslash so bare function calls are ignored.
+            Lang::Php if kind.contains("qualified_name") => {
+                if let Ok(t) = node.utf8_text(src) {
+                    let t = t.trim();
+                    if t.contains('\\') && t.len() > 1 {
+                        specs.push(t.to_string());
+                    }
+                }
+            }
+            Lang::Ruby if kind == "call" => {
+                if let Some(m) = node
+                    .child_by_field_name("method")
+                    .and_then(|n| n.utf8_text(src).ok())
+                {
+                    if matches!(m, "require" | "require_relative" | "load" | "autoload") {
+                        if let Some(args) = node.child_by_field_name("arguments") {
+                            if let Some(s) = first_string_literal(args, src) {
+                                // `autoload :Sym, "path"` -> the path is the literal
+                                specs.push(s);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
         let mut c = node.walk();
         for child in node.children(&mut c) {
             stack.push(child);
         }
     }
-    count
+    // Deduplicate: referencing the same module thirty times is ONE dependency,
+    // not thirty. Without this, PHP's inline-FQN idiom would inflate dep_count
+    // (the dashboard badge) enormously while the edge set stayed correct.
+    specs.sort();
+    specs.dedup();
+    specs
+}
+
+/// Normalise a candidate path: drop `./`, collapse `a/../b`, unify separators.
+fn normalise_path(raw: &str) -> String {
+    let unified = raw.replace('\\', "/");
+    let mut out: Vec<&str> = Vec::new();
+    for seg in unified.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            s => out.push(s),
+        }
+    }
+    out.join("/")
+}
+
+/// The directory part of a relative file path ("a/b/c.py" -> "a/b").
+fn parent_dir(rel: &str) -> String {
+    match rel.rfind('/') {
+        Some(i) => rel[..i].to_string(),
+        None => String::new(),
+    }
+}
+
+/// Resolve one import specifier to a file INSIDE the scanned set, or None when
+/// it points outside it (stdlib, a third-party package, a generated asset).
+///
+/// Only internal edges become coupling, so an unresolvable specifier is not an
+/// error - it is simply an external dependency and is excluded by design.
+fn resolve_import(
+    spec: &str,
+    from_rel: &str,
+    lang: Lang,
+    paths: &HashSet<String>,
+    root_pkg: Option<&str>,
+) -> Option<String> {
+    let dir = parent_dir(from_rel);
+    let mut candidates: Vec<String> = Vec::new();
+    let mut push = |c: String| candidates.push(normalise_path(&c));
+
+    match lang {
+        Lang::Python => {
+            // Leading dots = relative import; each dot climbs one package level.
+            let dots = spec.chars().take_while(|c| *c == '.').count();
+            let tail = spec.trim_start_matches('.').replace('.', "/");
+            if dots > 0 {
+                let mut base = dir.clone();
+                for _ in 1..dots {
+                    base = parent_dir(&base);
+                }
+                let joined = if tail.is_empty() {
+                    base.clone()
+                } else if base.is_empty() {
+                    tail.clone()
+                } else {
+                    format!("{base}/{tail}")
+                };
+                push(format!("{joined}.py"));
+                push(format!("{joined}/__init__.py"));
+            } else {
+                push(format!("{tail}.py"));
+                push(format!("{tail}/__init__.py"));
+                // Absolute intra-package import: `tina4_python.debug` while the
+                // scan root IS tina4_python, so the package prefix is implicit.
+                if let Some(pkg) = root_pkg {
+                    if let Some(rest) = tail.strip_prefix(&format!("{pkg}/")) {
+                        push(format!("{rest}.py"));
+                        push(format!("{rest}/__init__.py"));
+                    }
+                }
+            }
+        }
+        Lang::Ts => {
+            // Only a relative specifier can be internal; bare ones are packages.
+            if !(spec.starts_with('.') || spec.starts_with('/')) {
+                return None;
+            }
+            let joined = if dir.is_empty() {
+                spec.to_string()
+            } else {
+                format!("{dir}/{spec}")
+            };
+            let base = normalise_path(&joined);
+            // TS source may import a ".js" path that is really the ".ts" file.
+            let stem = base
+                .strip_suffix(".js")
+                .or_else(|| base.strip_suffix(".mjs"))
+                .unwrap_or(&base)
+                .to_string();
+            for ext in ["ts", "tsx", "js", "mjs", "jsx"] {
+                push(format!("{stem}.{ext}"));
+                push(format!("{stem}/index.{ext}"));
+            }
+            push(base.clone());
+        }
+        Lang::Ruby => {
+            let cleaned = spec.trim_end_matches(".rb");
+            // require_relative is dir-relative; require is load-path-relative.
+            let joined = if dir.is_empty() {
+                cleaned.to_string()
+            } else {
+                format!("{dir}/{cleaned}")
+            };
+            push(format!("{joined}.rb"));
+            push(format!("{cleaned}.rb"));
+            push(format!("lib/{cleaned}.rb"));
+            if let Some(pkg) = root_pkg {
+                if let Some(rest) = cleaned.strip_prefix(&format!("{pkg}/")) {
+                    push(format!("{rest}.rb"));
+                }
+            }
+        }
+        Lang::Php => {
+            // A `use` path is a namespace; PSR-4 maps it onto directories.
+            let as_path = spec.trim_start_matches('\\').replace('\\', "/");
+            push(format!("{as_path}.php"));
+            if let Some(pkg) = root_pkg {
+                if let Some(rest) = as_path.strip_prefix(&format!("{pkg}/")) {
+                    push(format!("{rest}.php"));
+                }
+            }
+            // Drop the vendor-style first segment (Tina4\Frond -> Frond.php).
+            if let Some((_, rest)) = as_path.split_once('/') {
+                push(format!("{rest}.php"));
+            }
+            // require/include of a literal path, possibly dir-relative.
+            if !dir.is_empty() {
+                push(format!("{dir}/{as_path}"));
+            }
+            push(as_path.clone());
+        }
+    }
+
+    candidates
+        .into_iter()
+        .find(|c| !c.is_empty() && c != from_rel && paths.contains(c))
 }
 
 // ── Analyze one source string ─────────────────────────────────────────────────
@@ -596,7 +898,7 @@ pub(crate) fn analyze_source(
     source: &str,
     rel_path: &str,
     has_tests: bool,
-) -> Option<(FileMetrics, Vec<FunctionInfo>)> {
+) -> Option<(FileMetrics, Vec<FunctionInfo>, Vec<String>)> {
     let mut parser = Parser::new();
     parser.set_language(&lang.tree_sitter_language()).ok()?;
     let tree = parser.parse(source, None)?;
@@ -629,7 +931,7 @@ pub(crate) fn analyze_source(
 
     let vol = file_volume(root, src, lang);
     let mi = round_dp(maintainability_index(vol, avg_cc, loc), 1);
-    let coupling_efferent = count_imports(root, lang, src);
+    let specs = extract_import_specs(root, lang, src);
 
     let fm = FileMetrics {
         path: rel_path.to_string(),
@@ -638,10 +940,15 @@ pub(crate) fn analyze_source(
         avg_complexity: round_dp(avg_cc, 2),
         functions: num_functions,
         maintainability: mi,
-        coupling_efferent,
         has_tests,
+        // dep_count is every import as written; the coupling triple is filled in
+        // by the second pass in analyze_targets, which alone knows every file.
+        dep_count: specs.len(),
+        coupling_efferent: 0,
+        coupling_afferent: 0,
+        instability: 0.0,
     };
-    Some((fm, functions))
+    Some((fm, functions, specs))
 }
 
 // ── File discovery ─────────────────────────────────────────────────────────────
@@ -651,6 +958,37 @@ const IGNORED_DIRS: &[&str] = &[
     ".venv", "venv", "coverage", ".next", "out", ".tina4-docs", ".idea", ".pytest_cache",
     ".mypy_cache", ".ruff_cache", "site-packages",
 ];
+
+/// Build output, not source: a bundled/minified asset that no human maintains.
+///
+/// This matters because the engine is language-agnostic and therefore sees `.js`
+/// that the retired per-language modules never did. A single minified line scores
+/// an absurd complexity (26,416 on one real bundle) and would otherwise take over
+/// the offenders list and `--fail-on`, burying the code someone can actually fix.
+fn is_generated_asset(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    name.ends_with(".min.js")
+        || name.ends_with(".min.ts")
+        || name.ends_with(".min.css")
+        || name.ends_with(".bundle.js")
+        || name.ends_with("-min.js")
+        || name.ends_with(".map")
+}
+
+/// Minified-by-content catch-all for a bundle that is not named like one.
+/// A hand-written source file does not average hundreds of characters per line.
+fn looks_minified(source: &str) -> bool {
+    let lines = source.lines().count();
+    if lines == 0 {
+        return false;
+    }
+    // A single very long line is the classic minified shape.
+    source.len() / lines > 200
+}
 
 fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
@@ -663,7 +1001,7 @@ fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) {
                 continue;
             }
             walk_dir(&path, files);
-        } else if Lang::from_path(&path).is_some() {
+        } else if Lang::from_path(&path).is_some() && !is_generated_asset(&path) {
             files.push(path);
         }
     }
@@ -934,6 +1272,15 @@ struct Summary {
 struct JsonPayload {
     summary: Summary,
     offenders: Vec<Offender>,
+    /// Per-file rows. The dev dashboard draws ONE BUBBLE PER FILE from these,
+    /// sizing by `loc`, colouring by `avg_complexity` and badging `dep_count`,
+    /// so this section is what keeps the metrics visualisation alive when the
+    /// per-framework metrics modules are retired (ADR-0002).
+    file_metrics: Vec<FileMetrics>,
+    /// Top 15 by complexity, for the "most complex functions" table.
+    most_complex_functions: Vec<FunctionInfo>,
+    /// file -> imported files, both sides relative paths inside the scan.
+    dependency_graph: BTreeMap<String, Vec<String>>,
 }
 
 pub(crate) struct Report {
@@ -941,26 +1288,89 @@ pub(crate) struct Report {
     functions: Vec<FunctionInfo>,
     offenders: Vec<Offender>,
     scan_root: String,
+    /// file -> the files it imports, both sides RELATIVE PATHS in the scanned
+    /// set. Keys and values live in the same namespace on purpose: the previous
+    /// implementation keyed this on module names while looking it up by path, so
+    /// nothing ever matched and the dependency view drew no edges at all.
+    dependency_graph: BTreeMap<String, Vec<String>>,
 }
 
 pub(crate) fn analyze_targets(files: &[PathBuf], scan_root: &str) -> Report {
     let test_index = build_test_index(scan_root);
     let mut file_metrics: Vec<FileMetrics> = Vec::new();
     let mut all_functions: Vec<FunctionInfo> = Vec::new();
+    // Pass 1 cannot resolve imports: a specifier only becomes an edge once every
+    // file in the scan is known. Park the raw specifiers with their language.
+    let mut pending: Vec<(String, Lang, Vec<String>)> = Vec::new();
 
     for path in files {
         let Some(lang) = Lang::from_path(path) else { continue };
         let Ok(source) = fs::read_to_string(path) else { continue };
+        // A bundle that is not NAMED like one still must not skew the report.
+        if looks_minified(&source) {
+            continue;
+        }
         let rel = rel_display(path, scan_root);
         let has_tests = module_has_tests(path, &test_index);
-        if let Some((fm, funcs)) = analyze_source(lang, &source, &rel, has_tests) {
+        if let Some((fm, funcs, specs)) = analyze_source(lang, &source, &rel, has_tests) {
+            pending.push((fm.path.clone(), lang, specs));
             file_metrics.push(fm);
             all_functions.extend(funcs);
         }
     }
 
+    // ── Pass 2: resolve specifiers to files, then derive the coupling triple ──
+    let paths: HashSet<String> = file_metrics.iter().map(|f| f.path.clone()).collect();
+    // The scan root's own basename is the implicit package prefix, so an absolute
+    // intra-package import (`tina4_python.debug` while scanning tina4_python/)
+    // still resolves.
+    let root_pkg = Path::new(scan_root)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string());
+
+    let mut dependency_graph: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut afferent: HashMap<String, usize> = HashMap::new();
+
+    for (from_rel, lang, specs) in &pending {
+        let mut targets: Vec<String> = Vec::new();
+        for spec in specs {
+            if let Some(target) =
+                resolve_import(spec, from_rel, *lang, &paths, root_pkg.as_deref())
+            {
+                if !targets.contains(&target) {
+                    targets.push(target);
+                }
+            }
+        }
+        for t in &targets {
+            *afferent.entry(t.clone()).or_insert(0) += 1;
+        }
+        targets.sort();
+        dependency_graph.insert(from_rel.clone(), targets);
+    }
+
+    for fm in file_metrics.iter_mut() {
+        let ce = dependency_graph.get(&fm.path).map_or(0, |v| v.len());
+        let ca = *afferent.get(&fm.path).unwrap_or(&0);
+        fm.coupling_efferent = ce;
+        fm.coupling_afferent = ca;
+        fm.instability = if ca + ce > 0 {
+            round_dp(ce as f64 / (ca + ce) as f64, 3)
+        } else {
+            // No internal edges either way: the file is isolated, not unstable.
+            0.0
+        };
+    }
+
     let offenders = build_offenders(&file_metrics, &all_functions);
-    Report { files: file_metrics, functions: all_functions, offenders, scan_root: scan_root.to_string() }
+    Report {
+        files: file_metrics,
+        functions: all_functions,
+        offenders,
+        scan_root: scan_root.to_string(),
+        dependency_graph,
+    }
 }
 
 fn build_summary(report: &Report, total_offenders: usize) -> Summary {
@@ -1033,7 +1443,19 @@ pub fn run(path: Option<String>, top: Option<usize>, json: bool, fail_on: Option
     let shown: Vec<Offender> = report.offenders.iter().take(top).cloned().collect();
 
     if json {
-        let payload = JsonPayload { summary, offenders: shown };
+        // `--top N` truncates the OFFENDER display only. file_metrics stays
+        // complete: the bubble chart must plot every file, and the exit code was
+        // already computed from the full offender set above.
+        let mut by_cc: Vec<FunctionInfo> = report.functions.clone();
+        by_cc.sort_by(|a, b| b.complexity.cmp(&a.complexity));
+        by_cc.truncate(15);
+        let payload = JsonPayload {
+            summary,
+            offenders: shown,
+            file_metrics: report.files.clone(),
+            most_complex_functions: by_cc,
+            dependency_graph: report.dependency_graph.clone(),
+        };
         println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
         return exit_code;
     }
@@ -1110,7 +1532,8 @@ mod tests {
     }
 
     fn analyze_py(src: &str) -> (FileMetrics, Vec<FunctionInfo>) {
-        analyze_source(Lang::Python, src, "t.py", false).unwrap()
+        let (fm, fns, _specs) = analyze_source(Lang::Python, src, "t.py", false).unwrap();
+        (fm, fns)
     }
 
     // ---- Language-agnostic building blocks -----------------------------------
@@ -1169,7 +1592,8 @@ mod tests {
     fn file_with(mi: f64, loc: usize, funcs: usize, has_tests: bool) -> FileMetrics {
         FileMetrics {
             path: "x.py".into(), loc, complexity: 0, avg_complexity: 0.0,
-            functions: funcs, maintainability: mi, coupling_efferent: 0, has_tests,
+            functions: funcs, maintainability: mi, has_tests,
+            dep_count: 0, coupling_efferent: 0, coupling_afferent: 0, instability: 0.0,
         }
     }
     fn func_with(cc: u32) -> FunctionInfo {
@@ -1260,26 +1684,263 @@ mod tests {
     #[test]
     fn analyzes_php_ruby_typescript_without_a_project() {
         let php = "<?php\nfunction f($a){ if ($a && $a > 0) { return 1; } return 0; }\n";
-        let (fm, fns) = analyze_source(Lang::Php, php, "t.php", false).unwrap();
+        let (fm, fns, _s) = analyze_source(Lang::Php, php, "t.php", false).unwrap();
         assert_eq!(fm.functions, 1);
         assert!(fns[0].complexity >= 3); // 1 + if + &&
         assert!(fm.maintainability > 0.0 && fm.maintainability <= 100.0);
 
         let rb = "def f(a)\n  return 1 if a && a > 0\n  0\nend\n";
-        let (fm, _f) = analyze_source(Lang::Ruby, rb, "t.rb", false).unwrap();
+        let (fm, _f, _s) = analyze_source(Lang::Ruby, rb, "t.rb", false).unwrap();
         assert_eq!(fm.functions, 1);
 
         let ts = "export const f = (a: number) => { if (a && a > 0) { return 1; } return 0; };\n";
-        let (fm, fns) = analyze_source(Lang::Ts, ts, "t.ts", false).unwrap();
+        let (fm, fns, _s) = analyze_source(Lang::Ts, ts, "t.ts", false).unwrap();
         assert_eq!(fm.functions, 1, "top-level arrow function is counted");
         assert!(fns[0].complexity >= 3);
     }
 
     #[test]
-    fn typescript_import_coupling_counts() {
+    fn typescript_imports_are_counted_as_dep_count() {
         let ts = "import { a } from './a';\nimport b from './b';\nconst x = () => a + b;\n";
-        let (fm, _f) = analyze_source(Lang::Ts, ts, "t.ts", false).unwrap();
-        assert_eq!(fm.coupling_efferent, 2);
+        let (fm, _f, specs) = analyze_source(Lang::Ts, ts, "t.ts", false).unwrap();
+        // dep_count is every import as written - the number the dashboard badges.
+        assert_eq!(fm.dep_count, 2);
+        // Order is not part of the contract: the walk is a stack-based DFS and the
+        // graph's targets are sorted downstream, so compare as a set.
+        let mut got = specs.clone();
+        got.sort();
+        assert_eq!(got, vec!["./a".to_string(), "./b".to_string()]);
+        // The coupling TRIPLE is internal-only and needs the whole file set, so
+        // analyze_source leaves it at zero; analyze_targets fills it in.
+        assert_eq!(fm.coupling_efferent, 0, "resolved in pass 2, not here");
+    }
+
+    #[test]
+    fn php_inline_fully_qualified_references_are_dependencies() {
+        // PHP resolves most dependencies through the autoloader from an INLINE
+        // fully-qualified name, not a `use` statement. In the real framework that
+        // is 243 inline references against 72 `use` lines, so counting only `use`
+        // understated PHP coupling by 3-4x (40 edges instead of 138).
+        let php = "<?php\nnamespace Tina4;\nfunction boot() {\n    \\Tina4\\DotEnv::load();\n    $d = \\Tina4\\Database::create('x');\n    return \\Tina4\\Database::create('y');\n}\n";
+        let (fm, _f, specs) = analyze_source(Lang::Php, php, "App.php", false).unwrap();
+        assert!(specs.iter().any(|s| s.contains("DotEnv")), "got {specs:?}");
+        assert!(specs.iter().any(|s| s.contains("Database")), "got {specs:?}");
+
+        // Referencing Database TWICE is ONE dependency, not two - otherwise the
+        // dashboard's dep_count badge inflates wildly on PHP's idiom.
+        assert_eq!(fm.dep_count, 2, "distinct dependencies, not reference count: {specs:?}");
+
+        let paths: HashSet<String> =
+            ["DotEnv.php", "Database.php"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            resolve_import("\\Tina4\\DotEnv", "App.php", Lang::Php, &paths, Some("Tina4")),
+            Some("DotEnv.php".to_string())
+        );
+    }
+
+    #[test]
+    fn php_use_statements_and_requires_are_extracted() {
+        // The path in `use A\B;` lives one level down, inside a
+        // namespace_use_clause. Matching only the declaration's direct children
+        // silently found NOTHING, so PHP produced 0 edges over 138 real files.
+        let php = "<?php\nnamespace Tina4;\nuse Tina4\\ORM;\nuse Tina4\\Database\\Database;\nrequire_once \"helpers.php\";\nfunction f($a) { return $a; }\n";
+        let (fm, _f, specs) = analyze_source(Lang::Php, php, "Frond.php", false).unwrap();
+        let mut got = specs.clone();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                "Tina4\\Database\\Database".to_string(),
+                "Tina4\\ORM".to_string(),
+                "helpers.php".to_string(),
+            ]
+        );
+        assert_eq!(fm.dep_count, 3);
+
+        // ...and they resolve onto real files via PSR-4.
+        let paths: HashSet<String> = ["ORM.php", "Database/Database.php", "helpers.php"]
+            .iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            resolve_import("Tina4\\ORM", "Frond.php", Lang::Php, &paths, Some("Tina4")),
+            Some("ORM.php".to_string())
+        );
+        assert_eq!(
+            resolve_import("Tina4\\Database\\Database", "Frond.php", Lang::Php, &paths, Some("Tina4")),
+            Some("Database/Database.php".to_string())
+        );
+    }
+
+    // ---- Generated-asset exclusion -------------------------------------------
+    //
+    // The engine is language-agnostic, so it sees `.js` the retired per-language
+    // modules never did. One real minified bundle scored cyclomatic complexity
+    // 26,416 on a single line and took the top FOUR offender slots, burying the
+    // code a developer can actually fix. Build output is not source.
+
+    #[test]
+    fn minified_and_bundled_assets_are_excluded_by_name() {
+        for n in [
+            "tina4.min.js", "frond.min.js", "app.min.ts", "site.min.css",
+            "vendor.bundle.js", "legacy-min.js", "app.js.map",
+        ] {
+            assert!(is_generated_asset(Path::new(n)), "{n} should be excluded");
+        }
+    }
+
+    #[test]
+    fn real_source_files_are_not_mistaken_for_assets() {
+        for n in [
+            "engine.py", "server.ts", "Frond.php", "cli.rb",
+            "widget.js", "frond.js", "minify.js", "administer.ts",
+        ] {
+            assert!(!is_generated_asset(Path::new(n)), "{n} must still be analysed");
+        }
+    }
+
+    #[test]
+    fn a_bundle_not_named_like_one_is_caught_by_content() {
+        // One enormous line is the minified shape, whatever the filename says.
+        let minified = format!("var a=1;{}\n", "b(c,d);".repeat(400));
+        assert!(looks_minified(&minified));
+
+        // Ordinary source, even long, is not.
+        let real = "def handler(request, response):\n    value = compute(request)\n    return response(value)\n".repeat(50);
+        assert!(!looks_minified(&real), "normal source must not be skipped");
+
+        // Degenerate inputs do not panic or false-positive.
+        assert!(!looks_minified(""));
+        assert!(!looks_minified("x = 1\n"));
+    }
+
+    // ---- Coupling resolution (the fix for the constant-1.0 instability) ------
+    //
+    // The retired per-framework implementation keyed its reverse graph on MODULE
+    // NAMES while looking it up by FILE PATH, so afferent coupling was 0 for
+    // every file, instability was the constant 1.0, and the dependency view drew
+    // 0 edges from 902 recorded imports. These pin the corrected behaviour.
+
+    fn pathset(items: &[&str]) -> HashSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn python_relative_and_absolute_imports_resolve_to_files() {
+        let paths = pathset(&["frond/engine.py", "frond/parser.py", "debug/__init__.py", "env.py"]);
+        // `from .parser import x` inside frond/engine.py
+        assert_eq!(
+            resolve_import(".parser", "frond/engine.py", Lang::Python, &paths, Some("tina4_python")),
+            Some("frond/parser.py".to_string())
+        );
+        // a package __init__ target
+        assert_eq!(
+            resolve_import("debug", "env.py", Lang::Python, &paths, Some("tina4_python")),
+            Some("debug/__init__.py".to_string())
+        );
+        // absolute intra-package import while the scan root IS the package
+        assert_eq!(
+            resolve_import("tina4_python.env", "frond/engine.py", Lang::Python, &paths, Some("tina4_python")),
+            Some("env.py".to_string())
+        );
+    }
+
+    #[test]
+    fn external_imports_are_not_internal_edges() {
+        let paths = pathset(&["env.py", "app/main.ts"]);
+        // stdlib / third-party must NOT become coupling
+        assert_eq!(resolve_import("os", "env.py", Lang::Python, &paths, None), None);
+        assert_eq!(resolve_import("json", "env.py", Lang::Python, &paths, None), None);
+        // a bare TS specifier is a package, never a file in the tree
+        assert_eq!(resolve_import("react", "app/main.ts", Lang::Ts, &paths, None), None);
+        assert_eq!(resolve_import("node:fs", "app/main.ts", Lang::Ts, &paths, None), None);
+    }
+
+    #[test]
+    fn typescript_relative_specifier_resolves_including_js_to_ts() {
+        let paths = pathset(&["core/src/server.ts", "core/src/router.ts", "core/src/index.ts"]);
+        assert_eq!(
+            resolve_import("./router", "core/src/server.ts", Lang::Ts, &paths, None),
+            Some("core/src/router.ts".to_string())
+        );
+        // TS writes ".js" in ESM but the file on disk is ".ts"
+        assert_eq!(
+            resolve_import("./router.js", "core/src/server.ts", Lang::Ts, &paths, None),
+            Some("core/src/router.ts".to_string())
+        );
+        // a directory specifier picks up index.ts
+        assert_eq!(
+            resolve_import("../src", "core/other/x.ts", Lang::Ts, &paths, None),
+            Some("core/src/index.ts".to_string())
+        );
+    }
+
+    #[test]
+    fn ruby_and_php_specifiers_resolve() {
+        let rb = pathset(&["lib/tina4/frond.rb", "lib/tina4/orm.rb"]);
+        assert_eq!(
+            resolve_import("orm", "lib/tina4/frond.rb", Lang::Ruby, &rb, None),
+            Some("lib/tina4/orm.rb".to_string())
+        );
+        assert_eq!(
+            resolve_import("tina4/orm", "app.rb", Lang::Ruby, &rb, None),
+            Some("lib/tina4/orm.rb".to_string())
+        );
+        let php = pathset(&["Tina4/Frond.php", "Tina4/ORM.php"]);
+        assert_eq!(
+            resolve_import("Tina4\\ORM", "Tina4/Frond.php", Lang::Php, &php, None),
+            Some("Tina4/ORM.php".to_string())
+        );
+    }
+
+    #[test]
+    fn a_file_never_couples_to_itself() {
+        let paths = pathset(&["a.py"]);
+        // `import a` from inside a.py must not create a self-edge
+        assert_eq!(resolve_import("a", "a.py", Lang::Python, &paths, None), None);
+    }
+
+    #[test]
+    fn instability_is_a_real_spread_not_a_constant() {
+        // Build a tiny real tree on disk and run the full two-pass analysis.
+        let dir = std::env::temp_dir().join(format!("tina4_coupling_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // leaf.py is imported by two files and imports nothing -> ca=2, ce=0 -> 0.0
+        fs::write(dir.join("leaf.py"), "def a():\n    return 1\n").unwrap();
+        fs::write(dir.join("mid.py"), "import leaf\nimport os\ndef b():\n    return leaf.a()\n").unwrap();
+        fs::write(dir.join("top.py"), "import leaf\nimport mid\ndef c():\n    return mid.b()\n").unwrap();
+
+        let files = vec![dir.join("leaf.py"), dir.join("mid.py"), dir.join("top.py")];
+        let report = analyze_targets(&files, dir.to_str().unwrap());
+        let get = |n: &str| report.files.iter().find(|f| f.path == n).unwrap().clone();
+
+        let leaf = get("leaf.py");
+        assert_eq!(leaf.coupling_afferent, 2, "mid and top both import leaf");
+        assert_eq!(leaf.coupling_efferent, 0);
+        assert_eq!(leaf.instability, 0.0, "a pure dependency is maximally STABLE");
+
+        let top = get("top.py");
+        assert_eq!(top.coupling_afferent, 0, "nothing imports top");
+        assert_eq!(top.coupling_efferent, 2, "top imports leaf and mid");
+        assert_eq!(top.instability, 1.0, "a pure dependent is maximally UNSTABLE");
+
+        let mid = get("mid.py");
+        assert_eq!(mid.coupling_afferent, 1);
+        assert_eq!(mid.coupling_efferent, 1, "os is external and excluded");
+        assert_eq!(mid.instability, 0.5, "one in, one out");
+        // dep_count keeps TOTAL-import semantics for the dashboard badge.
+        assert_eq!(mid.dep_count, 2, "leaf + os");
+
+        // Every recorded edge points at a file that actually exists.
+        let known: HashSet<&String> = report.files.iter().map(|f| &f.path).collect();
+        for (_from, targets) in report.dependency_graph.iter() {
+            for t in targets {
+                assert!(known.contains(t), "edge target {t} is not a scanned file");
+            }
+        }
+        let total_edges: usize = report.dependency_graph.values().map(|v| v.len()).sum();
+        assert_eq!(total_edges, 3, "leaf<-mid, leaf<-top, mid<-top");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     // ---- The parity lock against the REAL Python master reference ------------

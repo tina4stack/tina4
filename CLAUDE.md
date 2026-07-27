@@ -41,8 +41,12 @@ tina4 test                       Run tests
 tina4 routes                     List registered routes
 tina4 metrics                    Report code-health top offenders (complexity, large files,
                                  low maintainability, untested). Flags: --top N, --json,
-                                 --fail-on warn|error (CI gate), --path DIR. Delegates to the
-                                 language CLI; scans the app's src/ (or the framework itself).
+                                 --fail-on warn|error (CI gate), --path DIR|FILE. NATIVE +
+                                 language-agnostic (ADR-0002, src/metrics.rs): scans SOURCE
+                                 directly for Python/PHP/Ruby/TypeScript+JS via tree-sitter,
+                                 with NO Tina4 project and NO running framework required.
+                                 Formula parity with the Python master (metrics.py) — CC/MI/
+                                 thresholds identical, locked by a real parity test.
 tina4 scss                       Compile SCSS files
 tina4 ai                         Detect AI tools and install context
 tina4 update                     Self-update the binary
@@ -177,6 +181,11 @@ binary via `which::which("claude")` and — because on Windows `claude` is a
 - grass: SCSS compiler
 - which: Binary lookup
 - ctrlc: Signal handling
+- tree-sitter + tree-sitter-python / -php / -ruby / -typescript: real per-language
+  AST parsing for the native `tina4 metrics` engine (ADR-0002, src/metrics.rs).
+  These grammar crates add ~4.9MB to the release binary (the C parsers); accepted
+  for accurate cross-language complexity/MI. Core frameworks stay zero-dep — this
+  is the Rust CLI, and Carbonah already sets the tree-sitter precedent in-house.
 
 ## Links
 

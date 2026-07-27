@@ -283,28 +283,38 @@ mod tests {
         }
     }
 
-    /// A CMD must name the entry point the framework actually publishes. These
-    /// are the verified-real ones: the tina4python console script
-    /// ([project.scripts]), composer's vendor/bin/tina4php symlink, the
-    /// tina4ruby gem exe, and the tina4nodejs package `bin`.
+    /// Every image installs the tina4 CLI and launches through it, so every
+    /// CMD must invoke `tina4` -- one launcher, four languages. This replaced
+    /// four per-language entry points (tina4python, vendor/bin/tina4php,
+    /// tina4ruby, npx tina4nodejs); `npx tina4nodejs` in particular exited 0
+    /// and served nothing inside a container, which a uniform launcher makes
+    /// impossible to repeat per-language.
     #[test]
-    fn cmd_names_a_real_published_entry_point() {
-        let expected = [
-            ("python", "tina4python"),
-            ("php", "vendor/bin/tina4php"),
-            ("ruby", "tina4ruby"),
-            ("nodejs", "tina4nodejs"),
-        ];
-        for (lang, entry) in expected {
-            let body = all_dockerfiles()
-                .into_iter()
-                .find(|(l, _)| *l == lang)
-                .map(|(_, b)| b)
-                .unwrap();
+    fn every_cmd_launches_through_the_tina4_cli() {
+        for (lang, body) in all_dockerfiles() {
             let cmd = cmd_line(body);
             assert!(
-                cmd.contains(entry),
-                "{lang}: CMD does not name the published entry point `{entry}`: {cmd}"
+                cmd.contains("\"tina4\""),
+                "{lang}: CMD does not launch through the tina4 CLI: {cmd}"
+            );
+            assert!(
+                body.contains("COPY --from=tina4cli"),
+                "{lang}: CMD calls tina4 but the template never copies the \
+                 binary in, so the image has no launcher at all"
+            );
+        }
+    }
+
+    /// npx resolves through the network and, in a container, exited 0 having
+    /// served nothing -- a silent no-op that looks like success. Ban it.
+    #[test]
+    fn no_npx_in_a_production_cmd() {
+        for (lang, body) in all_dockerfiles() {
+            let cmd = cmd_line(body);
+            assert!(
+                !cmd.contains("\"npx\""),
+                "{lang}: CMD invokes npx, which exited 0 without serving \
+                 anything in a container: {cmd}"
             );
         }
     }

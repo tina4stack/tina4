@@ -122,11 +122,21 @@ jobs:
       # ("linking with `aarch64-linux-gnu-gcc` failed"). zig ships musl sysroots
       # for every arch, so cargo-zigbuild both compiles and links this cleanly
       # without apt hunting for a musl-cross package.
-      - name: Install zig + cargo-zigbuild (aarch64 musl)
+      # cargo-zigbuild comes from crates.io; zig does NOT -- install-action only
+      # resolves crates and failed with "For crate zig: zig is not found".
+      # The ziglang PyPI wheel ships the real zig toolchain and cargo-zigbuild
+      # discovers it via `python3 -m ziglang`, so no extra action pin is needed.
+      - name: Install cargo-zigbuild (aarch64 musl)
         if: matrix.target == 'aarch64-unknown-linux-musl'
         uses: taiki-e/install-action@bffeee26d4db9be238a4ea78d8826604ebcb594d # v2.82.5
         with:
-          tool: zig,cargo-zigbuild
+          tool: cargo-zigbuild
+
+      - name: Install zig (aarch64 musl)
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        run: |
+          python3 -m pip install --user ziglang
+          python3 -m ziglang version
 
       # --locked forces the committed Cargo.lock - the build can't silently
       # resolve a different dependency set than the one that was reviewed.

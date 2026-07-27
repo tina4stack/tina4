@@ -61,6 +61,20 @@ jobs:
             os: ubuntu-latest
             name: tina4-linux-arm64
             run_smoke: false    # cross-built ARM, can't run on x64
+          # Static musl builds exist for CONTAINERS. Every Tina4 production image
+          # ships the tina4 binary and launches through it, and two of the four
+          # base images are Alpine -- where a glibc binary cannot exec at all.
+          # A static musl binary has no loader dependency, so ONE artifact per
+          # arch serves both the Alpine (php, nodejs) and Debian-slim (python,
+          # ruby) images. Without these the Dockerfiles have nothing to install.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            name: tina4-linux-musl-amd64
+            run_smoke: true     # static binary runs on the x64 Linux runner
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            name: tina4-linux-musl-arm64
+            run_smoke: false    # cross-built ARM, can't run on x64
           - target: x86_64-apple-darwin
             os: macos-latest
             name: tina4-darwin-amd64
@@ -94,12 +108,26 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
 
+      # musl-tools supplies musl-gcc, which the tree-sitter C grammars need to
+      # compile for a musl target; without it the build fails at the cc step,
+      # not at link time.
+      - name: Install musl toolchain
+        if: endsWith(matrix.target, '-musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+          fi
+
       # --locked forces the committed Cargo.lock - the build can't silently
       # resolve a different dependency set than the one that was reviewed.
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_musl: aarch64-linux-gnu-gcc
 
       - name: Rename binary (Unix)
         if: runner.os != 'Windows'
@@ -220,3 +248,78 @@ jobs:
           fi
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+
+  # ── tina4-cli container image ────────────────────────────────────────
+  # Every Tina4 production image installs the tina4 CLI and launches through
+  # it, so the CLI has to exist AS AN IMAGE for the app Dockerfiles to do
+  #   COPY --from=ghcr.io/tina4stack/tina4-cli:<version> ...
+  # That is a plain layer copy: no Rust toolchain, no compile, no network
+  # fetch in the developer's build. All the cost lives here, once per release.
+  #
+  # It ships the STATIC MUSL binary on purpose. Two of the four base images
+  # are Alpine, where a glibc binary cannot exec at all, and a static musl
+  # build runs unchanged on both Alpine and Debian-slim -- one artifact, four
+  # images.
+  publish-cli-image:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Download musl binaries
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          pattern: tina4-linux-musl-*
+          merge-multiple: true
+          path: cliimg
+
+      - name: Stage per-arch binaries
+        run: |
+          set -eux
+          ls -l cliimg
+          mkdir -p cliimg/linux/amd64 cliimg/linux/arm64
+          mv cliimg/tina4-linux-musl-amd64 cliimg/linux/amd64/tina4
+          mv cliimg/tina4-linux-musl-arm64 cliimg/linux/arm64/tina4
+          chmod +x cliimg/linux/*/tina4
+          # TARGETPLATFORM lets one Dockerfile serve both arches; buildx sets it
+          # per platform, so each image gets the binary built for ITS arch. A
+          # single-arch image here would silently break arm64 deployments.
+          cat > cliimg/Dockerfile <<'EOF'
+          FROM alpine:3.21
+          ARG TARGETPLATFORM
+          COPY ${TARGETPLATFORM}/tina4 /usr/local/bin/tina4
+          ENTRYPOINT ["/usr/local/bin/tina4"]
+          EOF
+
+      - name: Log in to GHCR
+        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-qemu-action@49b3bc8e6bdd4a60e6116a5414239cba5943d3cf # v3.2.0
+      - uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3.6.1
+
+      - name: Build and push (amd64 + arm64)
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
+        with:
+          context: cliimg
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/tina4stack/tina4-cli:${{ github.ref_name }}
+            ghcr.io/tina4stack/tina4-cli:latest
+
+      - name: Verify the pushed image actually runs
+        # A published image that cannot exec is worse than no image: every
+        # downstream app build would inherit it. Prove it runs before anyone
+        # depends on it.
+        run: |
+          set -eux
+          docker run --rm --pull=always \
+            ghcr.io/tina4stack/tina4-cli:${{ github.ref_name }} --version

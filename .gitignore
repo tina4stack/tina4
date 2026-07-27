@@ -18,3 +18,6 @@ tina4-darwin-amd64
 tina4-darwin-arm64
 tina4-windows-amd64.exe
 tina4-windows-amd64.exe.zip
+
+# scratch dir from a local musl cross-build
+target-musl/

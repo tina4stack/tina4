@@ -262,7 +262,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          got=$(gh release view "${{ github.ref_name }}" --json assets -q '.assets[].name' | sort)
+          # GitHub's asset listing is EVENTUALLY CONSISTENT. Reading it straight
+          # after upload reported tina4-linux-amd64 missing on v3.8.63 when the
+          # asset was in fact there moments later, turning a healthy release
+          # red. Poll until the set settles rather than trusting one read.
+          for attempt in 1 2 3 4 5 6; do
+            got=$(gh release view "${{ github.ref_name }}" --json assets -q '.assets[].name' | sort)
+            [ "$(echo "$got" | grep -c .)" -ge 8 ] && break
+            echo "attempt $attempt: only $(echo "$got" | grep -c .) assets listed, waiting..."
+            sleep 10
+          done
           echo "$got"
           for f in tina4-linux-amd64 tina4-linux-arm64 tina4-linux-musl-amd64 \
                    tina4-linux-musl-arm64 tina4-darwin-amd64 tina4-darwin-arm64 \

@@ -6,6 +6,15 @@
 # default dependency set ship native extensions (date, json, nio4r, sqlite3),
 # and `-slim` carries no compiler, so `bundle install` dies with
 # "Gem::Ext::BuildError: Failed to build gem native extension".
+# The tina4 CLI is installed in EVERY Tina4 image and is the launcher: one
+# `tina4 serve --production` across all four languages instead of four
+# different per-language entry points. It is a single static musl binary
+# copied from a published image -- a layer copy, no toolchain, no compile,
+# no network fetch at build time. Override with
+# --build-arg TINA4_CLI_IMAGE=... to pin or test a different CLI.
+ARG TINA4_CLI_IMAGE=ghcr.io/tina4stack/tina4-cli:3.8.59
+FROM ${TINA4_CLI_IMAGE} AS tina4cli
+
 FROM ruby:3.3 AS deps
 WORKDIR /app
 COPY Gemfile Gemfile.lock* ./
@@ -17,9 +26,13 @@ RUN bundle config set --local without 'development test' \
  && bundle config set --local path '/app/vendor/bundle' \
  && bundle install --jobs 4 \
  && rm -rf /app/vendor/bundle/ruby/*/cache
+# puma at BUILD time, same reason as uvicorn in the Python image: otherwise
+# `tina4 serve --production` shells out to `gem install puma` on every boot.
+RUN gem install puma --no-doc
 
 FROM ruby:3.3-slim
 WORKDIR /app
+COPY --from=tina4cli /usr/local/bin/tina4 /usr/local/bin/tina4
 # Runtime shared libraries only. The extensions were compiled in the builder but
 # still dynamically link against libsqlite3.
 RUN apt-get update \
@@ -33,4 +46,8 @@ COPY --from=deps /app/vendor /app/vendor
 COPY --from=deps /usr/local/bundle /usr/local/bundle
 COPY . /app
 EXPOSE 7147
-CMD ["bundle", "exec", "tina4ruby", "serve", "--production"]
+
+# One launcher for all four languages. --host defaults to 0.0.0.0, which is
+# required: a server bound to 127.0.0.1 inside a container is unreachable
+# through `docker run -p`. --no-browser because there is no browser here.
+CMD ["tina4", "serve", "--production", "--no-browser"]

@@ -2,6 +2,15 @@
 # Two-stage: composer install in a builder, copy the resolved vendor/
 # tree into a slim runtime. `TINA4_OVERRIDE_CLIENT=true` lets the
 # framework boot without the Rust CLI at runtime.
+# The tina4 CLI is installed in EVERY Tina4 image and is the launcher: one
+# `tina4 serve --production` across all four languages instead of four
+# different per-language entry points. It is a single static musl binary
+# copied from a published image -- a layer copy, no toolchain, no compile,
+# no network fetch at build time. Override with
+# --build-arg TINA4_CLI_IMAGE=... to pin or test a different CLI.
+ARG TINA4_CLI_IMAGE=ghcr.io/tina4stack/tina4-cli:3.8.59
+FROM ${TINA4_CLI_IMAGE} AS tina4cli
+
 FROM composer:2 AS deps
 WORKDIR /app
 COPY composer.json composer.lock* ./
@@ -9,6 +18,7 @@ RUN composer install --no-dev --optimize-autoloader --no-scripts
 
 FROM php:8.4-cli-alpine
 WORKDIR /app
+COPY --from=tina4cli /usr/local/bin/tina4 /usr/local/bin/tina4
 RUN install-php-extensions sqlite3 pdo_sqlite opcache 2>/dev/null \
  || (apk add --no-cache --virtual .build sqlite-dev \
      && docker-php-ext-install pdo_sqlite \
@@ -18,8 +28,8 @@ COPY . /app
 ENV TINA4_OVERRIDE_CLIENT=true \
     TINA4_DEBUG=false
 EXPOSE 7145
-# Drive the framework CLI, which really parses --host/--port/--production.
-# `php index.php <host:port>` does NOT work: index.php calls $app->run(),
-# whose signature is run(?string \$host, int \$port) -- it never reads argv,
-# so the address was silently ignored and production mode never engaged.
-CMD ["php", "vendor/bin/tina4php", "serve", "--host", "0.0.0.0", "--port", "7145", "--production"]
+
+# One launcher for all four languages. --host defaults to 0.0.0.0, which is
+# required: a server bound to 127.0.0.1 inside a container is unreachable
+# through `docker run -p`. --no-browser because there is no browser here.
+CMD ["tina4", "serve", "--production", "--no-browser"]

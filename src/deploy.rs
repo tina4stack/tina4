@@ -322,6 +322,63 @@ mod tests {
         }
     }
 
+    /// A base image below the framework's own declared floor builds CLEANLY and
+    /// dies at container start. That is how `tina4 deploy docker` shipped a Node
+    /// image on node:20 while tina4-nodejs declares `engines.node >=22` and
+    /// imports the built-in `node:sqlite` (added in 22.5): npm downgrades an
+    /// engines mismatch to a warning, the build went green, and the container
+    /// exited immediately with ERR_UNKNOWN_BUILTIN_MODULE.
+    ///
+    /// These floors mirror the frameworks' published manifests -- pyproject
+    /// `requires-python`, composer `require.php`, the gemspec
+    /// `required_ruby_version`, and package.json `engines.node`. They are
+    /// duplicated here because the CLI ships independently of all four and
+    /// cannot read their manifests at build time. Raising a framework floor
+    /// means raising the number here too, and this test is what makes that
+    /// failure loud instead of silent.
+    #[test]
+    fn base_image_meets_the_framework_floor() {
+        let floors = [
+            ("python", "FROM python:", 3, 12),
+            ("php", "FROM php:", 8, 2),
+            ("ruby", "FROM ruby:", 3, 1),
+            ("nodejs", "FROM node:", 22, 0),
+        ];
+        for (lang, prefix, min_major, min_minor) in floors {
+            let body = all_dockerfiles()
+                .into_iter()
+                .find(|(l, _)| *l == lang)
+                .map(|(_, b)| b)
+                .unwrap();
+            let mut checked = 0;
+            for line in body.lines().filter(|l| l.starts_with(prefix)) {
+                let tag = &line[prefix.len()..];
+                // "3.12-slim" -> 3.12 ; "24-alpine" -> 24 (minor absent = 0)
+                let version: String = tag
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.')
+                    .collect();
+                let mut parts = version.split('.');
+                let major: u32 = parts.next().unwrap_or("").parse().unwrap_or_else(|_| {
+                    panic!("{lang}: cannot read a version out of `{line}`")
+                });
+                let minor: u32 = parts.next().unwrap_or("0").parse().unwrap_or(0);
+                assert!(
+                    (major, minor) >= (min_major, min_minor),
+                    "{lang}: base image pins {major}.{minor}, below the framework's \
+                     declared minimum {min_major}.{min_minor}. The image will build \
+                     and then fail at container start: {line}"
+                );
+                checked += 1;
+            }
+            assert!(
+                checked > 0,
+                "{lang}: no `{prefix}` line found, so the floor was never checked. \
+                 Did the template switch base image?"
+            );
+        }
+    }
+
     /// The frameworks refuse to boot unless launched by the `tina4` client,
     /// which is not in the image. TINA4_OVERRIDE_CLIENT is the documented
     /// escape hatch, so every template has to set it or the container cannot

@@ -712,7 +712,16 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
     let initial_child = match start_language_server(&info, port, host) {
         Some(c) => c,
         None => {
-            eprintln!("{} Failed to start server", icon_fail().red());
+            // The spawn error itself is printed by start_language_server. This
+            // message alone used to be the ENTIRE output on failure, which is
+            // how a missing `uv` in a container looked identical to a missing
+            // interpreter, a bad entry point, or a permissions problem. Never
+            // report a failure without the reason.
+            eprintln!(
+                "{} Failed to start the {} server. See the error above.",
+                icon_fail().red(),
+                info.language.cyan()
+            );
             std::process::exit(1);
         }
     };
@@ -1033,8 +1042,33 @@ fn start_language_server(
 
     let result = match info.language.as_str() {
         "python" => {
-            // Use uv run if .venv exists, otherwise python directly
-            if std::path::Path::new(".venv").exists() {
+            // A .venv means "use THAT interpreter" -- it does NOT mean uv is
+            // installed. The old code jumped straight to `uv run` whenever
+            // .venv existed, so any environment holding a venv but no uv could
+            // not start at all: spawn failed, this returned None, and the
+            // caller printed a bare "Failed to start server" with no cause.
+            // A production container is exactly that shape -- uv builds the
+            // venv in the builder stage and is deliberately left out of the
+            // slim runtime -- so `tina4 serve` could never boot a Python image.
+            //
+            // Run the venv's own interpreter directly. It needs no uv, and it
+            // is the same interpreter `uv run` would have selected anyway.
+            let venv_python = if cfg!(windows) {
+                std::path::PathBuf::from(".venv").join("Scripts").join("python.exe")
+            } else {
+                std::path::PathBuf::from(".venv").join("bin").join("python")
+            };
+            if venv_python.exists() {
+                let mut cmd = std::process::Command::new(&venv_python);
+                cmd.args(["app.py", "--managed"])
+                    .env("PORT", &port_s)
+                    .env("HOST", host)
+                    .stdout(std::process::Stdio::inherit())
+                    .stderr(std::process::Stdio::inherit());
+                set_process_group(&mut cmd).spawn()
+            } else if std::path::Path::new(".venv").exists() && which::which("uv").is_ok() {
+                // A .venv with no interpreter inside it (a partial or foreign
+                // layout). uv can still resolve it -- but only if uv is here.
                 let mut cmd = std::process::Command::new("uv");
                 cmd.args(["run", "python", "app.py", "--managed"])
                     .env("PORT", &port_s)
@@ -1087,6 +1121,17 @@ fn start_language_server(
                     );
                     return None;
                 }
+                // HELD BACK, deliberately. `ruby app.rb` brings Puma up
+                // WITHOUT the framework's built-in routes, so a container
+                // launched this way answers 404 on /health while the same image
+                // serves 200 under `tina4ruby serve` -- PHP already goes through
+                // its framework CLI for exactly that reason. Switching Ruby over
+                // is the right shape AND the gem now accepts --managed, but the
+                // supervised child still exits shortly after Puma binds, and
+                // this code path is what every Ruby dev hits on `tina4 serve`,
+                // not just containers. Shipping it would trade a container-only
+                // fault for a broken local dev loop. Restore the tina4ruby form
+                // once the parent/child lifecycle is understood.
                 let mut cmd = std::process::Command::new(console::resolve_cmd("bundle"));
                 cmd.args(["exec", "ruby", "app.rb", "--managed"])
                     .env("PORT", &port_s)
@@ -1143,7 +1188,22 @@ fn start_language_server(
         _ => return None,
     };
 
-    result.ok()
+    // Print WHY the spawn failed instead of throwing the error away. `.ok()`
+    // discarded it, so a missing interpreter, a missing `uv`, a bad path and a
+    // permissions error all surfaced as the same blank "Failed to start
+    // server" -- unactionable, and it hid a real container bug.
+    match result {
+        Ok(child) => Some(child),
+        Err(e) => {
+            eprintln!(
+                "  {} Could not spawn the {} server: {}",
+                icon_fail().red(),
+                info.language.cyan(),
+                e
+            );
+            None
+        }
+    }
 }
 
 // ── Delegate ─────────────────────────────────────────────────────

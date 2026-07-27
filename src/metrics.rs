@@ -409,6 +409,14 @@ fn is_boolean_binary(node: Node, src: &[u8]) -> bool {
 }
 
 fn is_decision(node: Node, lang: Lang, src: &[u8]) -> u32 {
+    // Anonymous nodes are the literal keyword tokens. In tree-sitter's Ruby
+    // grammar "if" / "unless" / "while" / "when" / "rescue" name BOTH a construct
+    // and its keyword, so matching on kind alone counted every Ruby decision
+    // twice - `return 1 if y` scored 3 instead of 2, and every Ruby complexity
+    // number came out roughly double.
+    if !node.is_named() {
+        return 0;
+    }
     let k = node.kind();
     match lang {
         Lang::Python => matches!(
@@ -474,12 +482,42 @@ fn is_decision(node: Node, lang: Lang, src: &[u8]) -> u32 {
     }
 }
 
-fn count_decisions(node: Node, lang: Lang, src: &[u8]) -> u32 {
+/// True for a node that opens a new measurement scope: a nested function (it is
+/// reported as a function in its own right) or a class body (its methods are).
+/// Mirrors metrics.py, which skips FunctionDef / AsyncFunctionDef / ClassDef.
+fn is_scope_boundary(kind: &str, lang: Lang) -> bool {
+    if is_function_node(kind, lang) {
+        return true;
+    }
+    match lang {
+        Lang::Python => kind == "class_definition",
+        Lang::Php => matches!(kind, "class_declaration" | "interface_declaration"
+            | "trait_declaration" | "enum_declaration"),
+        Lang::Ruby => matches!(kind, "class" | "module"),
+        Lang::Ts => matches!(kind, "class_declaration" | "class"),
+    }
+}
+
+/// Decision points in this function's OWN body.
+///
+/// Descent stops at a nested function or class, because those are measured
+/// separately. Counting them here as well charged a single branch to two
+/// different functions, and the over-count compounded with nesting depth: an
+/// IIFE wrapper or a registrar defining twenty inner handlers absorbed the whole
+/// file's complexity and topped the offenders list, hiding the real hot spots.
+///
+/// A Python lambda is NOT a scope boundary - lambdas are never listed as
+/// functions, so their decisions would vanish. TypeScript arrow functions ARE
+/// listed, so they are boundaries.
+fn count_own_decisions(node: Node, lang: Lang, src: &[u8]) -> u32 {
     let mut total = is_decision(node, lang, src);
     let mut c = node.walk();
     if c.goto_first_child() {
         loop {
-            total += count_decisions(c.node(), lang, src);
+            let child = c.node();
+            if !is_scope_boundary(child.kind(), lang) {
+                total += count_own_decisions(child, lang, src);
+            }
             if !c.goto_next_sibling() {
                 break;
             }
@@ -566,7 +604,7 @@ fn function_display_name(node: Node, lang: Lang, src: &[u8]) -> String {
 
 fn collect_functions<'a>(node: Node<'a>, lang: Lang, src: &[u8], out: &mut Vec<(Node<'a>, u32)>) {
     if is_function_node(node.kind(), lang) {
-        out.push((node, count_decisions(node, lang, src) + 1));
+        out.push((node, count_own_decisions(node, lang, src) + 1));
     }
     let mut c = node.walk();
     if c.goto_first_child() {
@@ -1551,6 +1589,21 @@ mod tests {
         (fm, fns)
     }
 
+    fn analyze_ts(src: &str) -> (FileMetrics, Vec<FunctionInfo>) {
+        let (fm, fns, _specs) = analyze_source(Lang::Ts, src, "t.ts", false).unwrap();
+        (fm, fns)
+    }
+
+    fn analyze_php(src: &str) -> (FileMetrics, Vec<FunctionInfo>) {
+        let (fm, fns, _specs) = analyze_source(Lang::Php, src, "t.php", false).unwrap();
+        (fm, fns)
+    }
+
+    fn analyze_rb(src: &str) -> (FileMetrics, Vec<FunctionInfo>) {
+        let (fm, fns, _specs) = analyze_source(Lang::Ruby, src, "t.rb", false).unwrap();
+        (fm, fns)
+    }
+
     // ---- Language-agnostic building blocks -----------------------------------
 
     #[test]
@@ -1600,6 +1653,102 @@ mod tests {
         assert_eq!(fm.loc, 0);
         assert_eq!(fm.maintainability, 100.0);
         assert_eq!(fm.functions, 0);
+    }
+
+    // ---- Nested scopes are measured once, not twice --------------------------
+
+    #[test]
+    fn a_parent_is_not_charged_for_its_nested_functions_python() {
+        // `outer` has NO branch of its own. Each inner has two. Before the fix
+        // outer reported 5 - its own base plus all four inner branches.
+        let src = "def outer(a):\n    def inner1(x):\n        if x: return 1\n        if x > 2: return 2\n        return 3\n    def inner2(y):\n        if y: return 1\n        if y > 2: return 2\n        return 3\n    return inner1(a) + inner2(a)\n";
+        let (fm, fns) = analyze_py(src);
+        let outer = fns.iter().find(|f| f.name == "outer").unwrap();
+        assert_eq!(outer.complexity, 1, "outer branches on nothing itself");
+        for name in ["inner1", "inner2"] {
+            let f = fns.iter().find(|f| f.name == name).unwrap();
+            assert_eq!(f.complexity, 3, "{name} keeps its own two branches");
+        }
+        // The file total is the sum of the per-function values, so it drops too.
+        assert_eq!(fm.complexity, 7, "1 + 3 + 3, with nothing counted twice");
+    }
+
+    #[test]
+    fn a_python_lambda_still_counts_toward_its_enclosing_function() {
+        // Lambdas are never listed as functions of their own, so excluding them
+        // would silently lose their decisions instead of relocating them.
+        let src = "def f(xs):\n    return sorted(xs, key=lambda x: 1 if x else 0)\n";
+        let (_fm, fns) = analyze_py(src);
+        assert_eq!(fns.len(), 1, "the lambda is not reported separately");
+        assert_eq!(fns[0].complexity, 2, "1 + the lambda's ternary");
+    }
+
+    #[test]
+    fn a_method_in_a_nested_class_is_not_charged_to_the_outer_function() {
+        let src = "def make():\n    class Inner:\n        def go(self, x):\n            if x: return 1\n            return 2\n    return Inner\n";
+        let (_fm, fns) = analyze_py(src);
+        let outer = fns.iter().find(|f| f.name == "make").unwrap();
+        assert_eq!(outer.complexity, 1, "the nested class body is a separate scope");
+        let go = fns.iter().find(|f| f.name.ends_with("go")).unwrap();
+        assert_eq!(go.complexity, 2);
+    }
+
+    #[test]
+    fn an_iife_wrapper_does_not_absorb_the_whole_module_typescript() {
+        // The real symptom: public/js/frond.js reported cc=191 because the whole
+        // file sat inside one anonymous wrapper.
+        let src = "(function () {\n  function a(x) { if (x) { return 1; } return 2; }\n  function b(y) { if (y) { return 1; } return 2; }\n  return { a: a, b: b };\n})();\n";
+        let (_fm, fns) = analyze_ts(src);
+        let wrapper = fns.iter().min_by_key(|f| f.line).unwrap();
+        assert_eq!(wrapper.complexity, 1, "the wrapper itself branches on nothing");
+        assert!(fns.iter().any(|f| f.complexity == 2), "inner functions keep theirs");
+    }
+
+    #[test]
+    fn ruby_keyword_tokens_are_not_counted_as_decisions() {
+        // Regression: tree-sitter's Ruby grammar uses "if"/"unless"/"while"/"when"
+        // for both the construct and its keyword token, so every decision was
+        // counted twice and Ruby complexity came out roughly double. Verified
+        // against metrics.rb, which reports 2 for each of these.
+        for (src, expected, what) in [
+            ("def m(y)\n  return 1 if y\n  2\nend\n", 2, "modifier if"),
+            ("def m(z)\n  if z\n    1\n  else\n    2\n  end\nend\n", 2, "if/else"),
+            ("def m(z)\n  while z\n    z -= 1\n  end\nend\n", 2, "while"),
+            ("def m(z)\n  z.each { |i| puts i }\n  1\nend\n", 1, "a block is not a decision"),
+        ] {
+            let (_fm, fns) = analyze_rb(src);
+            assert_eq!(fns[0].complexity, expected, "{what}");
+        }
+    }
+
+    #[test]
+    fn a_php_closure_counts_toward_its_enclosing_method() {
+        // Anonymous functions are not listed as functions of their own (same rule
+        // as a Python lambda), so their decisions stay where they are written
+        // rather than disappearing.
+        let php = "<?php\nclass A {\n  function outer($x) {\n    return array_map(function ($y) { if ($y) { return 1; } return 2; }, $x);\n  }\n}\n";
+        let (_fm, fns) = analyze_php(php);
+        let outer = fns.iter().find(|f| f.name.ends_with("outer")).unwrap();
+        assert_eq!(outer.complexity, 2, "1 + the closure's if");
+    }
+
+    #[test]
+    fn nested_methods_do_not_double_count_php_and_ruby() {
+        // A named function declared inside a method IS listed separately, so its
+        // branch must not also land on the method.
+        let php = "<?php\nclass A {\n  function outer($x) {\n    function helper($y) { if ($y) { return 1; } return 2; }\n    return helper($x);\n  }\n}\n";
+        let (_fm, fns) = analyze_php(php);
+        let outer = fns.iter().find(|f| f.name.ends_with("outer")).unwrap();
+        assert_eq!(outer.complexity, 1, "helper's branch belongs to helper");
+        let helper = fns.iter().find(|f| f.name.ends_with("helper")).unwrap();
+        assert_eq!(helper.complexity, 2);
+
+        let rb = "class A\n  def outer(x)\n    inner(x)\n  end\n  def inner(y)\n    return 1 if y\n    2\n  end\nend\n";
+        let (_fm, fns) = analyze_rb(rb);
+        let outer = fns.iter().find(|f| f.name.ends_with("outer")).unwrap();
+        assert_eq!(outer.complexity, 1);
+        let inner = fns.iter().find(|f| f.name.ends_with("inner")).unwrap();
+        assert_eq!(inner.complexity, 2);
     }
 
     // ---- Offender rules (mirror metrics.py thresholds) -----------------------

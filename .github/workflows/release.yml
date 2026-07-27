@@ -197,11 +197,13 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-      - name: Upload to draft Release
-        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
-        with:
-          files: ${{ matrix.name }}
-          draft: true   # finalized by the local signing step (scripts/sign-release.ps1)
+      # NOTE: the matrix deliberately does NOT touch the GitHub release. Eight
+      # jobs calling action-gh-release concurrently on one tag is a race -- the
+      # action create-or-updates the same release, and concurrent writers lose
+      # assets. v3.8.62 shipped 4 of 8 binaries that way (no Windows .exe, so
+      # signing could not run) while EVERY build job still reported success,
+      # because the dropped uploads never failed. The `release-assets` job below
+      # is the single writer.
 
   # ---------------------------------------------------------------------------
   # 2. Provisional checksums over the CI-built artifacts, attached to the DRAFT.
@@ -209,7 +211,7 @@ jobs:
   #    .exe and REGENERATES SHA256SUMS over the signed bytes before publishing,
   #    so the released SHA256SUMS always matches what install.sh/.ps1 verify.
   # ---------------------------------------------------------------------------
-  checksums:
+  release-assets:
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -221,6 +223,24 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Every target must be present before anything is published. Without this
+      # a dropped or skipped build yields a draft that looks complete and a
+      # SHA256SUMS that authoritatively covers half a release -- worse than a
+      # missing file, because install.sh verifies against it and passes.
+      - name: Require every expected binary
+        run: |
+          set -eu
+          expected="tina4-linux-amd64 tina4-linux-arm64 tina4-linux-musl-amd64 \
+                    tina4-linux-musl-arm64 tina4-darwin-amd64 tina4-darwin-arm64 \
+                    tina4-windows-amd64.exe"
+          missing=""
+          for f in $expected; do [ -f "dist/$f" ] || missing="$missing $f"; done
+          ls -l dist
+          if [ -n "$missing" ]; then
+            echo "::error::draft would be incomplete, refusing to publish. Missing:$missing"
+            exit 1
+          fi
+
       - name: Generate SHA256SUMS
         run: |
           cd dist
@@ -228,11 +248,27 @@ jobs:
           echo "Published checksums:"
           cat ../SHA256SUMS
 
-      - name: Upload SHA256SUMS to draft Release
+      # ONE writer, ONE call, all assets. This is what removes the race.
+      - name: Upload all assets to the draft Release
         uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
         with:
-          files: SHA256SUMS
+          files: |
+            dist/*
+            SHA256SUMS
           draft: true   # regenerated over the SIGNED bytes by scripts/sign-release.ps1
+
+      - name: Confirm the draft actually carries every asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          got=$(gh release view "${{ github.ref_name }}" --json assets -q '.assets[].name' | sort)
+          echo "$got"
+          for f in tina4-linux-amd64 tina4-linux-arm64 tina4-linux-musl-amd64 \
+                   tina4-linux-musl-arm64 tina4-darwin-amd64 tina4-darwin-arm64 \
+                   tina4-windows-amd64.exe SHA256SUMS; do
+            echo "$got" | grep -qx "$f" || { echo "::error::$f never reached the release"; exit 1; }
+          done
 
   publish-crate:
     needs: audit

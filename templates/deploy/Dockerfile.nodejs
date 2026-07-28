@@ -19,8 +19,33 @@ FROM ${TINA4_CLI_IMAGE} AS tina4cli
 
 FROM node:24-alpine AS deps
 WORKDIR /app
-COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev
+# Full install (dev deps included) so typescript is present to COMPILE with,
+# then the app is built to dist/ and the dev deps are pruned away. The runtime
+# image gets compiled JS and production deps only.
+#
+# Why this matters: without a build step the production container ran
+# `npx tsx app.ts`, i.e. a TypeScript transpiler, in production. Measured, that
+# was FIVE processes (npm exec -> tsx -> node -> esbuild service) at ~455 MB
+# RSS, against one process for PHP, Python and Ruby. It set a 256m memory floor
+# where the other three survive on 64m, and it was the slowest of the four.
+#
+# Worse than slow: tsx and esbuild were NOT in the image at all. `npm ci
+# --omit=dev` strips them, so npx FETCHED THE TRANSPILER OVER THE NETWORK at
+# container start (observed running out of /root/.npm/_npx/...). An air-gapped
+# host or a registry outage means the container never starts.
+COPY package.json package-lock.json* tsconfig.json ./
+RUN npm ci
+COPY . .
+# --noCheck: EMIT, do not type-check. An image build's job is to produce
+# runnable JS, not to re-validate your dependencies' types. And today it cannot:
+# tina4-nodejs's exports map points "types" at packages/*/src/index.ts (raw
+# TypeScript) while "import" points at dist, so tsc drags the FRAMEWORK's source
+# into your program and fails on types the framework needs but does not declare
+# (@types/pg, a newer @types/node for node:sqlite). Your own code is still
+# type-checked by `npm run build` in development, where that belongs.
+#
+# When tina4-nodejs ships .d.ts and points "types" at dist, drop --noCheck.
+RUN npx tsc --noCheck && npm prune --omit=dev
 
 FROM node:24-alpine
 WORKDIR /app
@@ -29,6 +54,7 @@ ENV NODE_ENV=production \
     TINA4_OVERRIDE_CLIENT=true \
     TINA4_DEBUG=false
 COPY --from=deps /app/node_modules /app/node_modules
+COPY --from=deps /app/dist /app/dist
 COPY . /app
 EXPOSE 7148
 

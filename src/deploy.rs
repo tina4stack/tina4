@@ -389,6 +389,35 @@ mod tests {
         }
     }
 
+    /// A TypeScript project must be COMPILED in the image, not transpiled at
+    /// run time. Without a build step the Node container ran `npx tsx app.ts`:
+    /// five processes (npm exec -> tsx -> node -> esbuild service) where the
+    /// other three frameworks run one, and -- because `npm ci --omit=dev`
+    /// strips tsx -- npx FETCHED the transpiler over the network at container
+    /// start, so an air-gapped host never boots at all.
+    #[test]
+    fn nodejs_image_compiles_ahead_of_time() {
+        let body = all_dockerfiles()
+            .into_iter()
+            .find(|(l, _)| *l == "nodejs")
+            .map(|(_, b)| b)
+            .unwrap();
+        assert!(
+            body.contains("tsc"),
+            "nodejs: no TypeScript build step, so the image must transpile at \
+             run time"
+        );
+        assert!(
+            body.contains("/app/dist"),
+            "nodejs: builds but never copies dist/ into the runtime stage, so \
+             the compiled output does not ship"
+        );
+        assert!(
+            body.contains("npm prune --omit=dev"),
+            "nodejs: dev dependencies (typescript, tsx) would ship to production"
+        );
+    }
+
     /// The frameworks refuse to boot unless launched by the `tina4` client,
     /// which is not in the image. TINA4_OVERRIDE_CLIENT is the documented
     /// escape hatch, so every template has to set it or the container cannot

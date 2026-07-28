@@ -1159,7 +1159,31 @@ fn start_language_server(
                 );
                 return None;
             }
-            // Use npx tsx for TypeScript (tsx also handles plain .js)
+            // COMPILED OUTPUT FIRST. `npx tsx` is a development convenience: it
+            // transpiles TypeScript at run time and costs a whole process tree
+            // to do it. Measured in a production container it was five
+            // processes (npm exec -> tsx -> node -> esbuild service) at ~455 MB
+            // RSS, a 256m memory floor where the other three frameworks live on
+            // 64m, and the slowest throughput of the four. And because
+            // `npm ci --omit=dev` strips tsx, npx FETCHED it over the network at
+            // container start -- a boot that fails outright when air-gapped.
+            //
+            // So: run dist/app.js when it exists, which is what a built image
+            // ships. tsx stays as the DEV path, where transpile-on-save is the
+            // point and the dev dependency is installed.
+            let built = std::path::Path::new("dist/app.js");
+            if built.exists() {
+                let mut cmd = std::process::Command::new(console::resolve_cmd("node"));
+                cmd.args(["dist/app.js", "--managed"])
+                    .env("PORT", &port_s)
+                    .env("HOST", host)
+                    .stdout(std::process::Stdio::inherit())
+                    .stderr(std::process::Stdio::inherit());
+                return set_process_group(&mut cmd).spawn().map_err(|e| {
+                    eprintln!("  {} Could not spawn node on dist/app.js: {}", icon_fail().red(), e);
+                    e
+                }).ok();
+            }
             let entry = if std::path::Path::new("app.ts").exists() { "app.ts" } else { "app.js" };
             let mut cmd = std::process::Command::new(console::resolve_cmd("npx"));
             cmd.args(["tsx", entry, "--managed"])

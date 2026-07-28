@@ -214,19 +214,55 @@ pub async fn tina4_context(project_dir: &Path, instruction: &str, language: &str
 /// failure / missing token; the caller surfaces a clear error (there is no
 /// secondary chat endpoint to fall back to). Uses a long timeout
 /// (`LONG_CONTEXT_TIMEOUT_SECS`) since reasoning over a large context is slow.
-pub async fn long_context_call(base_url: &str, token: &str, question: &str, context: &str) -> Option<String> {
+/// Split a `long_context` tool response into `(answer, checksum)`.
+///
+/// The server appends a trailer to every answer:
+/// `<answer>\n\n---\nchecksum: cx_<hex>  (…)`. Return the answer with that trailer
+/// stripped and the `cx_…` token when present. Pure string work — no deps. Only
+/// splits when a real `cx_…` token follows the marker, so an answer that merely
+/// mentions "checksum" is never truncated.
+pub(crate) fn split_checksum(text: &str) -> (String, Option<String>) {
+    if let Some(marker) = text.rfind("---\nchecksum:") {
+        if let Some(cx) = text[marker..]
+            .split_whitespace()
+            .find(|t| t.starts_with("cx_"))
+        {
+            return (text[..marker].trim_end().to_string(), Some(cx.to_string()));
+        }
+    }
+    (text.to_string(), None)
+}
+
+/// Call the `long_context` tool. Sends only the NEW `context` chunk plus the prior
+/// `checksum` (both optional) so the accumulated corpus is never resent, and
+/// returns `(clean answer, new checksum)` with the checksum trailer stripped.
+pub async fn long_context_call(
+    base_url: &str,
+    token: &str,
+    question: &str,
+    context: &str,
+    checksum: &str,
+) -> Option<(String, String)> {
     if token.trim().is_empty() || question.trim().is_empty() {
         return None;
     }
     let url = format!("{}/mcp", base_url.trim_end_matches('/'));
 
+    let mut arguments = serde_json::Map::new();
+    arguments.insert("question".into(), json!(question));
+    if !context.is_empty() {
+        arguments.insert("context".into(), json!(context));
+    }
+    if !checksum.is_empty() {
+        arguments.insert("checksum".into(), json!(checksum));
+    }
     let req_body = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "tools/call",
         "params": {
             "name": "long_context",
-            "arguments": { "question": question, "context": context }
+            "arguments": arguments
         }
     });
 
@@ -255,10 +291,11 @@ pub async fn long_context_call(base_url: &str, token: &str, question: &str, cont
     }
     let raw = resp.text().await.ok()?;
     let text = extract_tool_text(&raw)?;
-    if text.trim().is_empty() {
+    let (answer, checksum) = split_checksum(&text);
+    if answer.trim().is_empty() {
         None
     } else {
-        Some(text)
+        Some((answer, checksum.unwrap_or_default()))
     }
 }
 
@@ -449,6 +486,73 @@ mod tests {
     fn endpoint_appends_mcp_path() {
         // Default when unset.
         assert_eq!(endpoint(), "https://mcp.tina4.com/mcp");
+    }
+
+    #[test]
+    fn split_checksum_strips_trailer_and_extracts_token() {
+        let raw = "X is 42.\n\n---\nchecksum: cx_4c93a72dac1c54c238aabb42c5da7570  (pass back as `checksum` to append more context or re-query — accumulated 39 chars over 1 chunk(s))";
+        let (answer, cs) = split_checksum(raw);
+        assert_eq!(answer, "X is 42.");
+        assert_eq!(cs.as_deref(), Some("cx_4c93a72dac1c54c238aabb42c5da7570"));
+    }
+
+    #[test]
+    fn split_checksum_no_trailer_returns_text_unchanged() {
+        let (answer, cs) = split_checksum("Just an answer, no trailer.");
+        assert_eq!(answer, "Just an answer, no trailer.");
+        assert_eq!(cs, None);
+    }
+
+    #[test]
+    fn split_checksum_ignores_inline_mention_without_token() {
+        // The word "checksum" appears but there is no `---\nchecksum: cx_…` trailer.
+        let text = "To verify, compare the checksum of each file.";
+        let (answer, cs) = split_checksum(text);
+        assert_eq!(answer, text);
+        assert_eq!(cs, None);
+    }
+
+    #[test]
+    fn split_checksum_uses_the_last_marker() {
+        // An answer that itself shows an example trailer, then the real one.
+        let raw = "Example: ---\nchecksum: cx_deadbeef\nNow the real answer.\n\n---\nchecksum: cx_final0001  (…)";
+        let (answer, cs) = split_checksum(raw);
+        assert!(answer.ends_with("Now the real answer."));
+        assert_eq!(cs.as_deref(), Some("cx_final0001"));
+    }
+
+    /// Real wire round-trip against mcp.tina4.com. `#[ignore]`d so the normal
+    /// suite never hits the network; run explicitly with a token:
+    ///   TINA4_MCP_TOKEN=… cargo test wire_long_context -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn wire_long_context_store_then_requery() {
+        let Ok(token) = std::env::var("TINA4_MCP_TOKEN") else {
+            eprintln!("skip: TINA4_MCP_TOKEN not set");
+            return;
+        };
+        let base = base_url();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            // 1) Store context, get a checksum. Answer must be CLEAN (trailer stripped).
+            let (a1, c1) = long_context_call(
+                &base, &token,
+                "What number is X?",
+                "X is 99. wire-test-alpha marker.",
+                "",
+            ).await.expect("first call failed");
+            assert!(a1.contains("99"), "answer should mention 99, got: {a1}");
+            assert!(c1.starts_with("cx_"), "expected a cx_ checksum, got: {c1}");
+            assert!(!a1.contains("checksum:"), "trailer leaked into answer: {a1}");
+
+            // 2) Re-query with the checksum ALONE (no context resent) — the server
+            //    answers from the stored corpus and returns the SAME checksum.
+            let (a2, c2) = long_context_call(
+                &base, &token, "What number is X?", "", &c1,
+            ).await.expect("requery failed");
+            assert!(a2.contains("99"), "requery lost the stored context, got: {a2}");
+            assert_eq!(c2, c1, "re-query (no new context) must keep the same checksum");
+        });
     }
 
     #[test]

@@ -14,7 +14,7 @@
 # copied from a published image -- a layer copy, no toolchain, no compile,
 # no network fetch at build time. Override with
 # --build-arg TINA4_CLI_IMAGE=... to pin or test a different CLI.
-ARG TINA4_CLI_IMAGE=ghcr.io/tina4stack/tina4-cli:3.8.63
+ARG TINA4_CLI_IMAGE=ghcr.io/tina4stack/tina4-cli:v3.8.63
 FROM ${TINA4_CLI_IMAGE} AS tina4cli
 
 FROM node:24-alpine AS deps
@@ -37,14 +37,19 @@ COPY package.json package-lock.json* tsconfig.json ./
 RUN npm ci
 COPY . .
 # --noCheck: EMIT, do not type-check. An image build's job is to produce
-# runnable JS, not to re-validate your dependencies' types. And today it cannot:
-# tina4-nodejs's exports map points "types" at packages/*/src/index.ts (raw
-# TypeScript) while "import" points at dist, so tsc drags the FRAMEWORK's source
-# into your program and fails on types the framework needs but does not declare
-# (@types/pg, a newer @types/node for node:sqlite). Your own code is still
-# type-checked by `npm run build` in development, where that belongs.
+# runnable JS, not to re-validate your dependencies' types. Your own code is
+# still type-checked by `npm run build` in development, where that belongs.
 #
-# When tina4-nodejs ships .d.ts and points "types" at dist, drop --noCheck.
+# It is also load-bearing for now. tina4-nodejs's exports map pointed "types" at
+# packages/*/src/index.ts (raw TypeScript) while "import" pointed at dist, so tsc
+# dragged the FRAMEWORK's source into your program and failed on types the
+# framework needs but never declared (@types/pg, a newer @types/node for
+# node:sqlite). That is fixed in the framework (real .d.ts under types/, all five
+# exports entries repointed) but the fix is NOT on npm yet -- the newest published
+# tina4-nodejs is 3.13.92, which still carries the broken map.
+#
+# Drop --noCheck once the scaffold installs a tina4-nodejs NEWER than 3.13.92.
+# Verify before you do: `npx tsc --noEmit` in a fresh scaffold must exit 0.
 RUN npx tsc --noCheck && npm prune --omit=dev
 
 FROM node:24-alpine

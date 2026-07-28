@@ -305,6 +305,35 @@ mod tests {
         }
     }
 
+    /// The CLI's release tags are v-PREFIXED (`v3.8.63`), so the image it
+    /// publishes is `tina4-cli:v3.8.63`. Every template pinned the bare
+    /// `3.8.63`, which is a 404 on GHCR -- so `tina4 deploy docker` emitted a
+    /// Dockerfile that could not even pull its first stage. Nothing caught it
+    /// because the generator tests only ever read the template text; the tag
+    /// was never resolved against a registry, and it never will be in a unit
+    /// test. This asserts the shape instead: the pin must look like the tags
+    /// the CLI actually cuts.
+    #[test]
+    fn the_cli_image_is_pinned_to_a_v_prefixed_tag() {
+        for (lang, body) in all_dockerfiles() {
+            let pin = body
+                .lines()
+                .find(|l| l.starts_with("ARG TINA4_CLI_IMAGE="))
+                .unwrap_or_else(|| panic!("{lang}: no TINA4_CLI_IMAGE pin"))
+                .trim_start_matches("ARG TINA4_CLI_IMAGE=");
+            let tag = pin.rsplit_once(':').map(|(_, t)| t).unwrap_or_else(|| {
+                panic!("{lang}: CLI image {pin} carries no tag -- an untagged \
+                        FROM silently means :latest, which moves under you")
+            });
+            assert!(
+                tag.starts_with('v') && tag[1..].starts_with(|c: char| c.is_ascii_digit()),
+                "{lang}: CLI image pinned to {tag:?}, but the tina4 CLI cuts \
+                 v-prefixed tags (v3.8.63). A bare version is a 404 on GHCR \
+                 and the build fails on its FIRST line."
+            );
+        }
+    }
+
     /// npx resolves through the network and, in a container, exited 0 having
     /// served nothing -- a silent no-op that looks like success. Ban it.
     #[test]

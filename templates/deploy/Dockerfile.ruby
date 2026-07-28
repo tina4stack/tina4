@@ -12,7 +12,7 @@
 # copied from a published image -- a layer copy, no toolchain, no compile,
 # no network fetch at build time. Override with
 # --build-arg TINA4_CLI_IMAGE=... to pin or test a different CLI.
-ARG TINA4_CLI_IMAGE=ghcr.io/tina4stack/tina4-cli:3.8.63
+ARG TINA4_CLI_IMAGE=ghcr.io/tina4stack/tina4-cli:v3.8.63
 FROM ${TINA4_CLI_IMAGE} AS tina4cli
 
 FROM ruby:3.3 AS deps

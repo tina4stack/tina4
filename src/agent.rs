@@ -25,6 +25,83 @@ fn feedback_convos() -> &'static Mutex<HashMap<String, Vec<LlmMessage>>> {
     FEEDBACK_CONVOS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// One `long_context` corpus chain, keyed by "{thread}:{purpose}". The server
+/// accumulates the corpus and hands back a `cx_…` checksum; we remember it so the
+/// next turn appends only the delta (or re-queries) instead of resending.
+struct LongContextChain {
+    checksum: String,
+    /// How many messages have already been appended to the corpus.
+    sent_len: usize,
+    /// Hash of `system_prompt + messages[..sent_len]` as sent — guards against a
+    /// changed system prompt or an edited/truncated prefix (forces a full resend).
+    prefix_hash: u64,
+}
+static LONG_CONTEXT_CACHE: OnceLock<Mutex<HashMap<String, LongContextChain>>> = OnceLock::new();
+fn long_context_cache() -> &'static Mutex<HashMap<String, LongContextChain>> {
+    LONG_CONTEXT_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Format the long_context corpus the same way `llm_call` does: an optional
+/// system-prompt header followed by `[role]\ncontent` blocks. Pass an empty
+/// `system_prompt` to build a delta chunk (appends never re-send the header).
+fn build_long_context(system_prompt: &str, msgs: &[LlmMessage]) -> String {
+    let mut s = String::new();
+    if !system_prompt.is_empty() {
+        s.push_str(system_prompt);
+        s.push_str("\n\n");
+    }
+    for m in msgs {
+        s.push_str(&format!("[{}]\n{}\n\n", m.role, m.content));
+    }
+    s
+}
+
+fn long_context_prefix_hash(system_prompt: &str, msgs: &[LlmMessage]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    system_prompt.hash(&mut h);
+    for m in msgs {
+        m.role.hash(&mut h);
+        m.content.hash(&mut h);
+    }
+    h.finish()
+}
+
+#[derive(Debug, PartialEq)]
+enum LongContextSend {
+    /// No usable cache — send system prompt + every message, no checksum.
+    Full,
+    /// Prefix matches — append messages from this index on, plus the checksum.
+    Append(usize),
+    /// Prefix matches and no new messages — re-query with the checksum alone.
+    Requery,
+}
+
+/// Decide what to send given the cached chain `(sent_len, prefix_hash)` and the
+/// current turn. Append only when the new messages EXTEND the exact prefix that
+/// was already sent (same system prompt, same earlier messages); anything else —
+/// a miss, a changed system prompt, an edited or truncated prefix — is a full
+/// resend, which keeps the accumulated corpus equal to the intended context.
+fn plan_long_context_send(
+    cached: Option<(usize, u64)>,
+    system_prompt: &str,
+    messages: &[LlmMessage],
+) -> LongContextSend {
+    match cached {
+        Some((sent_len, prefix_hash))
+            if messages.len() >= sent_len
+                && long_context_prefix_hash(system_prompt, &messages[..sent_len]) == prefix_hash =>
+        {
+            if messages.len() == sent_len {
+                LongContextSend::Requery
+            } else {
+                LongContextSend::Append(sent_len)
+            }
+        }
+        _ => LongContextSend::Full,
+    }
+}
+
 // ── Agent config structures ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2337,6 +2414,93 @@ async fn fetch_first_model(base_url: &str) -> Option<String> {
     None
 }
 
+/// `llm_call` with `long_context` checksum caching, keyed by `cache_key`
+/// (e.g. "{thread}:reasoning"). For the mcp `long_context` model it sends the
+/// stable context ONCE, then only the per-turn delta plus the stored checksum
+/// (or the checksum alone to re-query) — never resending the accumulated corpus.
+/// For any other model, or an empty `cache_key`, it is exactly `llm_call`.
+pub async fn llm_call_cached(
+    settings: &ModelSettings,
+    system_prompt: &str,
+    messages: &[LlmMessage],
+    max_tokens: u32,
+    temperature: f32,
+    cache_key: &str,
+) -> Result<String, String> {
+    let is_long_context = settings.provider == "tina4-mcp" && settings.model == "long_context";
+    if !is_long_context || cache_key.is_empty() {
+        return llm_call(settings, system_prompt, messages, max_tokens, temperature).await;
+    }
+
+    let question = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+
+    // Decide what to send from the cached chain — hold the lock only to read a
+    // snapshot (std Mutex must never be held across the .await below).
+    let (plan, checksum_in) = {
+        let guard = long_context_cache().lock().unwrap();
+        let cached = guard.get(cache_key);
+        let plan = plan_long_context_send(
+            cached.map(|c| (c.sent_len, c.prefix_hash)),
+            system_prompt,
+            messages,
+        );
+        let checksum_in = if matches!(plan, LongContextSend::Full) {
+            String::new()
+        } else {
+            cached.map(|c| c.checksum.clone()).unwrap_or_default()
+        };
+        (plan, checksum_in)
+    };
+
+    let context = match plan {
+        LongContextSend::Full => build_long_context(system_prompt, messages),
+        LongContextSend::Append(from) => build_long_context("", &messages[from..]),
+        LongContextSend::Requery => String::new(),
+    };
+
+    eprintln!(
+        "  [llm] long_context cached key={cache_key} plan={} ctx={}B chk={}",
+        match plan {
+            LongContextSend::Full => "full",
+            LongContextSend::Append(_) => "append",
+            LongContextSend::Requery => "requery",
+        },
+        context.len(),
+        if checksum_in.is_empty() { "-" } else { &checksum_in },
+    );
+
+    match crate::mcp_context::long_context_call(
+        &settings.url,
+        &settings.api_key,
+        &question,
+        &context,
+        &checksum_in,
+    )
+    .await
+    {
+        Some((answer, new_checksum)) => {
+            if !new_checksum.is_empty() {
+                let mut guard = long_context_cache().lock().unwrap();
+                guard.insert(
+                    cache_key.to_string(),
+                    LongContextChain {
+                        checksum: new_checksum,
+                        sent_len: messages.len(),
+                        prefix_hash: long_context_prefix_hash(system_prompt, messages),
+                    },
+                );
+            }
+            Ok(answer)
+        }
+        None => Err("long_context unavailable (mcp.tina4.com) — set TINA4_MCP_TOKEN in the dev-admin grounding panel / .env, or set ANTHROPIC_API_KEY".into()),
+    }
+}
+
 /// Make an LLM call (blocking, non-streaming).
 pub async fn llm_call(
     settings: &ModelSettings,
@@ -2389,8 +2553,10 @@ pub async fn llm_call(
             "  [llm] tina4-mcp long_context question={}B context={}B",
             question.len(), context.len(),
         );
-        return match crate::mcp_context::long_context_call(&settings.url, &settings.api_key, &question, &context).await {
-            Some(answer) => Ok(answer),
+        // Uncached path: full context, no checksum. Callers that repeat on a
+        // thread should use `llm_call_cached` (below) to append deltas instead.
+        return match crate::mcp_context::long_context_call(&settings.url, &settings.api_key, &question, &context, "").await {
+            Some((answer, _checksum)) => Ok(answer),
             None => Err("long_context unavailable (mcp.tina4.com) — set TINA4_MCP_TOKEN in the dev-admin grounding panel / .env, or set ANTHROPIC_API_KEY".into()),
         };
     }
@@ -3733,7 +3899,13 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                     content: format!("{TINA4_SUPERVISOR_VOICE}{user_turn}"),
                 });
 
-                let supervisor_reply = match llm_call(&settings.thinking, supervisor_prompt, &msgs, 2048, 0.3).await {
+                // Cache the long_context corpus per thread: the reasoning call
+                // repeats every turn on a growing history, so append the delta
+                // instead of resending. Other call sites (planner/debug are
+                // one-shot; the coder emits code and wants the full prompt) stay
+                // on the uncached path.
+                let reasoning_key = format!("{}:reasoning", chat_req.thread_id.as_deref().unwrap_or("-"));
+                let supervisor_reply = match llm_call_cached(&settings.thinking, supervisor_prompt, &msgs, 2048, 0.3, &reasoning_key).await {
                     Ok(r) => r,
                     Err(e) => {
                         let escaped = e.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
@@ -6920,6 +7092,67 @@ mod tests {
         let (out, fired) = coerce_signoff_to_execute(already, "go", &refs, true);
         assert!(!fired);
         assert_eq!(out.unwrap().context.as_deref(), Some("plan/x.md"));
+    }
+
+    // ── long_context checksum: delta decision ────────────────────────
+    fn lm(role: &str, content: &str) -> LlmMessage {
+        LlmMessage { role: role.into(), content: content.into() }
+    }
+
+    #[test]
+    fn plan_full_on_cache_miss() {
+        let msgs = [lm("system", "S"), lm("user", "hi")];
+        assert_eq!(plan_long_context_send(None, "sys", &msgs), LongContextSend::Full);
+    }
+
+    #[test]
+    fn plan_append_when_prefix_matches_and_grew() {
+        let sys = "sys";
+        let first = [lm("user", "a"), lm("user", "b")];
+        let h = long_context_prefix_hash(sys, &first);
+        // Next turn: same two messages + one new — append from index 2.
+        let next = [lm("user", "a"), lm("user", "b"), lm("user", "c")];
+        assert_eq!(
+            plan_long_context_send(Some((2, h)), sys, &next),
+            LongContextSend::Append(2),
+        );
+    }
+
+    #[test]
+    fn plan_requery_when_no_new_messages() {
+        let sys = "sys";
+        let msgs = [lm("user", "a"), lm("user", "b")];
+        let h = long_context_prefix_hash(sys, &msgs);
+        assert_eq!(
+            plan_long_context_send(Some((2, h)), sys, &msgs),
+            LongContextSend::Requery,
+        );
+    }
+
+    #[test]
+    fn plan_full_when_prefix_edited() {
+        let sys = "sys";
+        let first = [lm("user", "a"), lm("user", "b")];
+        let h = long_context_prefix_hash(sys, &first);
+        // The earlier prefix changed ("b" -> "B") — must invalidate, not append.
+        let edited = [lm("user", "a"), lm("user", "B"), lm("user", "c")];
+        assert_eq!(plan_long_context_send(Some((2, h)), sys, &edited), LongContextSend::Full);
+    }
+
+    #[test]
+    fn plan_full_when_system_prompt_changed() {
+        let first = [lm("user", "a")];
+        let h = long_context_prefix_hash("old-sys", &first);
+        let next = [lm("user", "a"), lm("user", "b")];
+        assert_eq!(plan_long_context_send(Some((1, h)), "new-sys", &next), LongContextSend::Full);
+    }
+
+    #[test]
+    fn plan_full_when_history_shrank() {
+        let sys = "sys";
+        // Cached sent_len=3 but the window slid and now only 2 remain.
+        let now = [lm("user", "b"), lm("user", "c")];
+        assert_eq!(plan_long_context_send(Some((3, 12345)), sys, &now), LongContextSend::Full);
     }
 
     #[test]

@@ -143,6 +143,12 @@ pub struct ChatSettings {
     // (backfilled in load_chat_settings) so older settings.json still parse.
     #[serde(default)]
     pub coder: ModelSettings,
+    /// When the reasoning (`thinking`) slot is overridden to a local model
+    /// (via `TINA4_LOCAL_MODEL_URL`), this holds the model to fall back to when
+    /// the local endpoint fails (normally the mcp.tina4.com `long_context`).
+    /// `None` when there is no override / no fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_fallback: Option<ModelSettings>,
 }
 
 // ── Chat messages ──
@@ -993,6 +999,73 @@ pub fn load_agents(project_dir: &Path) -> Vec<Agent> {
 ///
 /// A settings.json on disk always wins, so saving via the dev admin UI
 /// overrides the env-var default cleanly.
+/// Point the reasoning (`thinking`) slot at a LOCAL OpenAI-compatible model when
+/// `TINA4_LOCAL_MODEL_URL` is set, stashing the prior slot as `reasoning_fallback`
+/// (unless `TINA4_LOCAL_MODEL_FALLBACK=0`). Applied at every `load_chat_settings`
+/// return point so it wins over settings.json / Anthropic / the mcp default.
+fn apply_local_reasoning_override(mut settings: ChatSettings) -> ChatSettings {
+    let Ok(raw_url) = std::env::var("TINA4_LOCAL_MODEL_URL") else {
+        return settings;
+    };
+    let raw_url = raw_url.trim();
+    if raw_url.is_empty() {
+        return settings;
+    }
+    // Normalise to a base URL: the generic openai path appends
+    // `/v1/chat/completions`, so a pasted `.../v1` must not double up.
+    let base = raw_url.trim_end_matches('/');
+    let base = base.strip_suffix("/v1").unwrap_or(base).trim_end_matches('/');
+
+    let model = std::env::var("TINA4_LOCAL_MODEL")
+        .ok()
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| "ctx-reader".into());
+
+    let local = ModelSettings {
+        provider: "openai".into(),
+        model,
+        url: base.to_string(),
+        api_key: std::env::var("TINA4_LOCAL_MODEL_KEY").unwrap_or_default(),
+    };
+
+    let fallback_on = std::env::var("TINA4_LOCAL_MODEL_FALLBACK")
+        .map(|v| {
+            let v = v.trim().to_lowercase();
+            v != "0" && v != "false" && v != "no"
+        })
+        .unwrap_or(true);
+    if fallback_on {
+        settings.reasoning_fallback = Some(settings.thinking.clone());
+    }
+    eprintln!(
+        "  [settings] reasoning slot -> LOCAL {} @ {} (fallback: {})",
+        local.model,
+        local.url,
+        if fallback_on {
+            settings.reasoning_fallback.as_ref().map(|f| f.model.as_str()).unwrap_or("-")
+        } else {
+            "off"
+        },
+    );
+    settings.thinking = local;
+    settings
+}
+
+/// The fallback to use for a given model call: `reasoning_fallback` ONLY when
+/// `model` IS the overridden thinking slot (so planner/debug that resolve to
+/// `thinking` inherit it, but the coder or any other slot never does).
+fn reasoning_fallback_for<'a>(
+    model: &ModelSettings,
+    settings: &'a ChatSettings,
+) -> Option<&'a ModelSettings> {
+    settings.reasoning_fallback.as_ref().filter(|_| {
+        model.provider == settings.thinking.provider
+            && model.url == settings.thinking.url
+            && model.model == settings.thinking.model
+    })
+}
+
 pub fn load_chat_settings(project_dir: &Path) -> ChatSettings {
     // The coder runs on `long_context`. The fine-tuned `tina4_chat` has a small
     // window — measured live, a prompt over ~9KB comes back as an availability
@@ -1015,7 +1088,7 @@ pub fn load_chat_settings(project_dir: &Path) -> ChatSettings {
             if settings.coder.provider.is_empty() {
                 settings.coder = coder;
             }
-            return settings;
+            return apply_local_reasoning_override(settings);
         }
     }
 
@@ -1043,12 +1116,13 @@ pub fn load_chat_settings(project_dir: &Path) -> ChatSettings {
                 url: "https://api.anthropic.com".into(),
                 api_key: key.clone(),
             };
-            return ChatSettings {
+            return apply_local_reasoning_override(ChatSettings {
                 thinking: claude("claude-sonnet-4-5"),
                 vision: claude("claude-sonnet-4-5"), // Claude is multimodal
                 coder, // fine-tuned tina4_chat even when Claude is available
                 image_gen,
-            };
+                reasoning_fallback: None,
+            });
         }
     }
 
@@ -1064,7 +1138,7 @@ pub fn load_chat_settings(project_dir: &Path) -> ChatSettings {
         url: crate::mcp_context::base_url(),
         api_key: crate::mcp_context::token(project_dir).unwrap_or_default(),
     };
-    ChatSettings {
+    apply_local_reasoning_override(ChatSettings {
         thinking: reasoning.clone(),
         // tina4: no dedicated vision model exists on mcp.tina4.com yet; the
         // retired Tina4 Cloud vision endpoint is gone. Point vision at the
@@ -1073,7 +1147,8 @@ pub fn load_chat_settings(project_dir: &Path) -> ChatSettings {
         vision: reasoning,
         coder,
         image_gen,
-    }
+        reasoning_fallback: None,
+    })
 }
 
 /// Resolve which `ModelSettings` an agent should use, given its `config.model`
@@ -2501,6 +2576,48 @@ pub async fn llm_call_cached(
     }
 }
 
+/// One reasoning call: checksum-cached (`llm_call_cached`) when a `cache_key` is
+/// given — the mcp `long_context` path — else plain `llm_call`.
+async fn reasoning_one_call(
+    model: &ModelSettings,
+    system_prompt: &str,
+    messages: &[LlmMessage],
+    max_tokens: u32,
+    temperature: f32,
+    cache_key: &str,
+) -> Result<String, String> {
+    if cache_key.is_empty() {
+        llm_call(model, system_prompt, messages, max_tokens, temperature).await
+    } else {
+        llm_call_cached(model, system_prompt, messages, max_tokens, temperature, cache_key).await
+    }
+}
+
+/// Run `primary`; on error, retry with `fallback` if present. Lets a local
+/// reasoning override degrade to mcp.tina4.com when the local endpoint is down.
+async fn llm_call_with_fallback(
+    primary: &ModelSettings,
+    fallback: Option<&ModelSettings>,
+    system_prompt: &str,
+    messages: &[LlmMessage],
+    max_tokens: u32,
+    temperature: f32,
+    cache_key: &str,
+) -> Result<String, String> {
+    match reasoning_one_call(primary, system_prompt, messages, max_tokens, temperature, cache_key).await {
+        Ok(answer) => Ok(answer),
+        Err(e) => match fallback {
+            Some(fb) => {
+                eprintln!("  [reasoning] {} failed: {e} — falling back to {}", primary.model, fb.model);
+                reasoning_one_call(fb, system_prompt, messages, max_tokens, temperature, cache_key)
+                    .await
+                    .map_err(|e2| format!("{e} (fallback {} also failed: {e2})", fb.model))
+            }
+            None => Err(e),
+        },
+    }
+}
+
 /// Make an LLM call (blocking, non-streaming).
 pub async fn llm_call(
     settings: &ModelSettings,
@@ -3317,10 +3434,10 @@ pub async fn background_thinking_loop(
                 top.message, top.level, top.category
             );
 
-            let human_message = match llm_call(
-                &settings.thinking, "",
+            let human_message = match llm_call_with_fallback(
+                &settings.thinking, reasoning_fallback_for(&settings.thinking, &settings), "",
                 &[LlmMessage { role: "user".into(), content: reflection_prompt }],
-                256, 0.7
+                256, 0.7, ""
             ).await {
                 Ok(msg) => {
                     // Clean up — remove any JSON wrapping the LLM might add
@@ -3905,7 +4022,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                 // one-shot; the coder emits code and wants the full prompt) stay
                 // on the uncached path.
                 let reasoning_key = format!("{}:reasoning", chat_req.thread_id.as_deref().unwrap_or("-"));
-                let supervisor_reply = match llm_call_cached(&settings.thinking, supervisor_prompt, &msgs, 2048, 0.3, &reasoning_key).await {
+                let supervisor_reply = match llm_call_with_fallback(&settings.thinking, reasoning_fallback_for(&settings.thinking, &settings), supervisor_prompt, &msgs, 2048, 0.3, &reasoning_key).await {
                     Ok(r) => r,
                     Err(e) => {
                         let escaped = e.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
@@ -3961,7 +4078,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                         );
                         let planner_msgs = vec![LlmMessage { role: "user".into(), content: planner_msg }];
 
-                        match llm_call(&planner_model, planner_prompt, &planner_msgs, 4096, 0.2).await {
+                        match llm_call_with_fallback(&planner_model, reasoning_fallback_for(&planner_model, &settings), planner_prompt, &planner_msgs, 4096, 0.2, "").await {
                             Ok(plan_content) => {
                                 // Save plan to plan/ — canonical user-visible
                                 // location across all Tina4 frameworks. Was
@@ -4510,7 +4627,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                         let debug_model = resolve_model("debug", &agents, &settings);
                         let debug_msgs = vec![LlmMessage { role: "user".into(), content: format!("Analyze this error and suggest a fix:\n\n{}", err_msg) }];
 
-                        match llm_call(&debug_model, debug_prompt, &debug_msgs, 4096, 0.2).await {
+                        match llm_call_with_fallback(&debug_model, reasoning_fallback_for(&debug_model, &settings), debug_prompt, &debug_msgs, 4096, 0.2, "").await {
                             Ok(analysis) => {
                                 let escaped = analysis.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
                                 sse_event(&mut stream, "message", &format!("{{\"content\":\"{}\",\"agent\":\"debug\"}}", escaped)).await;
@@ -7384,6 +7501,7 @@ print('hi')
             vision: ModelSettings { provider: "v".into(), ..ModelSettings::default_test() },
             coder: ModelSettings { provider: "c".into(), ..ModelSettings::default_test() },
             image_gen: ModelSettings { provider: "i".into(), ..ModelSettings::default_test() },
+            reasoning_fallback: None,
         };
         let m = resolve_agent_model("thinking", &settings);
         assert_eq!(m.provider, "x");
@@ -7426,12 +7544,81 @@ print('hi')
         assert_eq!(m.provider, "FALLBACK");
     }
 
+    #[test]
+    fn local_reasoning_override_from_env() {
+        // Env is process-wide; save/restore so we don't disturb other tests.
+        let keys = ["TINA4_LOCAL_MODEL_URL", "TINA4_LOCAL_MODEL", "TINA4_LOCAL_MODEL_KEY", "TINA4_LOCAL_MODEL_FALLBACK"];
+        let saved: Vec<_> = keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        let clear = || keys.iter().for_each(|k| std::env::remove_var(k));
+        // Fresh base with an mcp thinking slot each call (override takes ownership).
+        let mk = || ChatSettings {
+            thinking: ModelSettings {
+                provider: "tina4-mcp".into(), model: "long_context".into(),
+                url: "https://mcp.tina4.com".into(), api_key: "tok".into(),
+            },
+            ..empty_chat_settings()
+        };
+
+        // Unset → unchanged, no fallback.
+        clear();
+        let out = apply_local_reasoning_override(mk());
+        assert_eq!(out.thinking.provider, "tina4-mcp");
+        assert!(out.reasoning_fallback.is_none());
+
+        // URL with trailing /v1 → local openai slot, /v1 stripped, default model,
+        // prior thinking stashed as the fallback.
+        clear();
+        std::env::set_var("TINA4_LOCAL_MODEL_URL", "http://host:11460/v1");
+        let out = apply_local_reasoning_override(mk());
+        assert_eq!(out.thinking.provider, "openai");
+        assert_eq!(out.thinking.model, "ctx-reader");
+        assert_eq!(out.thinking.url, "http://host:11460");
+        assert_eq!(out.reasoning_fallback.as_ref().unwrap().model, "long_context");
+
+        // Custom model + fallback disabled.
+        clear();
+        std::env::set_var("TINA4_LOCAL_MODEL_URL", "http://host:11460");
+        std::env::set_var("TINA4_LOCAL_MODEL", "qwen2.5");
+        std::env::set_var("TINA4_LOCAL_MODEL_FALLBACK", "0");
+        let out = apply_local_reasoning_override(mk());
+        assert_eq!(out.thinking.model, "qwen2.5");
+        assert!(out.reasoning_fallback.is_none());
+
+        clear();
+        for (k, v) in saved {
+            if let Some(v) = v { std::env::set_var(k, v); }
+        }
+    }
+
+    #[test]
+    fn reasoning_fallback_only_for_the_thinking_slot() {
+        let mcp = || ModelSettings {
+            provider: "tina4-mcp".into(), model: "long_context".into(),
+            url: "https://mcp.tina4.com".into(), api_key: String::new(),
+        };
+        let mut s = empty_chat_settings();
+        s.thinking = ModelSettings {
+            provider: "openai".into(), model: "ctx-reader".into(),
+            url: "http://host:11460".into(), api_key: String::new(),
+        };
+        s.coder = mcp();
+        s.reasoning_fallback = Some(mcp());
+        // The overridden thinking slot inherits the fallback...
+        assert!(reasoning_fallback_for(&s.thinking, &s).is_some());
+        // ...but the coder (a different slot) never does.
+        assert!(reasoning_fallback_for(&s.coder, &s).is_none());
+        // No override → no fallback, even for thinking.
+        s.reasoning_fallback = None;
+        assert!(reasoning_fallback_for(&s.thinking, &s).is_none());
+    }
+
     fn empty_chat_settings() -> ChatSettings {
         ChatSettings {
             thinking: ModelSettings::default_test(),
             vision: ModelSettings::default_test(),
             coder: ModelSettings::default_test(),
             image_gen: ModelSettings::default_test(),
+            reasoning_fallback: None,
         }
     }
 

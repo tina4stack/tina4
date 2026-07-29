@@ -1230,6 +1230,13 @@ fn module_has_tests(file: &Path, idx: &TestIndex, declared_types: &[String]) -> 
     }
     let stem_l = stem.to_ascii_lowercase();
     // Stage 1: a dedicated test file named for this module.
+    //
+    // `{stem}test.` covers PHPUnit's PascalCase convention (Metrics.php ->
+    // MetricsTest.php), which every other pattern here misses because it uses no
+    // separator. Stage 3 cannot rescue it either: whole-identifier matching
+    // correctly refuses to find `Widget` inside `WidgetTest`. Comparison is
+    // lowercased and anchored with starts_with, so `Base` never matches
+    // `DatabaseTest.php`.
     for pat in [
         format!("test_{stem_l}."),
         format!("test_{stem_l}s."),
@@ -1237,6 +1244,7 @@ fn module_has_tests(file: &Path, idx: &TestIndex, declared_types: &[String]) -> 
         format!("{stem_l}_spec."),
         format!("{stem_l}.test."),
         format!("{stem_l}.spec."),
+        format!("{stem_l}test."),
     ] {
         if idx.file_names.iter().any(|n| n.starts_with(&pat)) {
             return true;
@@ -2349,6 +2357,36 @@ mod tests {
         assert!(!mentions_symbol("FORMAT = 1", "ORM"));
         assert!(mentions_symbol("Order(1)", "Order"));
         assert!(!mentions_symbol("OrderItem(1)", "Order"));
+    }
+
+    // ── PHPUnit's PascalCase test filename (Metrics.php -> MetricsTest.php) ──
+    // Every other stage-1 pattern uses a separator, so this convention matched
+    // nothing and EVERY PHP source file raised a false "untested" offender.
+
+    #[test]
+    fn a_phpunit_pascalcase_test_file_counts_as_tested() {
+        let idx = TestIndex {
+            file_names: ["metricstest.php".to_string()].into_iter().collect(),
+            contents: vec!["<?php\nclass MetricsTest {}\n".to_string()],
+        };
+        assert!(
+            module_has_tests(Path::new("Tina4/Metrics.php"), &idx, &[]),
+            "MetricsTest.php is the dedicated test for Metrics.php"
+        );
+    }
+
+    #[test]
+    fn a_pascalcase_match_is_anchored_not_a_substring() {
+        // The negative half: `Base` must NOT be marked tested by DatabaseTest.php.
+        // starts_with (not contains) is what makes the separator-less pattern safe.
+        let idx = TestIndex {
+            file_names: ["databasetest.php".to_string()].into_iter().collect(),
+            contents: vec!["<?php\nclass DatabaseTest {}\n".to_string()],
+        };
+        assert!(
+            !module_has_tests(Path::new("Tina4/Base.php"), &idx, &[]),
+            "DatabaseTest.php tests Database, not Base"
+        );
     }
 
 }

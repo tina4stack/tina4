@@ -1328,7 +1328,11 @@ fn build_offenders(files: &[FileMetrics], functions: &[FunctionInfo]) -> Vec<Off
                 kind: "complexity".to_string(),
                 severity: if cc > 20 { "error" } else { "warn" }.to_string(),
                 score: cc as f64,
-                detail: format!("{} \u{2014} cyclomatic complexity {}", fn_info.name, cc),
+                // ASCII only. Every other `detail` here already is, and this one
+                // em dash made the payload non-ASCII: a consumer whose runtime
+                // tags subprocess output with a minimal locale (LANG=C) then
+                // raised on the first string operation. Also the house style.
+                detail: format!("{} - cyclomatic complexity {}", fn_info.name, cc),
             });
         }
     }

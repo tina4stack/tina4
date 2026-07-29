@@ -1066,6 +1066,19 @@ fn reasoning_fallback_for<'a>(
     })
 }
 
+/// Keep a structured-generation agent (planner / debug) on the STRONG model even
+/// when the reasoning slot is overridden to a local model. Supervisor reasoning
+/// and reflection want the fast local model, but plan/fix quality matters more
+/// than latency — so if `resolved` IS the overridden thinking slot, use the
+/// fallback (the pre-override reasoning model, normally mcp `long_context`).
+/// With no override, this is a no-op and the agent keeps its resolved model.
+fn strong_reasoning_model(resolved: ModelSettings, settings: &ChatSettings) -> ModelSettings {
+    match reasoning_fallback_for(&resolved, settings) {
+        Some(fallback) => fallback.clone(),
+        None => resolved,
+    }
+}
+
 pub fn load_chat_settings(project_dir: &Path) -> ChatSettings {
     // The coder runs on `long_context`. The fine-tuned `tina4_chat` has a small
     // window — measured live, a prompt over ~9KB comes back as an availability
@@ -2862,9 +2875,14 @@ pub fn parse_supervisor_action(response: &str) -> Option<SupervisorAction> {
     // Try to extract JSON from the response (might be wrapped in markdown or text)
     let trimmed = response.trim();
 
-    // Direct JSON
+    // Direct JSON — but only return if it parses cleanly. A model that appends
+    // trailing text after the object (e.g. the supervisor voice emoji:
+    // `{"action":"respond",...} 🖖`) would fail here; fall through to the
+    // brace-extraction below rather than returning None (UNPARSED).
     if trimmed.starts_with('{') {
-        return serde_json::from_str(trimmed).ok();
+        if let Ok(action) = serde_json::from_str(trimmed) {
+            return Some(action);
+        }
     }
 
     // JSON in code block
@@ -4069,7 +4087,10 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                         // Call planner agent
                         let planner = agents.iter().find(|a| a.name == "planner");
                         let planner_prompt = planner.map(|p| p.system_prompt.as_str()).unwrap_or("");
-                        let planner_model = resolve_model("planner", &agents, &settings);
+                        // Planner stays on the strong model (long_context) even when
+                        // reasoning is overridden to a local model — plan quality drives
+                        // the whole build.
+                        let planner_model = strong_reasoning_model(resolve_model("planner", &agents, &settings), &settings);
 
                         // Build planner context — no paths or tech details
                         let planner_msg = format!(
@@ -4624,7 +4645,8 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
 
                         let debug_agent = agents.iter().find(|a| a.name == "debug");
                         let debug_prompt = debug_agent.map(|d| d.system_prompt.as_str()).unwrap_or("");
-                        let debug_model = resolve_model("debug", &agents, &settings);
+                        // Debug (fix generation) also stays on the strong model.
+                        let debug_model = strong_reasoning_model(resolve_model("debug", &agents, &settings), &settings);
                         let debug_msgs = vec![LlmMessage { role: "user".into(), content: format!("Analyze this error and suggest a fix:\n\n{}", err_msg) }];
 
                         match llm_call_with_fallback(&debug_model, reasoning_fallback_for(&debug_model, &settings), debug_prompt, &debug_msgs, 4096, 0.2, "").await {
@@ -7610,6 +7632,40 @@ print('hi')
         // No override → no fallback, even for thinking.
         s.reasoning_fallback = None;
         assert!(reasoning_fallback_for(&s.thinking, &s).is_none());
+    }
+
+    #[test]
+    fn parse_action_tolerates_trailing_text_after_json() {
+        // The general model appends the supervisor-voice emoji AFTER the object;
+        // the direct-parse branch must fall through to brace-extraction, not
+        // return UNPARSED.
+        let a = parse_supervisor_action("{\"action\":\"respond\",\"message\":\"Which DB?\"} 🖖")
+            .expect("should parse despite the trailing emoji");
+        assert_eq!(a.action, "respond");
+        assert_eq!(a.message.as_deref(), Some("Which DB?"));
+        // Clean JSON still parses via the direct branch.
+        let b = parse_supervisor_action("{\"action\":\"plan\",\"delegate_to\":\"planner\"}").unwrap();
+        assert_eq!(b.action, "plan");
+    }
+
+    #[test]
+    fn strong_reasoning_model_keeps_planner_off_the_local_override() {
+        let mut s = empty_chat_settings();
+        // Override active: thinking = local general, fallback = long_context.
+        s.thinking = ModelSettings {
+            provider: "openai".into(), model: "general".into(),
+            url: "https://chat.tina4.com".into(), api_key: String::new(),
+        };
+        s.reasoning_fallback = Some(ModelSettings {
+            provider: "tina4-mcp".into(), model: "long_context".into(),
+            url: "https://mcp.tina4.com".into(), api_key: String::new(),
+        });
+        // A planner/debug that resolved to the overridden thinking slot is moved
+        // back to the strong long_context model.
+        assert_eq!(strong_reasoning_model(s.thinking.clone(), &s).model, "long_context");
+        // No override → no-op (keeps whatever it resolved to).
+        s.reasoning_fallback = None;
+        assert_eq!(strong_reasoning_model(s.thinking.clone(), &s).model, "general");
     }
 
     fn empty_chat_settings() -> ChatSettings {

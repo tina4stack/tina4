@@ -72,6 +72,10 @@ pub(crate) struct FileMetrics {
     pub avg_complexity: f64,  // rounded to 2 dp
     pub functions: usize,
     pub maintainability: f64, // rounded to 1 dp, clamped [0, 100]
+    // The Halstead volume that maintainability was derived FROM. Already
+    // computed for the MI; serialising it costs nothing and closes the gap
+    // left when coupling_afferent/instability were added without it.
+    pub halstead_volume: f64, // rounded to 2 dp
     pub has_tests: bool,
 
     // ── Coupling ─────────────────────────────────────────────────────────────
@@ -556,6 +560,25 @@ fn is_class_node(kind: &str, lang: Lang) -> bool {
     }
 }
 
+/// Does this node DECLARE a named type a test could reference by name?
+///
+/// Wider than `is_class_node` on purpose, and used only by test detection.
+/// `is_class_node` also drives function naming (`Calculator.add`), so widening it
+/// would start naming interface method signatures after their interface.
+///
+/// TypeScript needed this: an interface-only module has no class at all, so a
+/// test that references it by name was reported UNTESTED and raised a false
+/// offender. PHP already counted `interface_declaration` here.
+fn is_type_decl_node(kind: &str, lang: Lang) -> bool {
+    if is_class_node(kind, lang) {
+        return true;
+    }
+    match lang {
+        Lang::Ts => matches!(kind, "interface_declaration" | "type_alias_declaration" | "enum_declaration"),
+        _ => false,
+    }
+}
+
 fn node_name(node: Node, src: &[u8]) -> Option<String> {
     node.child_by_field_name("name")
         .and_then(|n| n.utf8_text(src).ok())
@@ -993,6 +1016,7 @@ pub(crate) fn analyze_source(
         avg_complexity: round_dp(avg_cc, 2),
         functions: num_functions,
         maintainability: mi,
+        halstead_volume: round_dp(vol, 2),
         has_tests,
         // dep_count is every import as written; the coupling triple is filled in
         // by the second pass in analyze_targets, which alone knows every file.
@@ -1179,7 +1203,7 @@ fn declared_type_names(source: &str, lang: Lang) -> Vec<String> {
     let mut names = Vec::new();
     let mut stack = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
-        if is_class_node(node.kind(), lang) {
+        if is_type_decl_node(node.kind(), lang) {
             if let Some(name) = node_name(node, bytes) {
                 names.push(name);
             }
@@ -1841,7 +1865,7 @@ mod tests {
     fn file_with(mi: f64, loc: usize, funcs: usize, has_tests: bool) -> FileMetrics {
         FileMetrics {
             path: "x.py".into(), loc, complexity: 0, avg_complexity: 0.0,
-            functions: funcs, maintainability: mi, has_tests,
+            functions: funcs, maintainability: mi, halstead_volume: 0.0, has_tests,
             dep_count: 0, coupling_efferent: 0, coupling_afferent: 0, instability: 0.0,
         }
     }
@@ -2366,6 +2390,38 @@ mod tests {
     // ── PHPUnit's PascalCase test filename (Metrics.php -> MetricsTest.php) ──
     // Every other stage-1 pattern uses a separator, so this convention matched
     // nothing and EVERY PHP source file raised a false "untested" offender.
+
+    #[test]
+    fn a_typescript_interface_is_a_declared_type() {
+        // An interface-only module has no class, so without this the module was
+        // reported UNTESTED however plainly a test referenced it.
+        let names = declared_type_names(
+            "export interface WidgetConnection {\n  id: string;\n}\n", Lang::Ts);
+        assert!(names.contains(&"WidgetConnection".to_string()), "got {names:?}");
+    }
+
+    #[test]
+    fn a_typescript_interface_referenced_by_a_test_counts_as_tested() {
+        // The TS inline-type-import idiom: the reference sits mid-line on a
+        // `const` declaration, so no import-line rule can see it. The type NAME
+        // is the only signal, which is exactly what stage 3 is for.
+        let idx = TestIndex {
+            file_names: ["widget.test.ts".to_string()].into_iter().collect(),
+            contents: vec!["const c: import(\"../src/widgetConnection.ts\").WidgetConnection = { id: \"1\" };".to_string()],
+        };
+        let declared = vec!["WidgetConnection".to_string()];
+        assert!(module_has_tests(Path::new("src/widgetConnection.ts"), &idx, &declared));
+    }
+
+    #[test]
+    fn an_unreferenced_interface_is_still_untested() {
+        let idx = TestIndex {
+            file_names: ["other.test.ts".to_string()].into_iter().collect(),
+            contents: vec!["const x = 1;".to_string()],
+        };
+        let declared = vec!["SoloIface".to_string()];
+        assert!(!module_has_tests(Path::new("src/ctrlIface.ts"), &idx, &declared));
+    }
 
     #[test]
     fn a_phpunit_pascalcase_test_file_counts_as_tested() {

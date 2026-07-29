@@ -1164,7 +1164,61 @@ fn build_test_index(root: &str) -> TestIndex {
     TestIndex { file_names, contents }
 }
 
-fn module_has_tests(file: &Path, idx: &TestIndex) -> bool {
+/// Type names DECLARED in this module (class / trait / interface / module).
+///
+/// Used by the class-symbol stage of test detection: a test that imports a class
+/// through the package root never mentions the module's file stem, so the stem
+/// signal alone reports a well-tested module as untested.
+fn declared_type_names(source: &str, lang: Lang) -> Vec<String> {
+    let mut parser = Parser::new();
+    if parser.set_language(&lang.tree_sitter_language()).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(source, None) else { return Vec::new() };
+    let bytes = source.as_bytes();
+    let mut names = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if is_class_node(node.kind(), lang) {
+            if let Some(name) = node_name(node, bytes) {
+                names.push(name);
+            }
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    names
+}
+
+/// True when `needle` appears in `haystack` as a whole identifier.
+///
+/// A substring match would let `Order` mark `OrderItem` as tested, and every
+/// 3-char name would collide constantly. Identifier characters on either side
+/// disqualify the hit.
+fn mentions_symbol(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let bytes = haystack.as_bytes();
+    let n = needle.len();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut from = 0usize;
+    while let Some(rel) = haystack[from..].find(needle) {
+        let start = from + rel;
+        let end = start + n;
+        let before_ok = start == 0 || !is_ident(bytes[start - 1]);
+        let after_ok = end == bytes.len() || !is_ident(bytes[end]);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
+}
+
+fn module_has_tests(file: &Path, idx: &TestIndex, declared_types: &[String]) -> bool {
     let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("");
     let stem = if matches!(stem, "__init__" | "index" | "mod") {
         file.parent().and_then(|p| p.file_name()).and_then(|s| s.to_str()).unwrap_or(stem)
@@ -1198,6 +1252,24 @@ fn module_has_tests(file: &Path, idx: &TestIndex) -> bool {
                 || t.starts_with("use ")
                 || t.contains("require(");
             if is_import && line.contains(stem) {
+                return true;
+            }
+        }
+    }
+    // Stage 3: a TYPE DECLARED here is referenced by a test.
+    //
+    // A test that imports through the package root (`from src import ORM`) never
+    // mentions the module's file stem, so stages 1 and 2 both miss it and a
+    // well-tested module is reported untested. The class symbol is the only
+    // signal in that case, and it is a real one.
+    //
+    // No minimum name length. A >3-char gate was the bug the Python master
+    // fixed: it silently excluded exactly the short framework types that matter
+    // most (ORM, Api, Log). Whole-identifier matching is what keeps a short name
+    // honest, not a length floor.
+    for ty in declared_types {
+        for content in &idx.contents {
+            if mentions_symbol(content, ty) {
                 return true;
             }
         }
@@ -1364,7 +1436,8 @@ pub(crate) fn analyze_targets(files: &[PathBuf], scan_root: &str) -> Report {
             continue;
         }
         let rel = rel_display(path, scan_root);
-        let has_tests = module_has_tests(path, &test_index);
+        let declared = declared_type_names(&source, lang);
+        let has_tests = module_has_tests(path, &test_index, &declared);
         if let Some((fm, funcs, specs)) = analyze_source(lang, &source, &rel, has_tests) {
             pending.push((fm.path.clone(), lang, specs));
             file_metrics.push(fm);
@@ -2220,4 +2293,62 @@ mod tests {
             );
         }
     }
+
+    // ── Test detection: the class-symbol stage ──────────────────────────
+    //
+    // A test that imports through the package root never mentions the module's
+    // file stem, so stages 1 and 2 both miss it. Before this stage existed,
+    // `tina4 metrics` reported a well-tested module as untested and raised an
+    // "untested" offender for it.
+
+    #[test]
+    fn declared_type_names_finds_a_short_class() {
+        let names = declared_type_names("class ORM:\n    def save(self):\n        return True\n", Lang::Python);
+        assert!(names.contains(&"ORM".to_string()), "got {names:?}");
+    }
+
+    #[test]
+    fn a_three_char_class_referenced_by_a_test_counts_as_tested() {
+        // No length floor. A >3-char gate was the bug the Python master fixed:
+        // it excluded exactly the short framework types that matter (ORM, Api, Log).
+        let idx = TestIndex {
+            file_names: ["test_models.py".to_string()].into_iter().collect(),
+            contents: vec!["from src import ORM\n\ndef test_save():\n    assert ORM().save()\n".to_string()],
+        };
+        let declared = vec!["ORM".to_string()];
+        assert!(
+            module_has_tests(Path::new("src/orm.py"), &idx, &declared),
+            "the ORM class symbol is the only signal here and it is a real one"
+        );
+    }
+
+    #[test]
+    fn an_unreferenced_class_is_still_untested() {
+        // The negative half. Without it this stage could return true for
+        // anything and the test above would still pass.
+        let idx = TestIndex {
+            file_names: ["test_other.py".to_string()].into_iter().collect(),
+            contents: vec!["def test_nothing():\n    assert True\n".to_string()],
+        };
+        let declared = vec!["Widget".to_string()];
+        assert!(
+            !module_has_tests(Path::new("src/widget.py"), &idx, &declared),
+            "a class no test mentions must not be reported as tested"
+        );
+    }
+
+    #[test]
+    fn a_symbol_match_is_whole_identifier_only() {
+        // Substring matching would let Order mark OrderItem as tested, and every
+        // short name would collide constantly. This is what makes dropping the
+        // length floor safe.
+        assert!(mentions_symbol("assert ORM().save()", "ORM"));
+        assert!(mentions_symbol("from src import ORM", "ORM"));
+        assert!(!mentions_symbol("class ORMBase: pass", "ORM"));
+        assert!(!mentions_symbol("x = MyORM()", "ORM"));
+        assert!(!mentions_symbol("FORMAT = 1", "ORM"));
+        assert!(mentions_symbol("Order(1)", "Order"));
+        assert!(!mentions_symbol("OrderItem(1)", "Order"));
+    }
+
 }

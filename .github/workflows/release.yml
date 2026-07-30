@@ -266,18 +266,39 @@ jobs:
           # after upload reported tina4-linux-amd64 missing on v3.8.63 when the
           # asset was in fact there moments later, turning a healthy release
           # red. Poll until the set settles rather than trusting one read.
+          # ONE source of truth for the expected set. The threshold below is
+          # DERIVED from it, so adding a build target can never leave a hardcoded
+          # count out of step with the names actually checked.
+          EXPECTED="tina4-linux-amd64 tina4-linux-arm64 tina4-linux-musl-amd64 tina4-linux-musl-arm64 tina4-darwin-amd64 tina4-darwin-arm64 tina4-windows-amd64.exe SHA256SUMS"
+          want=$(printf '%s\n' $EXPECTED | grep -c .)
+
+          # `|| true` matters under `set -eu`: a transient non-zero from gh (rate
+          # limit, 5xx, or a 404 on a draft that has not settled) used to kill the
+          # whole step INSIDE the command substitution, before a single name was
+          # checked. That reports a healthy, complete release as red and prints
+          # nothing to diagnose -- exactly what v3.8.64 did with all 8 assets
+          # present. Retry instead of dying, and let the per-name check decide.
+          got=""
           for attempt in 1 2 3 4 5 6; do
-            got=$(gh release view "${{ github.ref_name }}" --json assets -q '.assets[].name' | sort)
-            [ "$(echo "$got" | grep -c .)" -ge 8 ] && break
-            echo "attempt $attempt: only $(echo "$got" | grep -c .) assets listed, waiting..."
+            got=$(gh release view "${{ github.ref_name }}" --json assets -q '.assets[].name' 2>/dev/null | sort || true)
+            [ "$(printf '%s' "$got" | grep -c .)" -ge "$want" ] && break
+            echo "attempt $attempt: $(printf '%s' "$got" | grep -c .) of $want assets listed, waiting..."
             sleep 10
           done
-          echo "$got"
-          for f in tina4-linux-amd64 tina4-linux-arm64 tina4-linux-musl-amd64 \
-                   tina4-linux-musl-arm64 tina4-darwin-amd64 tina4-darwin-arm64 \
-                   tina4-windows-amd64.exe SHA256SUMS; do
-            echo "$got" | grep -qx "$f" || { echo "::error::$f never reached the release"; exit 1; }
+
+          # Report EVERY missing name plus both sets. The old version exited on the
+          # first miss, so a multi-asset failure needed several reruns to map out.
+          missing=""
+          for f in $EXPECTED; do
+            printf '%s\n' "$got" | grep -qx "$f" || missing="$missing $f"
           done
+          if [ -n "$missing" ]; then
+            echo "::error::release is INCOMPLETE - never reached the release:$missing"
+            echo "expected ($want):"; printf '%s\n' $EXPECTED | sed 's/^/  /'
+            echo "actual ($(printf '%s' "$got" | grep -c .)):"; printf '%s\n' "$got" | sed 's/^/  /'
+            exit 1
+          fi
+          echo "all $want expected assets present:"; printf '%s\n' "$got" | sed 's/^/  /'
 
   publish-crate:
     needs: audit

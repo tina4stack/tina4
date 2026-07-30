@@ -51,6 +51,7 @@ fn known_vars() -> Vec<(&'static str, &'static str, &'static str, &'static str)>
         ("TINA4_LOG_DIR", "logs", "Log directory", "Logging"),
         ("TINA4_LOG_FUNC", "", "Include the caller function name in log lines", "Logging"),
         ("TINA4_LOG_STRICT", "false", "Raise on log-write failure instead of swallowing it", "Logging"),
+        ("TINA4_LOG_APPEND", "true", "Append to the log file; false overwrites it at startup", "Logging"),
 
         // Database
         ("TINA4_DATABASE_URL", "sqlite:///data/app.db", "Database connection string", "Database"),

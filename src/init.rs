@@ -577,7 +577,11 @@ fn scaffold_project(language: &str, path: &str) {
 
     // .env (backend projects only)
     if language != "tina4js" {
-        write_file(path, ".env", "TINA4_DEBUG=true\nTINA4_LOG_LEVEL=ALL\n");
+        // Bind a zero-config SQLite database by default so a scaffolded resource
+        // serves immediately — without it the ORM raises "No database bound" on
+        // the first request. SQLite ships with the runtime (no driver install);
+        // Postgres/MySQL/etc. stay opt-in (see pyproject/composer notes).
+        write_file(path, ".env", "TINA4_DEBUG=true\nTINA4_LOG_LEVEL=ALL\nTINA4_DATABASE_URL=sqlite:///app.db\n");
     }
 
     // Language-specific files
@@ -663,7 +667,9 @@ $app->handle();
     write_file(
         path,
         ".env",
-        "TINA4_DEBUG=true\nSECRET=change-me-in-production\n",
+        // Default SQLite so a scaffolded resource works out of the box (see the
+        // common .env above). Overrides the shared template for PHP.
+        "TINA4_DEBUG=true\nSECRET=change-me-in-production\nTINA4_DATABASE_URL=sqlite:///app.db\n",
     );
 
     write_file(
@@ -1361,4 +1367,29 @@ fn project_name_from_path(path: &str) -> String {
         .unwrap_or_else(|| "tina4-project".to_string())
         .replace(' ', "-")
         .to_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn scaffold_binds_a_default_sqlite_database() {
+        // Every backend project must ship a bound database in its .env so a
+        // scaffolded resource serves immediately instead of 500-ing with
+        // "No database bound".
+        for lang in ["python", "php", "ruby", "nodejs"] {
+            let dir = std::env::temp_dir().join(format!("tina4_init_env_{lang}_{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            scaffold_project(lang, dir.to_str().unwrap());
+            let env = fs::read_to_string(dir.join(".env")).expect("scaffold wrote a .env");
+            assert!(
+                env.contains("TINA4_DATABASE_URL=sqlite:"),
+                "{lang} .env must bind a default SQLite database, got:\n{env}"
+            );
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
 }

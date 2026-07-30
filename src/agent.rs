@@ -4451,6 +4451,19 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                             let mut all_files_written: Vec<String> = Vec::new();
                             let mut step_summaries: Vec<String> = Vec::new();
 
+                            // GENERATE-FIRST at the PLAN level (mirrors /execute):
+                            // scaffold the resource once from the GOAL so a plan of
+                            // vague prose steps doesn't fall to the coder → broken code.
+                            let resource_scaffolded = {
+                                let gs = scaffold_first(&project_dir, &goal, &goal, &[]);
+                                for f in &gs {
+                                    sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
+                                        "text": format!("Scaffolded the resource from the goal: {f}"), "agent": "coder"}))).await;
+                                    all_files_written.push(f.clone());
+                                }
+                                !gs.is_empty()
+                            };
+
                             for (i, step) in steps.iter().enumerate() {
                                 let step_num = i + 1;
 
@@ -4483,6 +4496,12 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                                     step_summaries.push(format!("{}. {} ✓", step_num, step));
                                     sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
                                         "text": format!("Step {} complete — {} files scaffolded.", step_num, step_files.len()), "agent": "coder"}))).await;
+                                } else if resource_scaffolded && step_is_covered_by_scaffold(step) {
+                                    // Covered by the up-front goal-scaffold — skip the
+                                    // prose step instead of feeding it to the coder.
+                                    step_summaries.push(format!("{}. {} ✓ (covered by scaffold)", step_num, step));
+                                    sse_event(&mut stream, "status", &sse_json(&serde_json::json!({
+                                        "text": format!("Step {} — covered by the resource scaffold", step_num), "agent": "coder"}))).await;
                                 } else {
                                     // No scaffoldable artifact — the LLM coder authors
                                     // the step to a deterministic path.
@@ -4939,6 +4958,25 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                 let mut summaries: Vec<String> = Vec::new();
                 let mut failed = false;
 
+                // GENERATE-FIRST at the PLAN level: a resource-build plan's steps
+                // are often vague prose ("ensure the DB is ready", "test CRUD")
+                // that individually trigger no generator and fall to the coder →
+                // broken code. Scaffold the resource ONCE from the GOAL up front;
+                // the covered prose steps are then skipped in the loop below.
+                let resource_scaffolded = if skip_count == 0 {
+                    let gs = scaffold_first(&project_dir, &goal, &goal, &[]);
+                    if !gs.is_empty() {
+                        for f in &gs { if !state.files.contains(f) { state.files.push(f.clone()); } }
+                        let _ = fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap_or_default());
+                        sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({
+                            "text": format!("Scaffolded the resource from the goal — {} files (generate-first)", gs.len()), "agent": "coder"}))).await;
+                    }
+                    !gs.is_empty()
+                } else {
+                    // Resuming: assume the resource was scaffolded on the first run.
+                    true
+                };
+
                 for (i, step) in steps.iter().enumerate() {
                     let num = i + 1;
                     let step_text = step.text.clone();
@@ -4991,6 +5029,19 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                         summaries.push(format!("{}. {} ✓", num, step_text));
                         sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({
                             "text": format!("Step {} done — {} files scaffolded", num, scaffolded.len()), "agent": "coder"}))).await;
+                        continue;
+                    }
+                    // Covered by the up-front goal-scaffold: a standard resource /
+                    // CRUD / migration / test / "ensure the DB is ready" step the
+                    // generators already produced. Skip it instead of sending vague
+                    // prose to the coder (which yields broken code). Custom-logic
+                    // steps fall through and the coder authors them.
+                    if resource_scaffolded && step_is_covered_by_scaffold(&step_text) {
+                        state.completed.push(num);
+                        let _ = fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap_or_default());
+                        summaries.push(format!("{}. {} ✓ (covered by scaffold)", num, step_text));
+                        sse_ev(&mut stream, "status", &sse_j(&serde_json::json!({
+                            "text": format!("Step {} — covered by the resource scaffold", num), "agent": "coder"}))).await;
                         continue;
                     }
                     // Derive a target path for ANY coder — used to synthesize a
@@ -6472,7 +6523,20 @@ fn detect_model_name(ctx: &str) -> Option<String> {
             }
         }
     }
-    words.iter().skip(1).find(|w| is_pascal_ident(w)).map(|w| (*w).to_string())
+    // Fallback: the first PascalCase word that ISN'T a stopword. Filtering
+    // stopwords stops a leading verb ("Create a widgets resource") or a trailing
+    // DB name ("…using SQLite") / acronym (CRUD) from being read as the model —
+    // detect_resource_name's stopword-aware head-noun logic then picks the
+    // actual noun ("widgets").
+    words
+        .iter()
+        .skip(1)
+        .find(|w| {
+            is_pascal_ident(w)
+                && !SCAFFOLD_STOPWORDS.contains(&w.to_lowercase().as_str())
+                && !w.chars().all(|c| c.is_ascii_uppercase())
+        })
+        .map(|w| (*w).to_string())
 }
 
 fn pluralize(s: &str) -> String {
@@ -6490,6 +6554,9 @@ const SCAFFOLD_STOPWORDS: &[&str] = &[
     // planner-prose verbs/nouns that are never a resource
     "handle", "handles", "can", "should", "will", "must", "add", "adding", "run",
     "running", "support", "supports", "functionality", "interface", "automatic",
+    "build", "building", "set", "setup", "make", "making", "implement", "objective",
+    // database names — "…using SQLite" must not scaffold a `SQLite` model
+    "sqlite", "postgres", "postgresql", "pgsql", "mysql", "mssql", "mongodb", "sql",
 ];
 
 /// Turn a noun into a singular PascalCase model name: "products" → "Product".
@@ -6789,6 +6856,35 @@ fn explicit_path_in(ctx: &str) -> Option<String> {
 /// request). Resource/model detection always comes from `ctx` (the step), but
 /// fields fall back to the goal so a planner that drops "with email and name"
 /// from a step still produces those columns.
+/// True when a plan STEP is already covered by the up-front resource scaffold —
+/// a standard model/route/CRUD/migration/test/"ensure the DB is ready" step the
+/// framework generators produce. Such steps must be SKIPPED, not sent to the
+/// coder: a resource-build plan's prose steps individually trigger no generator
+/// and the coder turns them into broken code (the Thread 8 failure). A step with
+/// any custom-logic signal is NOT covered — the coder still authors those.
+fn step_is_covered_by_scaffold(step: &str) -> bool {
+    let s = step.to_lowercase();
+    // Custom logic the generators can't produce — never skip these.
+    const CUSTOM: &[&str] = &[
+        "calculat", "comput", "aggregat", "report", "filter", "search", "sort by",
+        "paginat", "auth", "login", "permission", "role", "notif", "email", "sms",
+        "webhook", "upload", "download", "export", "import", "discount", "tax",
+        "currency", "payment", "valid", "custom", "business logic", "middleware",
+        "rate limit", "constraint", "relationship", "foreign key", "join",
+    ];
+    if CUSTOM.iter().any(|k| s.contains(k)) {
+        return false;
+    }
+    // Standard artifacts / meta steps the scaffold already delivers.
+    const COVERED: &[&str] = &[
+        "model", "route", "crud", "resource", "migration", "migrat", "database",
+        "schema", "table", "field", "column", "test", "document", "endpoint",
+        "ensure", "set up", "setup", "configure", "scaffold", "generate", "create",
+        "add a name", "add a price", "define the",
+    ];
+    COVERED.iter().any(|k| s.contains(k))
+}
+
 fn scaffold_first(project_dir: &Path, ctx: &str, goal: &str, files: &[String]) -> Vec<String> {
     // FRONTEND first: a tina4-js page/component is scaffolded by the tina4-js
     // generator, not the backend ones. Short-circuit before any src/routes work.
@@ -8456,6 +8552,46 @@ async def get_order(request, response):\n    pass\n";
         // Head is preserved — that's where the task + format contract live.
         assert!(out.starts_with("xxxx"));
         assert!(out.ends_with("[context trimmed to fit the coder's window]"));
+    }
+
+    #[test]
+    fn step_covered_by_scaffold_skips_prose_runs_custom() {
+        // Covered — the standard resource/CRUD/meta steps the generators produce.
+        for s in [
+            "Ensure the database is ready for storing Widgets",
+            "Create a Widget model with name and price fields",
+            "Set up full CRUD routes for widgets",
+            "Test the CRUD operations on widgets",
+            "Document the widgets resource",
+            "Generate the migration for widgets",
+        ] {
+            assert!(step_is_covered_by_scaffold(s), "should be covered: {s}");
+        }
+        // NOT covered — genuinely custom logic the coder must author.
+        for s in [
+            "Add a discount calculation to the widget price",
+            "Validate the price is positive",
+            "Add authentication to the widgets routes",
+            "Filter widgets by a search term",
+            "Send an email when a widget is created",
+        ] {
+            assert!(!step_is_covered_by_scaffold(s), "should NOT be covered: {s}");
+        }
+    }
+
+    #[test]
+    fn resource_name_ignores_verb_and_db_in_goal_prose() {
+        // Verb-led goal prose ending in a DB name — the resource is "widgets",
+        // not the verb "Create" or the DB "SQLite".
+        let goal = "Create a widgets resource with name and price fields, full CRUD, using SQLite.";
+        assert_eq!(detect_resource_name(goal).as_deref(), Some("Widget"));
+        assert_ne!(detect_model_name(goal).as_deref(), Some("Create"));
+        assert_ne!(detect_model_name(goal).as_deref(), Some("SQLite"));
+        // Explicit "X model" still resolves.
+        assert_eq!(
+            detect_resource_name("Create a Widget model with name and price").as_deref(),
+            Some("Widget")
+        );
     }
 
     #[test]

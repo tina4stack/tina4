@@ -49,8 +49,20 @@ tina4 metrics                    Report code-health top offenders (complexity, l
                                  thresholds identical, locked by a real parity test.
                                  DRY: cross-file duplicate detection via AST-shape hashing
                                  (Baxter-style), language-agnostic so it covers all five
-                                 languages through one code path. Finds Type-1 (exact) and
-                                 Type-2 (renamed) clones; Type-3/4 are NOT detected.
+                                 languages through one code path. Finds Type-1 (exact)
+                                 clones plus consistent identifier and same-kind literal
+                                 renaming. NOT full Type-2: comments are hashed, so adding
+                                 a comment breaks the match (measured in all five
+                                 languages, locked by a test). Type-3/4 are NOT detected.
+                                 PARSE-HEALTH GUARD: a file the engine cannot read is
+                                 REFUSED, never reported and never silently dropped. Two
+                                 reasons trigger it, both per file: under 95% of lines
+                                 parsing cleanly, or an AST nesting deeper than 800 levels
+                                 (which used to abort the whole scan with a stack
+                                 overflow). A refused file is excluded from every average,
+                                 listed under `unparsed` in --json, counted as
+                                 `files_refused` in the summary, and raised as a `warn`
+                                 offender so --fail-on warn goes red on it.
 tina4 scss                       Compile SCSS files
 tina4 ai                         Detect AI tools and install context
 tina4 update                     Self-update the binary

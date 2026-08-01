@@ -1252,6 +1252,221 @@ pub(crate) fn analyze_source(
     Some((fm, functions, specs))
 }
 
+// ── Duplication (DRY) ─────────────────────────────────────────────────────────
+//
+// Cross-file, AST-shape based, and therefore language-agnostic by construction:
+// it works for all five languages through the same code path, and a sixth would
+// need no work here. This is the Baxter et al. approach - hash sub-trees, group
+// by hash - rather than the token-window scan PMD's CPD uses, because the engine
+// already has a real parse and a shape hash is immune to reformatting.
+//
+// WHAT IT DETECTS. Hashing the sequence of node KINDS with all identifier and
+// literal TEXT excluded finds Type-1 (exact) and Type-2 (renamed) clones in the
+// Roy/Cordy taxonomy. Two blocks that differ only in variable names, literals or
+// whitespace collide, which is the point. Type-3 (gapped) and Type-4 (semantic)
+// clones are NOT detected; that needs sub-tree differencing, and a report that
+// silently claimed to cover them would be worse than one with a stated ceiling.
+//
+// Anonymous token kinds ARE hashed, so `a + b` and `x - y` do not collide even
+// though both are a binary expression over two identifiers. Excluding operators
+// was the obvious simplification and it is exactly what makes a shape hash
+// notorious for false positives.
+//
+// tina4: thresholds below are the one genuinely tunable decision here. They are
+// deliberately expressed as two INDEPENDENT gates because either alone is known
+// to misbehave: a node-count gate alone fires on a long flat list of struct
+// fields, and a line gate alone fires on any six sparsely-formatted lines.
+
+/// Minimum AST nodes in a sub-tree before it can be reported as duplicated.
+///
+/// Sits between jscpd's 50-token default and PMD CPD's 100-token Java default.
+/// AST nodes are finer-grained than source tokens (an `if` statement is several
+/// nodes), so a node count maps to roughly half as many tokens: 60 nodes is on
+/// the order of 30-40 tokens of real code.
+const MIN_CLONE_NODES: u32 = 60;
+
+/// Minimum SOURCE LINES a duplicate must span. Matches SonarQube's 10-line
+/// default intent while staying tighter, and it is what stops a one-line
+/// accessor or a short guard clause from ever being reported however many times
+/// it appears.
+const MIN_CLONE_LINES: usize = 6;
+
+/// One duplicated region: where it is and how big.
+///
+/// `file` is an INDEX into the scanned file list rather than a String. With one
+/// fragment per qualifying sub-tree, a large project produces hundreds of
+/// thousands of these, and a cloned path on each is the difference between a
+/// few MB and a few hundred. The hash is a u64 for the same reason - the
+/// normalised shape string is never retained, only folded in.
+#[derive(Clone, Debug)]
+struct CloneFragment {
+    hash: u64,
+    file: u32,
+    start_line: usize,
+    end_line: usize,
+    nodes: u32,
+}
+
+impl CloneFragment {
+    fn lines(&self) -> usize {
+        self.end_line.saturating_sub(self.start_line) + 1
+    }
+    /// Does this fragment sit inside `other`, INCLUDING covering the exact same
+    /// span?
+    ///
+    /// The equal-span case is the one that matters and it is easy to get wrong.
+    /// A single duplicated block produces a fragment at every wrapper level that
+    /// shares its line range - `expression_statement` around `call_expression`
+    /// around the arguments - each with a DIFFERENT shape hash, so they form
+    /// separate groups that all report the same lines. Excluding equal spans
+    /// (the obvious reading of "strictly inside") let all of them through and the
+    /// same clone was listed three or four times.
+    ///
+    /// Self-suppression is not a risk: a group is only ever tested against
+    /// groups already KEPT, never against itself.
+    fn inside(&self, other: &CloneFragment) -> bool {
+        self.file == other.file
+            && self.start_line >= other.start_line
+            && self.end_line <= other.end_line
+    }
+}
+
+/// Fold a node's kind and its children's hashes into one structural hash.
+///
+/// Bottom-up and single-pass: every node's hash is built from the hashes its
+/// children already produced, so the whole file costs O(nodes). Serialising each
+/// candidate sub-tree to a string and hashing that would be O(nodes * depth) and
+/// would allocate a string per candidate.
+fn shape_hash_of(kind: &str, child_hashes: &[u64]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    kind.hash(&mut h);
+    // Length is folded in so a node with two children cannot collide with a
+    // differently-shaped node whose child hashes happen to concatenate the same.
+    child_hashes.len().hash(&mut h);
+    for c in child_hashes {
+        c.hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Walk one file's tree, emitting a fragment for every sub-tree big enough to be
+/// worth reporting. Returns this node's (hash, node_count).
+fn collect_fragments(
+    node: Node,
+    file: u32,
+    out: &mut Vec<CloneFragment>,
+) -> (u64, u32) {
+    let mut child_hashes: Vec<u64> = Vec::new();
+    let mut count: u32 = 1;
+    let mut c = node.walk();
+    if c.goto_first_child() {
+        loop {
+            let (h, n) = collect_fragments(c.node(), file, out);
+            child_hashes.push(h);
+            count += n;
+            if !c.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+    let hash = shape_hash_of(node.kind(), &child_hashes);
+    let start_line = node.start_position().row + 1;
+    let end_line = node.end_position().row + 1;
+    // Only NAMED nodes are candidates: an anonymous token is punctuation and can
+    // never be a meaningful duplicate on its own, though its kind still shapes
+    // the hash of the parent that contains it.
+    if node.is_named()
+        && count >= MIN_CLONE_NODES
+        && end_line.saturating_sub(start_line) + 1 >= MIN_CLONE_LINES
+    {
+        out.push(CloneFragment { hash, file, start_line, end_line, nodes: count });
+    }
+    (hash, count)
+}
+
+fn fragments_for_source(source: &str, lang: Lang, file: u32, out: &mut Vec<CloneFragment>) {
+    let mut parser = Parser::new();
+    if parser.set_language(&lang.tree_sitter_language()).is_err() {
+        return;
+    }
+    let Some(tree) = parser.parse(source, None) else { return };
+    collect_fragments(tree.root_node(), file, out);
+}
+
+/// A set of fragments that share a shape.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct CloneGroup {
+    pub files: Vec<String>,
+    pub first_file: String,
+    pub first_line: usize,
+    pub copies: usize,
+    pub lines: usize,
+    pub cross_file: bool,
+}
+
+/// Group fragments by shape, then keep only the MAXIMAL ones.
+///
+/// The suppression pass is not an optimisation, it is what makes the output
+/// readable. If a 200-node block is duplicated then so is every one of its
+/// sub-blocks, so a raw grouping reports the same clone at a dozen nesting
+/// depths and buries the finding. A group is dropped when every one of its
+/// fragments sits inside a fragment of some larger surviving group.
+fn group_clones(mut frags: Vec<CloneFragment>, paths: &[String]) -> Vec<CloneGroup> {
+    // Largest first, so a parent is always considered before its children.
+    frags.sort_by(|a, b| b.nodes.cmp(&a.nodes).then(a.file.cmp(&b.file)).then(a.start_line.cmp(&b.start_line)));
+
+    let mut by_hash: BTreeMap<u64, Vec<CloneFragment>> = BTreeMap::new();
+    for f in frags {
+        by_hash.entry(f.hash).or_default().push(f);
+    }
+
+    // Only shapes that actually repeat.
+    let mut candidates: Vec<Vec<CloneFragment>> =
+        by_hash.into_values().filter(|v| v.len() >= 2).collect();
+    candidates.sort_by(|a, b| b[0].nodes.cmp(&a[0].nodes));
+
+    let mut kept: Vec<Vec<CloneFragment>> = Vec::new();
+    for group in candidates {
+        let covered = group.iter().all(|f| {
+            kept.iter().any(|k| k.iter().any(|big| f.inside(big)))
+        });
+        if !covered {
+            kept.push(group);
+        }
+    }
+
+    let mut out: Vec<CloneGroup> = kept
+        .into_iter()
+        .map(|g| {
+            let mut files: Vec<String> = g
+                .iter()
+                .map(|f| paths.get(f.file as usize).cloned().unwrap_or_default())
+                .collect();
+            files.sort();
+            files.dedup();
+            let first = &g[0];
+            CloneGroup {
+                cross_file: files.len() > 1,
+                first_file: paths.get(first.file as usize).cloned().unwrap_or_default(),
+                first_line: first.start_line,
+                copies: g.len(),
+                lines: first.lines(),
+                files,
+            }
+        })
+        .collect();
+    // Biggest, most-repeated first - that is the order someone fixing them wants.
+    out.sort_by(|a, b| {
+        (b.lines * b.copies)
+            .cmp(&(a.lines * a.copies))
+            .then(b.copies.cmp(&a.copies))
+            .then(a.first_file.cmp(&b.first_file))
+    });
+    out
+}
+
 // ── File discovery ─────────────────────────────────────────────────────────────
 
 const IGNORED_DIRS: &[&str] = &[
@@ -1643,13 +1858,64 @@ fn build_offenders(files: &[FileMetrics], functions: &[FunctionInfo]) -> Vec<Off
         }
     }
 
-    // Sort by (severity rank, score) descending, stable.
+    sort_offenders(&mut items);
+    items
+}
+
+/// Sort by (severity rank, score) descending, stable.
+fn sort_offenders(items: &mut [Offender]) {
     items.sort_by(|a, b| {
         severity_rank(&b.severity)
             .cmp(&severity_rank(&a.severity))
             .then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
     });
-    items
+}
+
+/// Turn clone groups into offenders.
+///
+/// Kept separate from `build_offenders` because duplication is the only rule
+/// that is a property of the SCAN rather than of a single file - it cannot be
+/// computed from one file's metrics, and folding it in would have forced every
+/// existing caller to supply a whole-project argument it does not have.
+///
+/// Severity mirrors the existing rules rather than inventing a scale: a
+/// duplicate spanning many lines or repeated many times is an `error`, anything
+/// else over the reporting floor is a `warn`. `score` is lines * copies, which
+/// is the number of duplicated lines the codebase would shed by unifying it -
+/// the same "how much does fixing this buy" ranking the other rules use.
+fn clone_offenders(groups: &[CloneGroup]) -> Vec<Offender> {
+    groups
+        .iter()
+        .map(|g| {
+            let wasted = g.lines * g.copies;
+            let where_ = if g.cross_file {
+                format!(" across {} files", g.files.len())
+            } else {
+                String::new()
+            };
+            Offender {
+                file: g.first_file.clone(),
+                line: g.first_line,
+                kind: "duplication".to_string(),
+                // Cross-file duplication is the expensive kind - it is the one
+                // that drifts out of sync - so it escalates sooner.
+                severity: if wasted >= 60 || (g.cross_file && wasted >= 40) {
+                    "error"
+                } else {
+                    "warn"
+                }
+                .to_string(),
+                score: wasted as f64,
+                detail: format!(
+                    "{} duplicated lines x {} copies{} - {} lines could be removed",
+                    g.lines,
+                    g.copies,
+                    where_,
+                    g.lines * (g.copies - 1)
+                ),
+            }
+        })
+        .collect()
 }
 
 // ── Summary + JSON payload ────────────────────────────────────────────────────
@@ -1663,6 +1929,11 @@ struct Summary {
     scan_mode: String,
     scan_root: String,
     total_offenders: usize,
+    /// Maximal duplicated blocks found across the whole scan, and the lines that
+    /// would disappear if each group were unified to a single definition. Whole-
+    /// scan facts, so they live on the summary rather than on any one file.
+    duplicate_blocks: usize,
+    duplicate_lines: usize,
 }
 
 #[derive(Serialize)]
@@ -1678,6 +1949,8 @@ struct JsonPayload {
     most_complex_functions: Vec<FunctionInfo>,
     /// file -> imported files, both sides relative paths inside the scan.
     dependency_graph: BTreeMap<String, Vec<String>>,
+    /// Maximal duplicated AST shapes, biggest payoff first.
+    duplication: Vec<CloneGroup>,
 }
 
 pub(crate) struct Report {
@@ -1690,6 +1963,7 @@ pub(crate) struct Report {
     /// implementation keyed this on module names while looking it up by path, so
     /// nothing ever matched and the dependency view drew no edges at all.
     dependency_graph: BTreeMap<String, Vec<String>>,
+    clones: Vec<CloneGroup>,
 }
 
 pub(crate) fn analyze_targets(files: &[PathBuf], scan_root: &str) -> Report {
@@ -1699,6 +1973,11 @@ pub(crate) fn analyze_targets(files: &[PathBuf], scan_root: &str) -> Report {
     // Pass 1 cannot resolve imports: a specifier only becomes an edge once every
     // file in the scan is known. Park the raw specifiers with their language.
     let mut pending: Vec<(String, Lang, Vec<String>)> = Vec::new();
+    // Duplication is the one metric that cannot be computed a file at a time, so
+    // fragments accumulate across the whole scan and are grouped in pass 2.
+    // `clone_paths` is the index space `CloneFragment.file` points into.
+    let mut fragments: Vec<CloneFragment> = Vec::new();
+    let mut clone_paths: Vec<String> = Vec::new();
 
     for path in files {
         let Some(lang) = Lang::from_path(path) else { continue };
@@ -1712,6 +1991,9 @@ pub(crate) fn analyze_targets(files: &[PathBuf], scan_root: &str) -> Report {
         let has_tests = (lang == Lang::Rust && rust_has_inline_tests(&source))
             || module_has_tests(path, &test_index, &declared);
         if let Some((fm, funcs, specs)) = analyze_source(lang, &source, &rel, has_tests) {
+            let idx = clone_paths.len() as u32;
+            clone_paths.push(fm.path.clone());
+            fragments_for_source(&source, lang, idx, &mut fragments);
             pending.push((fm.path.clone(), lang, specs));
             file_metrics.push(fm);
             all_functions.extend(funcs);
@@ -1762,13 +2044,18 @@ pub(crate) fn analyze_targets(files: &[PathBuf], scan_root: &str) -> Report {
         };
     }
 
-    let offenders = build_offenders(&file_metrics, &all_functions);
+    let clones = group_clones(fragments, &clone_paths);
+    let mut offenders = build_offenders(&file_metrics, &all_functions);
+    offenders.extend(clone_offenders(&clones));
+    sort_offenders(&mut offenders);
+
     Report {
         files: file_metrics,
         functions: all_functions,
         offenders,
         scan_root: scan_root.to_string(),
         dependency_graph,
+        clones,
     }
 }
 
@@ -1793,6 +2080,8 @@ fn build_summary(report: &Report, total_offenders: usize) -> Summary {
         scan_mode: "project".to_string(),
         scan_root: report.scan_root.clone(),
         total_offenders,
+        duplicate_blocks: report.clones.len(),
+        duplicate_lines: report.clones.iter().map(|c| c.lines * (c.copies - 1)).sum(),
     }
 }
 
@@ -1854,6 +2143,7 @@ pub fn run(path: Option<String>, top: Option<usize>, json: bool, fail_on: Option
             file_metrics: report.files.clone(),
             most_complex_functions: by_cc,
             dependency_graph: report.dependency_graph.clone(),
+            duplication: report.clones.clone(),
         };
         println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
         return exit_code;
@@ -1880,6 +2170,12 @@ fn print_human(summary: &Summary, shown: &[Offender]) {
         "  files: {}   functions: {}   avg complexity: {}   avg maintainability: {}",
         summary.files_analyzed, summary.total_functions, summary.avg_complexity, summary.avg_maintainability
     );
+    if summary.duplicate_blocks > 0 {
+        println!(
+            "  duplication: {} repeated blocks   {} lines removable by unifying them",
+            summary.duplicate_blocks, summary.duplicate_lines
+        );
+    }
     let showing = if shown.is_empty() { String::new() } else { format!(" (showing top {})", shown.len()) };
     println!("  offenders: {} total{}", summary.total_offenders, showing);
     println!();
@@ -2812,6 +3108,244 @@ pub fn sub(a: i32, b: i32) -> i32 {
         assert_eq!(total_edges, 3, "leaf<-mid, leaf<-top, mid<-top");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ---- Duplication / DRY ---------------------------------------------------
+    //
+    // Real files on a real filesystem, driven through the real `analyze_targets`
+    // two-pass scan. Every case plants a KNOWN answer, so a detector that finds
+    // nothing and a detector that flags everything both fail.
+
+    /// Write `files` into a fresh temp dir and run the full scan over them.
+    fn scan_temp(tag: &str, files: &[(&str, &str)]) -> (Report, PathBuf) {
+        let dir = std::env::temp_dir()
+            .join(format!("tina4_dup_{tag}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut paths = Vec::new();
+        for (name, body) in files {
+            let p = dir.join(name);
+            if let Some(parent) = p.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(&p, body).unwrap();
+            paths.push(p);
+        }
+        let report = analyze_targets(&paths, dir.to_str().unwrap());
+        (report, dir)
+    }
+
+    /// A block big enough to clear both gates, parameterised so callers can vary
+    /// the identifiers (a Type-2 clone) or an operator (NOT a clone).
+    fn dup_block(fn_name: &str, var: &str, op: &str) -> String {
+        format!(
+            "fn {fn_name}(input: i32) -> i32 {{
+    let mut {var} = 0;
+    for step in 0..input {{
+        if step % 2 == 0 {{
+            {var} = {var} {op} step;
+        }} else if step % 3 == 0 {{
+            {var} = {var} {op} (step * 2);
+        }} else {{
+            {var} = {var} {op} 1;
+        }}
+    }}
+    if {var} > 100 {{
+        {var} = 100;
+    }}
+    {var}
+}}
+"
+        )
+    }
+
+    #[test]
+    fn a_planted_duplicate_pair_is_found() {
+        // THE positive gate. Two identical blocks, one file.
+        let src = format!("{}\n{}", dup_block("alpha", "total", "+"), dup_block("beta", "total", "+"));
+        let (report, dir) = scan_temp("pair", &[("a.rs", &src)]);
+        assert!(
+            !report.clones.is_empty(),
+            "a planted identical pair must be reported as duplication"
+        );
+        let g = &report.clones[0];
+        assert!(g.copies >= 2, "expected at least 2 copies, got {}", g.copies);
+        assert!(
+            report.offenders.iter().any(|o| o.kind == "duplication"),
+            "the clone must surface as a `duplication` offender"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn changing_one_of_the_pair_stops_it_being_reported() {
+        // The other half of the same gate, and the one that proves the detector
+        // is reading STRUCTURE rather than just finding any two big blocks.
+        // `+` becomes `-` in one copy: same shape, different operator.
+        let src = format!("{}\n{}", dup_block("alpha", "total", "+"), dup_block("beta", "total", "-"));
+        let (report, dir) = scan_temp("broken", &[("a.rs", &src)]);
+        assert!(
+            report.clones.is_empty(),
+            "changing an OPERATOR must break the match - shape hashing that ignored \
+             operator tokens would still call these duplicates: {:?}",
+            report.clones
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn renaming_identifiers_does_not_defeat_detection() {
+        // Type-2 clone (Roy/Cordy): copy-paste-and-rename is the single most
+        // common real duplication, and an engine that misses it is not measuring
+        // DRY at all. Different function name, different variable name, identical
+        // structure.
+        let src = format!("{}\n{}", dup_block("alpha", "total", "+"), dup_block("gamma", "accumulator", "+"));
+        let (report, dir) = scan_temp("renamed", &[("a.rs", &src)]);
+        assert!(
+            !report.clones.is_empty(),
+            "a renamed copy is still a duplicate and must be found"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn duplication_is_detected_across_files() {
+        // Cross-file is the whole point - a single-file duplication number is
+        // nearly worthless, and it is also the case an accumulator scoped to one
+        // file would silently miss.
+        let a = dup_block("alpha", "total", "+");
+        let b = dup_block("beta", "total", "+");
+        let (report, dir) = scan_temp("xfile", &[("a.rs", &a), ("b.rs", &b)]);
+        let cross: Vec<&CloneGroup> = report.clones.iter().filter(|c| c.cross_file).collect();
+        assert!(
+            !cross.is_empty(),
+            "the same block in two different files must be reported as cross-file: {:?}",
+            report.clones
+        );
+        assert_eq!(cross[0].files.len(), 2, "both files must be named");
+        assert!(
+            report
+                .offenders
+                .iter()
+                .any(|o| o.kind == "duplication" && o.detail.contains("across 2 files")),
+            "the offender detail must say it spans files"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// NEGATIVE CONTROL. A detector that flags everything would pass every test
+    /// above. This file has NO duplication and must produce none.
+    #[test]
+    fn duplication_negative_control_distinct_code_is_not_flagged() {
+        let src = "\
+fn parse_port(raw: &str) -> Option<u16> {
+    raw.trim().parse::<u16>().ok()
+}
+
+fn banner(name: &str, version: &str) -> String {
+    format!(\"{name} v{version} ready\")
+}
+
+fn is_even(n: i64) -> bool {
+    n % 2 == 0
+}
+
+fn clamp_ratio(value: f64) -> f64 {
+    if value < 0.0 {
+        return 0.0;
+    }
+    if value > 1.0 {
+        return 1.0;
+    }
+    value
+}
+";
+        let (report, dir) = scan_temp("clean", &[("clean.rs", src)]);
+        assert!(
+            report.clones.is_empty(),
+            "structurally distinct functions must NOT be reported as duplicates: {:?}",
+            report.clones
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The false-positive case that kills duplication tools in practice: a file
+    /// full of near-identical trivial accessors. They ARE the same shape, and a
+    /// size gate is the only thing standing between a useful report and one
+    /// nobody reads.
+    #[test]
+    fn trivial_repeated_accessors_are_below_the_reporting_floor() {
+        let src = "\
+struct Config { host: String, port: String, user: String, pass: String, name: String }
+
+impl Config {
+    fn host(&self) -> &str { &self.host }
+    fn port(&self) -> &str { &self.port }
+    fn user(&self) -> &str { &self.user }
+    fn pass(&self) -> &str { &self.pass }
+    fn name(&self) -> &str { &self.name }
+}
+";
+        let (report, dir) = scan_temp("getters", &[("cfg.rs", src)]);
+        assert!(
+            report.clones.is_empty(),
+            "five identical one-line getters must NOT be reported - they are \
+             identical by nature and unifying them would make the code worse: {:?}",
+            report.clones
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn duplication_works_for_every_language_not_just_rust() {
+        // Language-agnostic by construction: the detector never names a node
+        // kind, so a sixth language would need no work here. Proven, not
+        // asserted - each language gets its own planted pair.
+        let py_block = |n: &str| format!(
+            "def {n}(items):\n    total = 0\n    for item in items:\n        if item > 0:\n            total += item\n        elif item < 0:\n            total -= item\n        else:\n            total += 1\n    if total > 100:\n        total = 100\n    return total\n");
+        let php_block = |n: &str| format!(
+            "function {n}($items) {{\n    $total = 0;\n    foreach ($items as $item) {{\n        if ($item > 0) {{\n            $total += $item;\n        }} elseif ($item < 0) {{\n            $total -= $item;\n        }} else {{\n            $total += 1;\n        }}\n    }}\n    if ($total > 100) {{\n        $total = 100;\n    }}\n    return $total;\n}}\n");
+        let rb_block = |n: &str| format!(
+            "def {n}(items)\n  total = 0\n  items.each do |item|\n    if item > 0\n      total += item\n    elsif item < 0\n      total -= item\n    else\n      total += 1\n    end\n  end\n  if total > 100\n    total = 100\n  end\n  total\nend\n");
+        let ts_block = |n: &str| format!(
+            "export function {n}(items: number[]): number {{\n    let total = 0;\n    for (const item of items) {{\n        if (item > 0) {{\n            total += item;\n        }} else if (item < 0) {{\n            total -= item;\n        }} else {{\n            total += 1;\n        }}\n    }}\n    if (total > 100) {{\n        total = 100;\n    }}\n    return total;\n}}\n");
+
+        for (tag, name, body) in [
+            ("py", "a.py", format!("{}\n{}", py_block("alpha"), py_block("beta"))),
+            ("php", "a.php", format!("<?php\n{}\n{}", php_block("alpha"), php_block("beta"))),
+            ("rb", "a.rb", format!("{}\n{}", rb_block("alpha"), rb_block("beta"))),
+            ("ts", "a.ts", format!("{}\n{}", ts_block("alpha"), ts_block("beta"))),
+        ] {
+            let (report, dir) = scan_temp(tag, &[(name, &body)]);
+            assert!(
+                !report.clones.is_empty(),
+                "{tag}: a planted duplicate pair must be found in EVERY language, \
+                 not just Rust"
+            );
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn nested_copies_of_one_clone_are_reported_once() {
+        // A duplicated block also duplicates every sub-block inside it, at every
+        // wrapper level. Without maximal-only suppression the same clone lands in
+        // the report three or four times and buries the real findings - which is
+        // exactly what the first working version did (92 groups collapsed to 45).
+        let src = format!("{}\n{}", dup_block("alpha", "total", "+"), dup_block("beta", "total", "+"));
+        let (report, dir) = scan_temp("nested", &[("a.rs", &src)]);
+        let at_same_place: Vec<&CloneGroup> = report
+            .clones
+            .iter()
+            .filter(|c| c.first_file == "a.rs" && c.first_line == report.clones[0].first_line)
+            .collect();
+        assert_eq!(
+            at_same_place.len(),
+            1,
+            "one duplicated region must yield ONE group, not one per nesting level: {:?}",
+            report.clones
+        );
+        let _ = fs::remove_dir_all(dir);
     }
 
     // ---- The parity lock against the REAL Python master reference ------------

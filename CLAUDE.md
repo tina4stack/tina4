@@ -40,13 +40,17 @@ tina4 migrate                    Run database migrations
 tina4 test                       Run tests
 tina4 routes                     List registered routes
 tina4 metrics                    Report code-health top offenders (complexity, large files,
-                                 low maintainability, untested). Flags: --top N, --json,
+                                 low maintainability, untested, duplication). Flags: --top N, --json,
                                  --fail-on warn|error (CI gate), --path DIR|FILE. NATIVE +
                                  language-agnostic (ADR-0002, src/metrics.rs): scans SOURCE
                                  directly for Python/PHP/Ruby/TypeScript+JS/Rust via tree-sitter,
                                  with NO Tina4 project and NO running framework required.
                                  Formula parity with the Python master (metrics.py) — CC/MI/
                                  thresholds identical, locked by a real parity test.
+                                 DRY: cross-file duplicate detection via AST-shape hashing
+                                 (Baxter-style), language-agnostic so it covers all five
+                                 languages through one code path. Finds Type-1 (exact) and
+                                 Type-2 (renamed) clones; Type-3/4 are NOT detected.
 tina4 scss                       Compile SCSS files
 tina4 ai                         Detect AI tools and install context
 tina4 update                     Self-update the binary

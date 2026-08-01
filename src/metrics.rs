@@ -2,10 +2,19 @@
 //
 // Scans SOURCE directly — per file LOC, cyclomatic complexity (McCabe),
 // maintainability index (Radon/Microsoft), efferent coupling, function count —
-// for Python / PHP / Ruby / TypeScript+JS, with NO Tina4 project and NO running
-// framework required. Replaces the four per-framework metrics modules and, for
-// the first time, covers the frontend (tina4-js .ts) and arbitrary non-framework
-// code.
+// for Python / PHP / Ruby / TypeScript+JS / Rust, with NO Tina4 project and NO
+// running framework required. Replaces the four per-framework metrics modules
+// and, for the first time, covers the frontend (tina4-js .ts) and arbitrary
+// non-framework code.
+//
+// Rust was added last and closed a real blind spot: until then the engine could
+// not measure its OWN implementation language, so `tina4 metrics` pointed at
+// this repo found zero files and the CLI was the one Tina4 codebase nobody could
+// audit.
+//
+// Pascal / Delphi is deliberately ABSENT. The only published grammar crate
+// cannot parse Delphi 10.3+ inline loop variables, which puts 51.5% of the real
+// tina4delphi corpus inside a parse-error region; see `pascal_is_not_claimed`.
 //
 // tina4: ADR-0002 — formulas + thresholds mirror the Python master reference
 // tina4-python/tina4_python/dev_admin/metrics.py EXACTLY, so the existing
@@ -27,6 +36,7 @@ pub(crate) enum Lang {
     Php,
     Ruby,
     Ts, // TypeScript + TSX + JavaScript (parsed with the tsx grammar)
+    Rust,
 }
 
 impl Lang {
@@ -36,6 +46,7 @@ impl Lang {
             "php" => Some(Lang::Php),
             "rb" => Some(Lang::Ruby),
             "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "mts" | "cts" => Some(Lang::Ts),
+            "rs" => Some(Lang::Rust),
             _ => None,
         }
     }
@@ -46,6 +57,7 @@ impl Lang {
             Lang::Php => tree_sitter_php::LANGUAGE_PHP.into(),
             Lang::Ruby => tree_sitter_ruby::LANGUAGE.into(),
             Lang::Ts => tree_sitter_typescript::LANGUAGE_TSX.into(),
+            Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
         }
     }
 }
@@ -131,7 +143,18 @@ fn is_code_line(line: &str, lang: Lang) -> bool {
     match lang {
         Lang::Python | Lang::Ruby => !t.starts_with('#'),
         Lang::Php => !(t.starts_with("//") || t.starts_with('#') || t.starts_with("/*") || t.starts_with('*')),
-        Lang::Ts => !(t.starts_with("//") || t.starts_with("/*") || t.starts_with('*')),
+        // Rust shares TypeScript's comment shapes exactly: `//` also covers the
+        // doc forms `///` and `//!`, `/*` opens a block (which nests in Rust, but
+        // that only matters to the parser, not to a line-prefix count), and a
+        // leading `*` is the block-continuation convention.
+        //
+        // Known, deliberate limitation, identical to the one PHP and TS already
+        // carry: a line that STARTS with a dereference (`*counter = 0;`) is read
+        // as a comment continuation. Rust hits this more often than TS does, but
+        // the point of ADR-0002 is one definition of LOC for every language, so
+        // Rust does not get a private rule. It undercounts by a handful of lines
+        // in the worst file, never enough to move an MI band.
+        Lang::Ts | Lang::Rust => !(t.starts_with("//") || t.starts_with("/*") || t.starts_with('*')),
     }
 }
 
@@ -346,7 +369,32 @@ const GENERIC_OPERATOR_TOKENS: &[&str] = &[
     "^=", "<<=", ">>=", ".=", "??", "?", "=~", "->", "=>", "::",
 ];
 
-fn generic_is_operand_leaf(kind: &str) -> bool {
+/// Rust's leaf kinds carry names no other grammar in the set uses, EXCEPT
+/// `primitive_type`, which tree-sitter-php also emits (for `int`/`string` type
+/// hints). That collision is why this list is gated on the language instead of
+/// being merged into the shared one: folding it in would silently have moved
+/// every PHP file's Halstead volume, and therefore its MI, with nothing in the
+/// suite to catch it (the parity lock covers Python only). Gating makes
+/// "the other four are untouched" true by construction rather than by luck.
+fn rust_is_operand_leaf(kind: &str) -> bool {
+    matches!(
+        kind,
+        "integer_literal"
+            | "float_literal"
+            | "boolean_literal"
+            | "char_literal"
+            | "primitive_type"
+            | "field_identifier"
+            | "self"
+            | "super"
+            | "crate"
+    )
+}
+
+fn generic_is_operand_leaf(kind: &str, lang: Lang) -> bool {
+    if lang == Lang::Rust && rust_is_operand_leaf(kind) {
+        return true;
+    }
     matches!(
         kind,
         "identifier"
@@ -372,10 +420,16 @@ fn generic_is_operand_leaf(kind: &str) -> bool {
     )
 }
 
-fn generic_halstead(node: Node, src: &[u8], operators: &mut Halstead, operands: &mut Halstead) {
+fn generic_halstead(
+    node: Node,
+    src: &[u8],
+    lang: Lang,
+    operators: &mut Halstead,
+    operands: &mut Halstead,
+) {
     let kind = node.kind();
     if node.is_named() {
-        if node.named_child_count() == 0 && generic_is_operand_leaf(kind) {
+        if node.named_child_count() == 0 && generic_is_operand_leaf(kind, lang) {
             operands.add(node.utf8_text(src).unwrap_or("").chars().take(50).collect::<String>());
         }
     } else if GENERIC_OPERATOR_TOKENS.contains(&kind) {
@@ -384,7 +438,7 @@ fn generic_halstead(node: Node, src: &[u8], operators: &mut Halstead, operands: 
     let mut c = node.walk();
     if c.goto_first_child() {
         loop {
-            generic_halstead(c.node(), src, operators, operands);
+            generic_halstead(c.node(), src, lang, operators, operands);
             if !c.goto_next_sibling() {
                 break;
             }
@@ -396,8 +450,13 @@ fn file_volume(root: Node, src: &[u8], lang: Lang) -> f64 {
     let mut operators = Halstead::default();
     let mut operands = Halstead::default();
     match lang {
+        // Python alone has a cross-language parity target (metrics.py), so it
+        // alone gets the ast-exact implementation. Rust joins PHP / Ruby / TS on
+        // the generic walk: there is no second Rust implementation to agree with,
+        // and the generic operator/operand split is the same McCabe-adjacent
+        // definition the other three already feed into MI.
         Lang::Python => py_halstead(root, None, None, None, src, &mut operators, &mut operands),
-        _ => generic_halstead(root, src, &mut operators, &mut operands),
+        _ => generic_halstead(root, src, lang, &mut operators, &mut operands),
     }
     volume(operators.unique.len(), operands.unique.len(), operators.total, operands.total)
 }
@@ -483,7 +542,55 @@ fn is_decision(node: Node, lang: Lang, src: &[u8]) -> u32 {
                 (k == "binary_expression" && is_boolean_binary(node, src)) as u32
             }
         }
+        // Node kinds verified against tree-sitter-rust 0.24.2 by dumping a real
+        // parse, not from memory. Three of them are easy to get wrong:
+        //
+        //  * `if let` / `while let` do NOT have their own node kinds. The grammar
+        //    reuses `if_expression` / `while_expression` with a `let_condition`
+        //    child, so matching the plain kinds already covers both. Adding an
+        //    `if_let_expression` arm would have matched nothing and looked fine.
+        //  * `else_clause` is NOT counted. `else` is the fall-through edge, not a
+        //    decision; `else if` nests a second `if_expression` inside the clause
+        //    and is counted there, so `if/else if/else` scores 2, which is right.
+        //  * `try_expression` is the `?` operator. It is a real early-return
+        //    branch and is invisible if you only look for keywords - this is the
+        //    one the brief flagged and it is worth 1 per `?`.
+        //
+        // `loop_expression` has no condition but still closes a cycle in the
+        // control-flow graph, so it earns its point like any other loop.
+        Lang::Rust => {
+            if matches!(
+                k,
+                "if_expression"
+                    | "while_expression"
+                    | "loop_expression"
+                    | "for_expression"
+                    | "try_expression"
+            ) {
+                1
+            } else if k == "match_arm" {
+                // Every arm is a branch EXCEPT the wildcard `_`, which is the
+                // fall-through. This follows the precedent already set for
+                // TypeScript, where tree-sitter names `default:` `switch_default`
+                // (not `switch_case`) and the engine therefore never counts it.
+                // Verified: `match { 1 => .., 2 | 3 => .., _ => .. }` scores 2.
+                (!is_rust_wildcard_arm(node, src)) as u32
+            } else {
+                (k == "binary_expression" && is_boolean_binary(node, src)) as u32
+            }
+        }
     }
+}
+
+/// Is this `match_arm` the catch-all `_ => ...`?
+///
+/// Compared on the pattern's TEXT rather than its node kind: the kind name for a
+/// wildcard has moved between grammar versions, and `_` is unambiguous.
+fn is_rust_wildcard_arm(node: Node, src: &[u8]) -> bool {
+    node.child_by_field_name("pattern")
+        .and_then(|p| p.utf8_text(src).ok())
+        .map(|t| t.trim() == "_")
+        .unwrap_or(false)
 }
 
 /// True for a node that opens a new measurement scope: a nested function (it is
@@ -499,6 +606,7 @@ fn is_scope_boundary(kind: &str, lang: Lang) -> bool {
             | "trait_declaration" | "enum_declaration"),
         Lang::Ruby => matches!(kind, "class" | "module"),
         Lang::Ts => matches!(kind, "class_declaration" | "class"),
+        Lang::Rust => is_class_node(kind, Lang::Rust),
     }
 }
 
@@ -548,6 +656,19 @@ fn is_function_node(kind: &str, lang: Lang) -> bool {
                 | "function_expression"
                 | "arrow_function"
         ),
+        // `closure_expression` is deliberately NOT here. A Rust closure is the
+        // analogue of a Python lambda, not of a TypeScript arrow: the language is
+        // saturated with one-line iterator adapters (`.map(|x| x + 1)`), and
+        // listing each as a function would bury the real hot spots under hundreds
+        // of CC-1 entries and drag every avg_complexity down. Like a lambda, a
+        // closure's decisions stay charged to the function that writes it, which
+        // is why `is_scope_boundary` does not stop at one either.
+        //
+        // `function_signature_item` (a bodyless trait method) IS counted, on the
+        // precedent PHP already sets: tree-sitter-php reports an interface's
+        // bodyless `public function sig();` as a `method_declaration`, and the
+        // engine has always counted it.
+        Lang::Rust => matches!(kind, "function_item" | "function_signature_item"),
     }
 }
 
@@ -557,6 +678,14 @@ fn is_class_node(kind: &str, lang: Lang) -> bool {
         Lang::Php => matches!(kind, "class_declaration" | "trait_declaration" | "interface_declaration"),
         Lang::Ruby => matches!(kind, "class" | "module"),
         Lang::Ts => matches!(kind, "class_declaration" | "class"),
+        // `impl_item` is what gives a Rust method its qualifier: `impl Point`
+        // and `impl Draw for Point` both carry the implementing type in a field
+        // named `type` (NOT `name` - see `node_name`), so `fn draw` inside either
+        // is reported as `Point.draw`.
+        Lang::Rust => matches!(
+            kind,
+            "impl_item" | "trait_item" | "struct_item" | "enum_item" | "union_item"
+        ),
     }
 }
 
@@ -575,12 +704,26 @@ fn is_type_decl_node(kind: &str, lang: Lang) -> bool {
     }
     match lang {
         Lang::Ts => matches!(kind, "interface_declaration" | "type_alias_declaration" | "enum_declaration"),
+        // A Rust module's public surface is its types, and a test names them
+        // directly (`metrics::FileMetrics`). `type_item` covers `type Alias = ..`.
+        // Without this every .rs file raised a false "untested" offender, exactly
+        // as an interface-only TypeScript module used to.
+        Lang::Rust => kind == "type_item",
         _ => false,
     }
 }
 
+/// The declared name of a type or function node.
+///
+/// Falls back to the `type` field because Rust's `impl_item` has no `name`: both
+/// `impl Point` and `impl Draw for Point` store the implementing type under
+/// `type` (and the trait, when present, under `trait`). Without the fallback
+/// every method in the CLI would have been reported bare as `run` or `new`
+/// instead of `Report.run`. No other grammar in the set puts a `type` field on a
+/// node this is called with, so the fallback cannot affect them.
 fn node_name(node: Node, src: &[u8]) -> Option<String> {
     node.child_by_field_name("name")
+        .or_else(|| node.child_by_field_name("type"))
         .and_then(|n| n.utf8_text(src).ok())
         .map(|s| s.to_string())
 }
@@ -649,6 +792,7 @@ fn is_import_node(kind: &str, lang: Lang) -> bool {
             | "require_expression" | "include_expression" | "include_once_expression"),
         Lang::Ruby => false, // require is a plain method call — counted below
         Lang::Ts => matches!(kind, "import_statement"),
+        Lang::Rust => matches!(kind, "use_declaration" | "mod_item"),
     }
 }
 
@@ -785,6 +929,34 @@ fn extract_import_specs(root: Node, lang: Lang, src: &[u8]) -> Vec<String> {
                     let t = t.trim();
                     if t.contains('\\') && t.len() > 1 {
                         specs.push(t.to_string());
+                    }
+                }
+            }
+            // `use crate::console::icon_ok;` -> "crate::console::icon_ok". The
+            // whole path is kept as written and narrowed to a file in
+            // `resolve_import`, which is the only place that knows the file set.
+            Lang::Rust if kind == "use_declaration" => {
+                if let Some(arg) = node.child_by_field_name("argument") {
+                    if let Ok(t) = arg.utf8_text(src) {
+                        // `use std::{fs, io}` -> keep the `std::` stem only; a
+                        // brace group is always external here (an intra-crate
+                        // group would still resolve through its stem).
+                        let head = t.split('{').next().unwrap_or(t).trim().trim_end_matches("::");
+                        if !head.is_empty() {
+                            specs.push(head.to_string());
+                        }
+                    }
+                }
+            }
+            // `mod agent;` with NO body is a declaration that agent.rs (or
+            // agent/mod.rs) is part of this crate - the strongest internal edge
+            // Rust has, and the one that wires main.rs to every other file in
+            // this CLI. `mod x { .. }` with a body is an inline module and no
+            // edge at all, so the bodyless form is what qualifies.
+            Lang::Rust if kind == "mod_item" && node.child_by_field_name("body").is_none() => {
+                if let Some(n) = node.child_by_field_name("name") {
+                    if let Ok(t) = n.utf8_text(src) {
+                        specs.push(format!("mod:{}", t.trim()));
                     }
                 }
             }
@@ -927,6 +1099,58 @@ fn resolve_import(
             if let Some(pkg) = root_pkg {
                 if let Some(rest) = cleaned.strip_prefix(&format!("{pkg}/")) {
                     push(format!("{rest}.rb"));
+                }
+            }
+        }
+        // Rust resolution, single-crate layout (what this CLI is).
+        //
+        // Two specifier shapes reach here. `mod:agent` is a bodyless `mod`
+        // declaration and names a sibling file directly. Everything else is a
+        // `use` path, where only the leading segment says whether it can be
+        // internal at all: `crate` / `self` / `super` can, a bare first segment
+        // (`std`, `clap`, `serde`) is an external crate and must resolve to None
+        // or every third-party import would be miscounted as internal coupling.
+        //
+        // A `use` path mixes module segments with the ITEM it imports
+        // (`crate::console::icon_ok` = module `console`, item `icon_ok`), and
+        // nothing in the path says where the split is. So each prefix is offered
+        // longest-first and the file set decides.
+        Lang::Rust => {
+            if let Some(m) = spec.strip_prefix("mod:") {
+                let base = if dir.is_empty() { m.to_string() } else { format!("{dir}/{m}") };
+                push(format!("{base}.rs"));
+                push(format!("{base}/mod.rs"));
+            } else {
+                let segs: Vec<&str> = spec.split("::").filter(|s| !s.is_empty()).collect();
+                let first = *segs.first()?;
+                let (mut base, rest): (String, &[&str]) = match first {
+                    // `crate::` is anchored at the crate root, which IS the scan
+                    // root, so the base is empty rather than the current dir.
+                    "crate" => (String::new(), &segs[1..]),
+                    "self" => (dir.clone(), &segs[1..]),
+                    "super" => {
+                        let mut climbed = dir.clone();
+                        let mut i = 0;
+                        while segs.get(i) == Some(&"super") {
+                            climbed = parent_dir(&climbed);
+                            i += 1;
+                        }
+                        (climbed, &segs[i..])
+                    }
+                    _ => return None, // an external crate, excluded by design
+                };
+                if base == "." {
+                    base = String::new();
+                }
+                // Longest prefix first: `console::icon_ok` tries console/icon_ok
+                // before console, so a real nested module always wins over a
+                // same-named item in its parent.
+                for take in (1..=rest.len()).rev() {
+                    let joined = rest[..take].join("/");
+                    let full =
+                        if base.is_empty() { joined.clone() } else { format!("{base}/{joined}") };
+                    push(format!("{full}.rs"));
+                    push(format!("{full}/mod.rs"));
                 }
             }
         }
@@ -1309,6 +1533,18 @@ fn module_has_tests(file: &Path, idx: &TestIndex, declared_types: &[String]) -> 
     false
 }
 
+/// Rust keeps its unit tests INSIDE the file they test, behind `#[cfg(test)]`,
+/// rather than in a sibling `tests/` tree. Every stage of `module_has_tests`
+/// looks for an external test file, so without this the convention reads as "no
+/// test anywhere" and every single .rs file raises a false `untested` offender —
+/// which is exactly the noise that makes an offender list get ignored.
+///
+/// Matched on the source text, not the AST: `#[cfg(test)]` is an attribute whose
+/// node shape varies across grammar versions, and the string is unambiguous.
+fn rust_has_inline_tests(source: &str) -> bool {
+    source.contains("#[cfg(test)]")
+}
+
 // ── Offenders ───────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Clone)]
@@ -1473,7 +1709,8 @@ pub(crate) fn analyze_targets(files: &[PathBuf], scan_root: &str) -> Report {
         }
         let rel = rel_display(path, scan_root);
         let declared = declared_type_names(&source, lang);
-        let has_tests = module_has_tests(path, &test_index, &declared);
+        let has_tests = (lang == Lang::Rust && rust_has_inline_tests(&source))
+            || module_has_tests(path, &test_index, &declared);
         if let Some((fm, funcs, specs)) = analyze_source(lang, &source, &rel, has_tests) {
             pending.push((fm.path.clone(), lang, specs));
             file_metrics.push(fm);
@@ -1713,6 +1950,344 @@ mod tests {
         (fm, fns)
     }
 
+    fn analyze_rs(src: &str) -> (FileMetrics, Vec<FunctionInfo>) {
+        let (fm, fns, _specs) = analyze_source(Lang::Rust, src, "t.rs", false).unwrap();
+        (fm, fns)
+    }
+
+    // ---- Rust (ADR-0002 self-measurement) -------------------------------------
+    //
+    // Until Rust landed, the engine could not measure its OWN implementation
+    // language: `tina4 metrics` pointed at this repo found zero files. Every
+    // expected number below is hand-derived from the source in the test, so the
+    // analyzer is calibrated against McCabe rather than merely self-consistent.
+
+    #[test]
+    fn rust_counts_every_decision_kind_once() {
+        // Hand count, base 1 plus:
+        //   if a > 0                -> if_expression      1
+        //   if let Some(v) = b      -> if_expression      1  (NOT a separate kind)
+        //   while a > 0             -> while_expression   1
+        //   loop { break }          -> loop_expression    1
+        //   for i in 0..10          -> for_expression     1
+        //   c?                      -> try_expression     1  (the easy one to miss)
+        //   a > 0 && a < 10         -> binary &&          1  (`>` and `<` are not)
+        // = 8
+        let src = "\
+fn f(a: i32, b: Option<i32>, c: Result<i32, String>) -> Result<i32, String> {
+    if a > 0 { return Ok(1); }
+    if let Some(v) = b { let _ = v; }
+    while a > 0 { break; }
+    loop { break; }
+    for i in 0..10 { let _ = i; }
+    let _q = c?;
+    let _z = a > 0 && a < 10;
+    Ok(0)
+}
+";
+        let (fm, fns) = analyze_rs(src);
+        assert_eq!(fm.functions, 1);
+        assert_eq!(fns[0].complexity, 8, "1 + if + if-let + while + loop + for + ? + &&");
+    }
+
+    #[test]
+    fn rust_try_operator_is_a_real_branch() {
+        // Isolated so a regression in `?` alone cannot hide inside the big count
+        // above. Each `?` is an early return, so three of them are three branches.
+        let one = "fn f(c: Result<i32, String>) -> Result<i32, String> { Ok(c?) }\n";
+        assert_eq!(analyze_rs(one).1[0].complexity, 2, "1 + one ?");
+        let three = "fn f(a: Result<i32, String>, b: Result<i32, String>, c: Result<i32, String>) -> Result<i32, String> { Ok(a? + b? + c?) }\n";
+        assert_eq!(analyze_rs(three).1[0].complexity, 4, "1 + three ?");
+        // The negative half: no `?` means no extra branch.
+        let none = "fn f(c: i32) -> i32 { c }\n";
+        assert_eq!(analyze_rs(none).1[0].complexity, 1);
+    }
+
+    #[test]
+    fn rust_else_is_not_a_decision_but_else_if_is() {
+        // `if/else` is ONE decision - `else` is the fall-through edge. `else if`
+        // nests a second if_expression and so is a second decision. Counting
+        // `else_clause` would score these 3 and 4 instead of 2 and 3.
+        let if_else = "fn f(a: i32) -> i32 { if a > 0 { 1 } else { 2 } }\n";
+        assert_eq!(analyze_rs(if_else).1[0].complexity, 2, "if/else = 1 decision");
+        let chain = "fn f(a: i32) -> i32 { if a > 0 { 1 } else if a < 0 { 2 } else { 3 } }\n";
+        assert_eq!(analyze_rs(chain).1[0].complexity, 3, "if / else-if / else = 2 decisions");
+    }
+
+    #[test]
+    fn rust_wildcard_match_arm_is_not_a_decision() {
+        // Mirrors the TypeScript precedent: tree-sitter names `default:`
+        // `switch_default`, so the engine has never counted it. `_` is the same
+        // fall-through, so three arms with a wildcard are two decisions.
+        let src = "fn f(a: i32) -> i32 { match a { 1 => 1, 2 => 2, _ => 0 } }\n";
+        assert_eq!(analyze_rs(src).1[0].complexity, 3, "1 + two real arms, wildcard excluded");
+        // Without a wildcard every arm counts.
+        let exhaustive = "fn f(a: bool) -> i32 { match a { true => 1, false => 0 } }\n";
+        assert_eq!(analyze_rs(exhaustive).1[0].complexity, 3, "1 + two arms");
+    }
+
+    #[test]
+    fn rust_closure_decisions_stay_with_the_enclosing_function() {
+        // A closure is Rust's lambda, not TypeScript's arrow: `.map(|x| ..)` is
+        // everywhere, and listing each as a function would bury the real hot
+        // spots under CC-1 noise. So the closure is not reported separately and
+        // its branch is charged to the function that writes it.
+        let src = "fn f(xs: Vec<i32>) -> Vec<i32> { xs.into_iter().map(|x| if x > 0 { 1 } else { 0 }).collect() }\n";
+        let (fm, fns) = analyze_rs(src);
+        assert_eq!(fm.functions, 1, "the closure is not a function of its own");
+        assert_eq!(fns[0].complexity, 2, "1 + the closure's if");
+    }
+
+    #[test]
+    fn rust_impl_method_is_named_for_its_type() {
+        // impl_item stores the type under a field called `type`, NOT `name`.
+        // Without the node_name fallback every method reported bare.
+        let inherent = "struct Point;\nimpl Point { fn new() -> Self { Point } }\n";
+        let (_fm, fns) = analyze_rs(inherent);
+        assert_eq!(fns[0].name, "Point.new");
+
+        let trait_impl = "struct Point;\ntrait Draw { fn draw(&self); }\nimpl Draw for Point { fn draw(&self) {} }\n";
+        let (_fm, fns) = analyze_rs(trait_impl);
+        assert!(
+            fns.iter().any(|f| f.name == "Point.draw"),
+            "a trait impl is named for the implementing TYPE, not the trait: {:?}",
+            fns.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn rust_loc_excludes_line_doc_and_block_comments() {
+        let src = "\
+// a line comment
+/// a doc comment
+//! an inner doc comment
+/* a block comment
+ * continued
+ */
+fn f() -> i32 {
+    1
+}
+";
+        let (fm, _fns) = analyze_rs(src);
+        // Only `fn f() -> i32 {`, `1` and `}` are code.
+        assert_eq!(fm.loc, 3, "six comment lines must not count as code");
+    }
+
+    /// NEGATIVE CONTROL. A short, clean, low-complexity Rust file must score
+    /// HIGH and raise no offender. Without this, a change that simply broke the
+    /// Rust analyzer - making everything look complex and unmaintainable - would
+    /// pass every assertion above, since those only check that numbers are large.
+    #[test]
+    fn rust_negative_control_a_clean_file_scores_clean() {
+        let src = "\
+pub fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+pub fn sub(a: i32, b: i32) -> i32 {
+    a - b
+}
+";
+        // has_tests: true, because `untested` is a fact about the fixture, not
+        // about the analyzer, and this control is asserting that the ANALYSIS is
+        // clean.
+        let (fm, fns, _s) = analyze_source(Lang::Rust, src, "clean.rs", true).unwrap();
+        assert_eq!(fm.functions, 2);
+        assert!(fns.iter().all(|f| f.complexity == 1), "straight-line code is CC 1");
+        assert!(
+            fm.maintainability > 60.0,
+            "a trivial module must score HIGH (well clear of the 40 offender line), got {}",
+            fm.maintainability
+        );
+        assert!(
+            build_offenders(&[fm], &fns).is_empty(),
+            "a clean file must raise no offender at all"
+        );
+    }
+
+    /// Calibration, not self-consistency: the SAME two trivial functions written
+    /// in all five languages must land in the same maintainability band.
+    ///
+    /// This is what catches a Rust analyzer that is internally coherent but
+    /// systematically wrong - if the decision set or the operand-leaf list were
+    /// badly off, Rust's MI would drift away from the other four and every
+    /// number in the audit would be quietly mis-scaled. Measured at the time of
+    /// writing: rust 70.4, ts 72.4, ruby 72.4, php 71.0.
+    ///
+    /// Python is excluded from the band on purpose: it alone uses the ast-exact
+    /// `py_halstead` (volume 12 here against the generic walk's 31) because it
+    /// alone has a cross-language parity target, so it legitimately scores
+    /// higher and is not evidence of anything about Rust.
+    #[test]
+    fn rust_maintainability_is_in_band_with_the_other_languages() {
+        let cases = [
+            (
+                "rust",
+                Lang::Rust,
+                "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\npub fn sub(a: i32, b: i32) -> i32 {\n    a - b\n}\n",
+            ),
+            (
+                "ts",
+                Lang::Ts,
+                "export function add(a: number, b: number): number {\n    return a + b;\n}\n\nexport function sub(a: number, b: number): number {\n    return a - b;\n}\n",
+            ),
+            (
+                "php",
+                Lang::Php,
+                "<?php\nfunction add($a, $b) {\n    return $a + $b;\n}\n\nfunction sub($a, $b) {\n    return $a - $b;\n}\n",
+            ),
+            (
+                "ruby",
+                Lang::Ruby,
+                "def add(a, b)\n  a + b\nend\n\ndef sub(a, b)\n  a - b\nend\n",
+            ),
+        ];
+        let mut scores = Vec::new();
+        for (name, lang, src) in cases {
+            let (fm, _f, _s) = analyze_source(lang, src, "t", false).unwrap();
+            assert_eq!(fm.functions, 2, "{name}: both functions must be found");
+            scores.push((name, fm.maintainability));
+        }
+        let rust = scores.iter().find(|(n, _)| *n == "rust").unwrap().1;
+        for (name, mi) in &scores {
+            assert!(
+                (rust - mi).abs() < 8.0,
+                "rust MI {rust} is out of band with {name} MI {mi} for identical logic \
+                 - the Rust decision set or operand list has drifted"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_mod_and_crate_paths_resolve_to_real_files() {
+        let src = "mod agent;\npub mod console;\nuse crate::console::icon_ok;\nuse std::fs;\nuse serde::Serialize;\n";
+        let (_fm, _fns, specs) = analyze_source(Lang::Rust, src, "main.rs", false).unwrap();
+        assert!(specs.contains(&"mod:agent".to_string()), "got {specs:?}");
+        assert!(specs.contains(&"mod:console".to_string()), "got {specs:?}");
+        assert!(specs.contains(&"crate::console::icon_ok".to_string()), "got {specs:?}");
+
+        let paths = pathset(&["main.rs", "agent.rs", "console.rs"]);
+        assert_eq!(
+            resolve_import("mod:agent", "main.rs", Lang::Rust, &paths, None),
+            Some("agent.rs".to_string())
+        );
+        assert_eq!(
+            resolve_import("crate::console::icon_ok", "main.rs", Lang::Rust, &paths, None),
+            Some("console.rs".to_string()),
+            "the item tail is dropped once the module prefix matches a file"
+        );
+        // The negative half, and the one that matters most: an EXTERNAL crate
+        // must not resolve, or every third-party import becomes fake internal
+        // coupling and instability collapses to a constant.
+        //
+        // The names are chosen so the assertion can actually FAIL. `console` and
+        // `session` are both real crates on crates.io AND real files in this
+        // repo, so a resolver that ignores the leading segment would happily
+        // bind `use console::Term` to the local console.rs and invent an edge
+        // that does not exist. Asserting against `std::fs` alone proves nothing
+        // here - there is no std.rs to collide with, so it returns None whether
+        // the rule is right or wrong.
+        assert_eq!(
+            resolve_import("console::Term", "main.rs", Lang::Rust, &paths, None),
+            None,
+            "a BARE first segment is an external crate even when a local file shares its name"
+        );
+        assert_eq!(
+            resolve_import("crate::console::Term", "main.rs", Lang::Rust, &paths, None),
+            Some("console.rs".to_string()),
+            "the same path via `crate::` IS the local file - this is the contrast that makes the rule meaningful"
+        );
+        assert_eq!(resolve_import("std::fs", "main.rs", Lang::Rust, &paths, None), None);
+        assert_eq!(resolve_import("serde::Serialize", "main.rs", Lang::Rust, &paths, None), None);
+    }
+
+    /// Adding a language must not move the FOUR that already shipped.
+    ///
+    /// The live hazard was concrete: Rust needs `primitive_type` treated as a
+    /// Halstead operand, and tree-sitter-php emits `primitive_type` too (for
+    /// `int` / `string` type hints). Folding the Rust leaf kinds into the shared
+    /// list would have shifted every PHP file's volume, and therefore its MI,
+    /// with nothing in the suite to notice - the parity lock covers Python only.
+    ///
+    /// So the Rust kinds are gated on the language, and these are the exact
+    /// volumes the generic walk produced BEFORE Rust existed. If a future change
+    /// widens the shared list, this test goes red instead of the audit going
+    /// quietly wrong.
+    #[test]
+    fn adding_rust_does_not_perturb_the_other_languages() {
+        for (name, lang, src) in [
+            (
+                "ts",
+                Lang::Ts,
+                "export function add(a: number, b: number): number {\n    return a + b;\n}\n\nexport function sub(a: number, b: number): number {\n    return a - b;\n}\n",
+            ),
+            (
+                "php",
+                Lang::Php,
+                "<?php\nfunction add($a, $b) {\n    return $a + $b;\n}\n\nfunction sub($a, $b) {\n    return $a - $b;\n}\n",
+            ),
+            (
+                "ruby",
+                Lang::Ruby,
+                "def add(a, b)\n  a + b\nend\n\ndef sub(a, b)\n  a - b\nend\n",
+            ),
+        ] {
+            let (fm, _f, _s) = analyze_source(lang, src, "t", false).unwrap();
+            assert_eq!(
+                fm.halstead_volume, 31.02,
+                "{name}: Halstead volume moved - the Rust operand kinds have leaked \
+                 into the shared list and every {name} MI in the audit is now wrong"
+            );
+        }
+        // A PHP typed signature is the specific collision: `int` parses as
+        // `primitive_type`, which Rust counts and PHP must NOT.
+        let typed = "<?php\nfunction add(int $a, int $b): int {\n    return $a + $b;\n}\n";
+        let (fm, _f, _s) = analyze_source(Lang::Php, typed, "t.php", false).unwrap();
+        assert_eq!(
+            fm.halstead_volume, 12.0,
+            "PHP `primitive_type` must stay uncounted"
+        );
+    }
+
+    /// Pascal / Delphi is deliberately NOT wired up, and that is a measured
+    /// decision rather than an omission.
+    ///
+    /// The only published crate, `tree-sitter-pascal` 0.10.2 (Isopod), compiles
+    /// against tree-sitter 0.26 and handles classic Object Pascal well, but it
+    /// cannot parse Delphi 10.3+ inline loop variables (`for var X in Y do`,
+    /// upstream issue #15, still open). Measured against the real tina4delphi
+    /// corpus: 20,977 of 40,719 lines - 51.5% - fall inside an ERROR region,
+    /// including 100% of Tina4Frond.pas and 92.8% of Tina4HTMLRender.pas.
+    ///
+    /// Claiming `.pas` would mean emitting an MI derived from a tree where half
+    /// the decision points are invisible. A missing number is recoverable; a
+    /// confident wrong one is not. So `.pas` stays unrecognised until a grammar
+    /// that parses the corpus is available.
+    #[test]
+    fn pascal_is_not_claimed() {
+        for ext in ["pas", "dpr", "dpk", "inc", "PAS"] {
+            assert_eq!(
+                Lang::from_path(Path::new(&format!("a.{ext}"))),
+                None,
+                "{ext} must not be claimed while no grammar can parse the corpus"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_inline_cfg_test_module_counts_as_tested() {
+        // Rust puts unit tests inside the file. Every stage of module_has_tests
+        // looks for an external test FILE, so without this every .rs file in the
+        // repo raised a false `untested` offender.
+        assert!(rust_has_inline_tests("fn f() {}\n#[cfg(test)]\nmod tests { #[test] fn t() {} }\n"));
+        // The negative half: a file with no test module is genuinely untested.
+        assert!(!rust_has_inline_tests("fn f() -> i32 { 1 }\n"));
+        assert!(
+            !rust_has_inline_tests("// mentions cfg and test but declares neither\n"),
+            "the marker is the attribute, not the words"
+        );
+    }
+
     // ---- Language-agnostic building blocks -----------------------------------
 
     #[test]
@@ -1725,8 +2300,13 @@ mod tests {
         for ext in ["ts", "tsx", "js", "jsx", "mjs"] {
             assert_eq!(Lang::from_path(Path::new(&format!("a.{ext}"))), Some(Lang::Ts));
         }
+        assert_eq!(Lang::from_path(Path::new("a.rs")), Some(Lang::Rust));
+        assert_eq!(Lang::from_path(Path::new("A.RS")), Some(Lang::Rust), "extension match is case-insensitive");
         assert_eq!(Lang::from_path(Path::new("a.md")), None);
         assert_eq!(Lang::from_path(Path::new("noext")), None);
+        // Pascal is deliberately NOT wired up - see the `pascal_is_not_claimed`
+        // test below for why claiming it would be worse than omitting it.
+        assert_eq!(Lang::from_path(Path::new("a.pas")), None);
     }
 
     #[test]
@@ -2448,5 +3028,6 @@ mod tests {
             "DatabaseTest.php tests Database, not Base"
         );
     }
+
 
 }

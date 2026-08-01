@@ -43,7 +43,7 @@ tina4 metrics                    Report code-health top offenders (complexity, l
                                  low maintainability, untested). Flags: --top N, --json,
                                  --fail-on warn|error (CI gate), --path DIR|FILE. NATIVE +
                                  language-agnostic (ADR-0002, src/metrics.rs): scans SOURCE
-                                 directly for Python/PHP/Ruby/TypeScript+JS via tree-sitter,
+                                 directly for Python/PHP/Ruby/TypeScript+JS/Rust via tree-sitter,
                                  with NO Tina4 project and NO running framework required.
                                  Formula parity with the Python master (metrics.py) — CC/MI/
                                  thresholds identical, locked by a real parity test.
@@ -181,11 +181,18 @@ binary via `which::which("claude")` and — because on Windows `claude` is a
 - grass: SCSS compiler
 - which: Binary lookup
 - ctrlc: Signal handling
-- tree-sitter + tree-sitter-python / -php / -ruby / -typescript: real per-language
-  AST parsing for the native `tina4 metrics` engine (ADR-0002, src/metrics.rs).
-  These grammar crates add ~4.9MB to the release binary (the C parsers); accepted
-  for accurate cross-language complexity/MI. Core frameworks stay zero-dep — this
-  is the Rust CLI, and Carbonah already sets the tree-sitter precedent in-house.
+- tree-sitter + tree-sitter-python / -php / -ruby / -typescript / -rust: real
+  per-language AST parsing for the native `tina4 metrics` engine (ADR-0002,
+  src/metrics.rs). These grammar crates add ~6MB to the release binary (the C
+  parsers); accepted for accurate cross-language complexity/MI. Core frameworks
+  stay zero-dep — this is the Rust CLI, and Carbonah already sets the tree-sitter
+  precedent in-house.
+  `-rust` was added so the engine can measure its own implementation language;
+  it cost +1.07MB (8.68MB -> 9.75MB, measured on macOS arm64, release profile).
+  There is deliberately NO Pascal/Delphi grammar: the only published crate
+  (tree-sitter-pascal 0.10.2) cannot parse Delphi 10.3+ inline loop variables and
+  leaves 51.5% of the real tina4delphi corpus unparsed, so `.pas` is not claimed
+  rather than reported wrong.
 
 ## Links
 

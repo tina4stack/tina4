@@ -109,6 +109,11 @@ pub(crate) struct FileMetrics {
     pub coupling_efferent: usize,
     pub coupling_afferent: usize,
     pub instability: f64, // rounded to 3 dp
+
+    /// Fraction of lines that parsed cleanly (1.0 = perfect). Serialised so a
+    /// consumer can see WHY a file was refused, and so a file that is close to
+    /// the floor is visible before it drops below it.
+    pub parse_health: f64, // rounded to 3 dp
 }
 
 // ── Rounding + MI formula (mirror metrics.py exactly) ─────────────────────────
@@ -459,6 +464,129 @@ fn file_volume(root: Node, src: &[u8], lang: Lang) -> f64 {
         _ => generic_halstead(root, src, lang, &mut operators, &mut operands),
     }
     volume(operators.unique.len(), operands.unique.len(), operators.total, operands.total)
+}
+
+// ── Parse health ──────────────────────────────────────────────────────────────
+//
+// tree-sitter ALWAYS returns a tree. When it cannot parse something it wraps the
+// region in an ERROR node and carries on, which is the right behaviour for an
+// editor and a trap for a metrics engine: every number downstream is still
+// computed, still plausible, and quietly wrong, because the decision points and
+// operators inside an ERROR region are invisible to the walks that count them.
+//
+// A file the engine cannot read must therefore be REFUSED and said so, never
+// silently reported and never silently skipped. This was found via Delphi (a
+// grammar gap put 51.5% of a real corpus inside ERROR regions) but it is not a
+// Delphi problem - it applies to all five shipping languages equally, and a
+// malformed .py or a .ts using syntax newer than the vendored grammar hits it
+// the same way.
+
+/// Fraction of source lines that parsed cleanly: 1.0 is a perfect parse, 0.0 is
+/// a file entirely inside error regions.
+///
+/// Measured by LINE COVERAGE rather than by counting ERROR nodes, because the
+/// two diverge badly. One ERROR node can swallow a thousand lines, and a
+/// thousand tiny ones can sit on a single line; only the span says how much of
+/// the file the engine actually understood.
+///
+/// Children of an ERROR node are not descended into - they are junk by
+/// definition, and the parent's span already covers them.
+fn parse_health(root: Node, total_lines: usize) -> f64 {
+    if total_lines == 0 {
+        return 1.0;
+    }
+    let mut bad: HashSet<usize> = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        // MISSING nodes are zero-width insertions the parser invented to
+        // recover. They mark a real defect but cover no source, so they are
+        // counted at their own line rather than over a span.
+        if n.is_error() || n.is_missing() {
+            for row in n.start_position().row..=n.end_position().row {
+                bad.insert(row);
+            }
+            if n.is_error() {
+                continue;
+            }
+        }
+        let mut c = n.walk();
+        for child in n.children(&mut c) {
+            stack.push(child);
+        }
+    }
+    let clean = total_lines.saturating_sub(bad.len());
+    (clean as f64 / total_lines as f64).clamp(0.0, 1.0)
+}
+
+/// Below this fraction of cleanly-parsed lines a file is REFUSED rather than
+/// reported.
+///
+/// Calibrated against every corpus to hand rather than guessed. Measured over
+/// 1,875 files in tina4-python, tina4-php, tina4-ruby, tina4-nodejs, tina4-js
+/// and this CLI's own src:
+///
+/// * 1,873 parse at health EXACTLY 1.000.
+/// * 2 do not, and both sit far above the floor: 0.993
+///   (`tina4-php/tests/OrmQueryBuilderBugsPostgresTest.php`) and 0.994
+///   (`tina4-nodejs/types/core/src/devAdmin.d.ts`, a `.d.ts` read with the TSX
+///   grammar). Real grammar gaps, and small ones.
+/// * NONE is below 0.95.
+///
+/// So the gap between healthy and broken is not a gradient to tune along, it is
+/// a cliff, and 0.95 sits in the empty space under it with the nearest real file
+/// four points clear. It tolerates a stray region from one unsupported construct
+/// - where the surrounding metrics are still broadly meaningful - and refuses
+/// anything structurally misread. It is deliberately NOT 1.0: that would refuse
+/// those two real files over a single unrecognised construct, and make the
+/// engine useless on any codebase slightly ahead of its vendored grammars.
+const MIN_PARSE_HEALTH: f64 = 0.95;
+
+/// Deepest AST nesting the engine's RECURSIVE walks will attempt.
+///
+/// Five walks recurse once per tree level - `collect_functions`,
+/// `count_own_decisions`, `py_halstead`, `generic_halstead` and
+/// `collect_fragments` - and none of them had a bound. Measured on macOS 26.5.2
+/// arm64 against the 58f7f73 release binary: a 60,000-term left-associative
+/// Python expression written one term per line parses fine (tree depth 60,003),
+/// then aborts the whole process with `fatal runtime error: stack overflow`,
+/// exit 134. Nothing upstream catches it - the file is 10 bytes per line, so
+/// `looks_minified` (threshold 200) does not fire.
+///
+/// This is a PRE-EXISTING defect, not something duplication introduced: the
+/// three walks that feed LOC / CC / MI have recursed unguarded since the engine
+/// was written, so the crash predates both `cd4dae8` and `58f7f73`.
+///
+/// 800 is bracketed by two measurements rather than picked:
+///
+/// * DEEPEST REAL FILE = 79, `src/agent.rs`, over 1,875 files in tina4-python,
+///   tina4-php, tina4-ruby, tina4-nodejs, tina4-js and this CLI's own src.
+///   Per-repo maxima are 50 / 50 / 35 / 56 / 31 / 79. Ten times the deepest
+///   thing anyone has actually written is not a limit real code can hit.
+/// * FIRST ABORT = depth 1800, measured in the harshest environment the walks
+///   run in - a DEBUG build on a 2 MiB cargo-test worker thread (depth 1700
+///   still completes). The release binary on the 8 MiB main thread survives far
+///   more. Half the worst-case ceiling leaves the guard itself with margin.
+///
+/// A file past it is REFUSED like any other the engine cannot read. Refusal
+/// names the file; a crash names nothing and loses the entire scan with it.
+const MAX_AST_DEPTH: usize = 800;
+
+/// Does any node nest deeper than `limit`?
+///
+/// Deliberately ITERATIVE. A recursive depth check would overflow the very stack
+/// it exists to protect, on exactly the input it exists to catch.
+fn depth_exceeds(root: Node, limit: usize) -> bool {
+    let mut stack = vec![(root, 0usize)];
+    while let Some((node, depth)) = stack.pop() {
+        if depth > limit {
+            return true;
+        }
+        let mut c = node.walk();
+        for child in node.children(&mut c) {
+            stack.push((child, depth + 1));
+        }
+    }
+    false
 }
 
 // ── Cyclomatic complexity ─────────────────────────────────────────────────────
@@ -1182,17 +1310,64 @@ fn resolve_import(
 
 // ── Analyze one source string ─────────────────────────────────────────────────
 
+/// What one file contributed to the report.
+///
+/// A single verdict, decided in ONE place, is the whole point. The engine used
+/// to answer "did this file parse?" with `Option` (grammar missing) and then
+/// silently report numbers for anything that came back `Some` - including a file
+/// tree-sitter had wrapped almost entirely in ERROR nodes. Refusal has to be a
+/// value the caller must handle, not an absence it can overlook.
+pub(crate) enum FileAnalysis {
+    Measured {
+        metrics: FileMetrics,
+        functions: Vec<FunctionInfo>,
+        imports: Vec<String>,
+        /// Clone fragments with `file` left at 0; only the caller knows the
+        /// index. Computed here so the tree is parsed ONCE per file instead of
+        /// once for metrics and again for duplication.
+        fragments: Vec<CloneFragment>,
+    },
+    /// Read, and deliberately NOT reported on.
+    Refused { reason: String, parse_health: f64 },
+}
+
 pub(crate) fn analyze_source(
     lang: Lang,
     source: &str,
     rel_path: &str,
     has_tests: bool,
-) -> Option<(FileMetrics, Vec<FunctionInfo>, Vec<String>)> {
+) -> Option<FileAnalysis> {
     let mut parser = Parser::new();
     parser.set_language(&lang.tree_sitter_language()).ok()?;
     let tree = parser.parse(source, None)?;
     let root = tree.root_node();
     let src = source.as_bytes();
+
+    // ── Refusal gate 1: nesting the recursive walks below cannot survive. ──
+    // Checked BEFORE any of them run, because the failure mode is aborting the
+    // process, not returning a wrong number.
+    if depth_exceeds(root, MAX_AST_DEPTH) {
+        return Some(FileAnalysis::Refused {
+            reason: format!(
+                "AST nests deeper than {MAX_AST_DEPTH} levels - measuring it would overflow the stack"
+            ),
+            // Nothing is known about its parse health; it was never walked.
+            parse_health: 0.0,
+        });
+    }
+
+    // ── Refusal gate 2: too much of the file sits inside parse-error regions. ──
+    // Also before the walks, so a file the engine cannot read costs it nothing.
+    let health = round_dp(parse_health(root, source.lines().count()), 3);
+    if health < MIN_PARSE_HEALTH {
+        return Some(FileAnalysis::Refused {
+            reason: format!(
+                "only {:.0}% of lines parsed - metrics would be wrong, not just imprecise",
+                health * 100.0
+            ),
+            parse_health: health,
+        });
+    }
 
     let loc = count_loc(source, lang);
 
@@ -1248,8 +1423,13 @@ pub(crate) fn analyze_source(
         coupling_efferent: 0,
         coupling_afferent: 0,
         instability: 0.0,
+        parse_health: health,
     };
-    Some((fm, functions, specs))
+
+    let mut fragments: Vec<CloneFragment> = Vec::new();
+    collect_fragments(root, 0, &mut fragments);
+
+    Some(FileAnalysis::Measured { metrics: fm, functions, imports: specs, fragments })
 }
 
 // ── Duplication (DRY) ─────────────────────────────────────────────────────────
@@ -1299,7 +1479,7 @@ const MIN_CLONE_LINES: usize = 6;
 /// few MB and a few hundred. The hash is a u64 for the same reason - the
 /// normalised shape string is never retained, only folded in.
 #[derive(Clone, Debug)]
-struct CloneFragment {
+pub(crate) struct CloneFragment {
     hash: u64,
     file: u32,
     start_line: usize,
@@ -1384,15 +1564,6 @@ fn collect_fragments(
         out.push(CloneFragment { hash, file, start_line, end_line, nodes: count });
     }
     (hash, count)
-}
-
-fn fragments_for_source(source: &str, lang: Lang, file: u32, out: &mut Vec<CloneFragment>) {
-    let mut parser = Parser::new();
-    if parser.set_language(&lang.tree_sitter_language()).is_err() {
-        return;
-    }
-    let Some(tree) = parser.parse(source, None) else { return };
-    collect_fragments(tree.root_node(), file, out);
 }
 
 /// A set of fragments that share a shape.
@@ -1506,6 +1677,27 @@ fn looks_minified(source: &str) -> bool {
     source.len() / lines > 200
 }
 
+/// Is this directory a documentation GENERATOR's output tree?
+///
+/// Detected by a marker file the generator always writes, not by directory name:
+/// `docs/`, `html/` and `site/` are all perfectly good places for hand-written
+/// source, so banning the name would exclude real code, while the marker only
+/// ever appears in generated output.
+///
+/// This matters because the engine is language-agnostic and therefore sees any
+/// `.js` it walks past. Doxygen ships jQuery plus its own `search.js` in
+/// `docs/html/`, and scanning tina4delphi produced metrics for seven Doxygen
+/// files and nothing else - a report entirely about code nobody wrote. It is
+/// the same class of error as measuring a file that did not parse: measuring
+/// something that is not the thing.
+fn is_generated_docs_dir(dir: &Path) -> bool {
+    // Doxygen always emits doxygen.css alongside its HTML/JS. Sphinx always
+    // emits .buildinfo at its output root.
+    ["doxygen.css", "doxygen.svg", ".buildinfo"]
+        .iter()
+        .any(|marker| dir.join(marker).is_file())
+}
+
 fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     let mut items: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
@@ -1514,6 +1706,9 @@ fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) {
         if path.is_dir() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name.starts_with('.') || IGNORED_DIRS.contains(&name) {
+                continue;
+            }
+            if is_generated_docs_dir(&path) {
                 continue;
             }
             walk_dir(&path, files);
@@ -1760,6 +1955,22 @@ fn rust_has_inline_tests(source: &str) -> bool {
     source.contains("#[cfg(test)]")
 }
 
+/// A file the engine REFUSED to measure because too little of it parsed.
+///
+/// Deliberately a first-class part of the report rather than an omission. A
+/// refused file is excluded from `file_metrics` so it cannot skew an average
+/// with numbers derived from rubble, and listed here so it is never merely
+/// ABSENT - "the engine could not read this" and "this file is fine" must not
+/// look the same to anyone reading the output.
+#[derive(Serialize, Clone, Debug)]
+pub(crate) struct RefusedFile {
+    pub path: String,
+    /// Fraction of lines that parsed cleanly, rounded to 3 dp.
+    pub parse_health: f64,
+    pub lines: usize,
+    pub reason: String,
+}
+
 // ── Offenders ───────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Clone)]
@@ -1871,6 +2082,30 @@ fn sort_offenders(items: &mut [Offender]) {
     });
 }
 
+/// Turn refused files into offenders so they appear in the ranked list, not
+/// only in a separate section someone might not read.
+///
+/// Severity is `warn`, not `error`, and that is a deliberate compatibility
+/// call: a file the engine cannot parse is a TOOLING gap (a grammar older than
+/// the source it is fed), not a defect in the code being measured, and
+/// promoting it to `error` would newly break every existing `--fail-on error`
+/// CI run for reasons outside the author's control. `warn` still trips
+/// `--fail-on warn`, and the summary line says it loudly either way.
+fn refusal_offenders(refused: &[RefusedFile]) -> Vec<Offender> {
+    refused
+        .iter()
+        .map(|r| Offender {
+            file: r.path.clone(),
+            line: 1,
+            kind: "unparsed".to_string(),
+            severity: "warn".to_string(),
+            // Bigger unreadable files are a bigger hole in the report.
+            score: r.lines as f64 / 100.0,
+            detail: format!("NOT MEASURED - {}", r.reason),
+        })
+        .collect()
+}
+
 /// Turn clone groups into offenders.
 ///
 /// Kept separate from `build_offenders` because duplication is the only rule
@@ -1934,6 +2169,9 @@ struct Summary {
     /// scan facts, so they live on the summary rather than on any one file.
     duplicate_blocks: usize,
     duplicate_lines: usize,
+    /// Files the parse-health guard REFUSED. Reported so a hole in the coverage
+    /// is never invisible - the whole point of the guard.
+    files_refused: usize,
 }
 
 #[derive(Serialize)]
@@ -1951,6 +2189,9 @@ struct JsonPayload {
     dependency_graph: BTreeMap<String, Vec<String>>,
     /// Maximal duplicated AST shapes, biggest payoff first.
     duplication: Vec<CloneGroup>,
+    /// Files excluded from every number above because too little of them
+    /// parsed. Present even when empty so a consumer can rely on the key.
+    unparsed: Vec<RefusedFile>,
 }
 
 pub(crate) struct Report {
@@ -1964,6 +2205,7 @@ pub(crate) struct Report {
     /// nothing ever matched and the dependency view drew no edges at all.
     dependency_graph: BTreeMap<String, Vec<String>>,
     clones: Vec<CloneGroup>,
+    refused: Vec<RefusedFile>,
 }
 
 pub(crate) fn analyze_targets(files: &[PathBuf], scan_root: &str) -> Report {
@@ -1978,6 +2220,7 @@ pub(crate) fn analyze_targets(files: &[PathBuf], scan_root: &str) -> Report {
     // `clone_paths` is the index space `CloneFragment.file` points into.
     let mut fragments: Vec<CloneFragment> = Vec::new();
     let mut clone_paths: Vec<String> = Vec::new();
+    let mut refused: Vec<RefusedFile> = Vec::new();
 
     for path in files {
         let Some(lang) = Lang::from_path(path) else { continue };
@@ -1990,13 +2233,31 @@ pub(crate) fn analyze_targets(files: &[PathBuf], scan_root: &str) -> Report {
         let declared = declared_type_names(&source, lang);
         let has_tests = (lang == Lang::Rust && rust_has_inline_tests(&source))
             || module_has_tests(path, &test_index, &declared);
-        if let Some((fm, funcs, specs)) = analyze_source(lang, &source, &rel, has_tests) {
-            let idx = clone_paths.len() as u32;
-            clone_paths.push(fm.path.clone());
-            fragments_for_source(&source, lang, idx, &mut fragments);
-            pending.push((fm.path.clone(), lang, specs));
-            file_metrics.push(fm);
-            all_functions.extend(funcs);
+        match analyze_source(lang, &source, &rel, has_tests) {
+            // The engine could not read the file. It is kept OUT of every
+            // aggregate - one file's rubble must not move another file's
+            // numbers - and reported by name, because "could not read this" and
+            // "this file is fine" must never look the same in the output.
+            Some(FileAnalysis::Refused { reason, parse_health }) => {
+                refused.push(RefusedFile {
+                    path: rel,
+                    parse_health,
+                    lines: source.lines().count(),
+                    reason,
+                });
+            }
+            Some(FileAnalysis::Measured { metrics, functions, imports, fragments: frags }) => {
+                // Fragments come back index-less; only this loop knows which
+                // slot in `clone_paths` the file took.
+                let idx = clone_paths.len() as u32;
+                clone_paths.push(metrics.path.clone());
+                fragments.extend(frags.into_iter().map(|f| CloneFragment { file: idx, ..f }));
+                pending.push((metrics.path.clone(), lang, imports));
+                file_metrics.push(metrics);
+                all_functions.extend(functions);
+            }
+            // No grammar, or the parser returned nothing at all.
+            None => {}
         }
     }
 
@@ -2047,6 +2308,7 @@ pub(crate) fn analyze_targets(files: &[PathBuf], scan_root: &str) -> Report {
     let clones = group_clones(fragments, &clone_paths);
     let mut offenders = build_offenders(&file_metrics, &all_functions);
     offenders.extend(clone_offenders(&clones));
+    offenders.extend(refusal_offenders(&refused));
     sort_offenders(&mut offenders);
 
     Report {
@@ -2056,6 +2318,7 @@ pub(crate) fn analyze_targets(files: &[PathBuf], scan_root: &str) -> Report {
         scan_root: scan_root.to_string(),
         dependency_graph,
         clones,
+        refused,
     }
 }
 
@@ -2082,6 +2345,7 @@ fn build_summary(report: &Report, total_offenders: usize) -> Summary {
         total_offenders,
         duplicate_blocks: report.clones.len(),
         duplicate_lines: report.clones.iter().map(|c| c.lines * (c.copies - 1)).sum(),
+        files_refused: report.refused.len(),
     }
 }
 
@@ -2144,6 +2408,7 @@ pub fn run(path: Option<String>, top: Option<usize>, json: bool, fail_on: Option
             most_complex_functions: by_cc,
             dependency_graph: report.dependency_graph.clone(),
             duplication: report.clones.clone(),
+            unparsed: report.refused.clone(),
         };
         println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
         return exit_code;
@@ -2170,6 +2435,21 @@ fn print_human(summary: &Summary, shown: &[Offender]) {
         "  files: {}   functions: {}   avg complexity: {}   avg maintainability: {}",
         summary.files_analyzed, summary.total_functions, summary.avg_complexity, summary.avg_maintainability
     );
+    if summary.files_refused > 0 {
+        println!(
+            "  {}",
+            paint(
+                // Reason-agnostic on purpose: a file is refused for failing to
+                // parse OR for nesting deeper than the walks survive, and the
+                // per-file reason is on its `unparsed` offender.
+                &format!(
+                    "! {} file(s) NOT MEASURED - the engine could not read them (see `unparsed` offenders)",
+                    summary.files_refused
+                ),
+                "33"
+            )
+        );
+    }
     if summary.duplicate_blocks > 0 {
         println!(
             "  duplication: {} repeated blocks   {} lines removable by unifying them",
@@ -2181,7 +2461,17 @@ fn print_human(summary: &Summary, shown: &[Offender]) {
     println!();
 
     if shown.is_empty() {
-        println!("  {}", paint("\u{2713} no offenders \u{2014} clean", "32"));
+        // "clean" and "nothing was looked at" must not print the same thing.
+        // Scanning tina4delphi found 39 Pascal files, claimed none of them, and
+        // reported a green tick.
+        if summary.files_analyzed == 0 {
+            println!(
+                "  {}",
+                paint("no supported source files found - nothing was measured", "33")
+            );
+        } else {
+            println!("  {}", paint("\u{2713} no offenders \u{2014} clean", "32"));
+        }
         println!();
         return;
     }
@@ -2226,28 +2516,48 @@ mod tests {
         std::fs::read_to_string(manifest().join("tests/fixtures").join(name)).unwrap()
     }
 
+    /// Destructure a MEASURED analysis, or fail loudly.
+    ///
+    /// A test that quietly accepted a refusal would be asserting nothing at all,
+    /// so a refusal panics with the reason attached.
+    fn measured(
+        lang: Lang,
+        src: &str,
+        rel: &str,
+        has_tests: bool,
+    ) -> (FileMetrics, Vec<FunctionInfo>, Vec<String>) {
+        match analyze_source(lang, src, rel, has_tests).expect("grammar must load") {
+            FileAnalysis::Measured { metrics, functions, imports, .. } => {
+                (metrics, functions, imports)
+            }
+            FileAnalysis::Refused { reason, parse_health } => {
+                panic!("{rel}: REFUSED at parse health {parse_health} - {reason}")
+            }
+        }
+    }
+
     fn analyze_py(src: &str) -> (FileMetrics, Vec<FunctionInfo>) {
-        let (fm, fns, _specs) = analyze_source(Lang::Python, src, "t.py", false).unwrap();
+        let (fm, fns, _specs) = measured(Lang::Python, src, "t.py", false);
         (fm, fns)
     }
 
     fn analyze_ts(src: &str) -> (FileMetrics, Vec<FunctionInfo>) {
-        let (fm, fns, _specs) = analyze_source(Lang::Ts, src, "t.ts", false).unwrap();
+        let (fm, fns, _specs) = measured(Lang::Ts, src, "t.ts", false);
         (fm, fns)
     }
 
     fn analyze_php(src: &str) -> (FileMetrics, Vec<FunctionInfo>) {
-        let (fm, fns, _specs) = analyze_source(Lang::Php, src, "t.php", false).unwrap();
+        let (fm, fns, _specs) = measured(Lang::Php, src, "t.php", false);
         (fm, fns)
     }
 
     fn analyze_rb(src: &str) -> (FileMetrics, Vec<FunctionInfo>) {
-        let (fm, fns, _specs) = analyze_source(Lang::Ruby, src, "t.rb", false).unwrap();
+        let (fm, fns, _specs) = measured(Lang::Ruby, src, "t.rb", false);
         (fm, fns)
     }
 
     fn analyze_rs(src: &str) -> (FileMetrics, Vec<FunctionInfo>) {
-        let (fm, fns, _specs) = analyze_source(Lang::Rust, src, "t.rs", false).unwrap();
+        let (fm, fns, _specs) = measured(Lang::Rust, src, "t.rs", false);
         (fm, fns)
     }
 
@@ -2387,7 +2697,7 @@ pub fn sub(a: i32, b: i32) -> i32 {
         // has_tests: true, because `untested` is a fact about the fixture, not
         // about the analyzer, and this control is asserting that the ANALYSIS is
         // clean.
-        let (fm, fns, _s) = analyze_source(Lang::Rust, src, "clean.rs", true).unwrap();
+        let (fm, fns, _s) = measured(Lang::Rust, src, "clean.rs", true);
         assert_eq!(fm.functions, 2);
         assert!(fns.iter().all(|f| f.complexity == 1), "straight-line code is CC 1");
         assert!(
@@ -2440,7 +2750,7 @@ pub fn sub(a: i32, b: i32) -> i32 {
         ];
         let mut scores = Vec::new();
         for (name, lang, src) in cases {
-            let (fm, _f, _s) = analyze_source(lang, src, "t", false).unwrap();
+            let (fm, _f, _s) = measured(lang, src, "t", false);
             assert_eq!(fm.functions, 2, "{name}: both functions must be found");
             scores.push((name, fm.maintainability));
         }
@@ -2457,7 +2767,7 @@ pub fn sub(a: i32, b: i32) -> i32 {
     #[test]
     fn rust_mod_and_crate_paths_resolve_to_real_files() {
         let src = "mod agent;\npub mod console;\nuse crate::console::icon_ok;\nuse std::fs;\nuse serde::Serialize;\n";
-        let (_fm, _fns, specs) = analyze_source(Lang::Rust, src, "main.rs", false).unwrap();
+        let (_fm, _fns, specs) = measured(Lang::Rust, src, "main.rs", false);
         assert!(specs.contains(&"mod:agent".to_string()), "got {specs:?}");
         assert!(specs.contains(&"mod:console".to_string()), "got {specs:?}");
         assert!(specs.contains(&"crate::console::icon_ok".to_string()), "got {specs:?}");
@@ -2528,7 +2838,7 @@ pub fn sub(a: i32, b: i32) -> i32 {
                 "def add(a, b)\n  a + b\nend\n\ndef sub(a, b)\n  a - b\nend\n",
             ),
         ] {
-            let (fm, _f, _s) = analyze_source(lang, src, "t", false).unwrap();
+            let (fm, _f, _s) = measured(lang, src, "t", false);
             assert_eq!(
                 fm.halstead_volume, 31.02,
                 "{name}: Halstead volume moved - the Rust operand kinds have leaked \
@@ -2538,7 +2848,7 @@ pub fn sub(a: i32, b: i32) -> i32 {
         // A PHP typed signature is the specific collision: `int` parses as
         // `primitive_type`, which Rust counts and PHP must NOT.
         let typed = "<?php\nfunction add(int $a, int $b): int {\n    return $a + $b;\n}\n";
-        let (fm, _f, _s) = analyze_source(Lang::Php, typed, "t.php", false).unwrap();
+        let (fm, _f, _s) = measured(Lang::Php, typed, "t.php", false);
         assert_eq!(
             fm.halstead_volume, 12.0,
             "PHP `primitive_type` must stay uncounted"
@@ -2743,6 +3053,7 @@ pub fn sub(a: i32, b: i32) -> i32 {
             path: "x.py".into(), loc, complexity: 0, avg_complexity: 0.0,
             functions: funcs, maintainability: mi, halstead_volume: 0.0, has_tests,
             dep_count: 0, coupling_efferent: 0, coupling_afferent: 0, instability: 0.0,
+            parse_health: 1.0,
         }
     }
     fn func_with(cc: u32) -> FunctionInfo {
@@ -2833,17 +3144,17 @@ pub fn sub(a: i32, b: i32) -> i32 {
     #[test]
     fn analyzes_php_ruby_typescript_without_a_project() {
         let php = "<?php\nfunction f($a){ if ($a && $a > 0) { return 1; } return 0; }\n";
-        let (fm, fns, _s) = analyze_source(Lang::Php, php, "t.php", false).unwrap();
+        let (fm, fns, _s) = measured(Lang::Php, php, "t.php", false);
         assert_eq!(fm.functions, 1);
         assert!(fns[0].complexity >= 3); // 1 + if + &&
         assert!(fm.maintainability > 0.0 && fm.maintainability <= 100.0);
 
         let rb = "def f(a)\n  return 1 if a && a > 0\n  0\nend\n";
-        let (fm, _f, _s) = analyze_source(Lang::Ruby, rb, "t.rb", false).unwrap();
+        let (fm, _f, _s) = measured(Lang::Ruby, rb, "t.rb", false);
         assert_eq!(fm.functions, 1);
 
         let ts = "export const f = (a: number) => { if (a && a > 0) { return 1; } return 0; };\n";
-        let (fm, fns, _s) = analyze_source(Lang::Ts, ts, "t.ts", false).unwrap();
+        let (fm, fns, _s) = measured(Lang::Ts, ts, "t.ts", false);
         assert_eq!(fm.functions, 1, "top-level arrow function is counted");
         assert!(fns[0].complexity >= 3);
     }
@@ -2851,7 +3162,7 @@ pub fn sub(a: i32, b: i32) -> i32 {
     #[test]
     fn typescript_imports_are_counted_as_dep_count() {
         let ts = "import { a } from './a';\nimport b from './b';\nconst x = () => a + b;\n";
-        let (fm, _f, specs) = analyze_source(Lang::Ts, ts, "t.ts", false).unwrap();
+        let (fm, _f, specs) = measured(Lang::Ts, ts, "t.ts", false);
         // dep_count is every import as written - the number the dashboard badges.
         assert_eq!(fm.dep_count, 2);
         // Order is not part of the contract: the walk is a stack-based DFS and the
@@ -2871,7 +3182,7 @@ pub fn sub(a: i32, b: i32) -> i32 {
         // is 243 inline references against 72 `use` lines, so counting only `use`
         // understated PHP coupling by 3-4x (40 edges instead of 138).
         let php = "<?php\nnamespace Tina4;\nfunction boot() {\n    \\Tina4\\DotEnv::load();\n    $d = \\Tina4\\Database::create('x');\n    return \\Tina4\\Database::create('y');\n}\n";
-        let (fm, _f, specs) = analyze_source(Lang::Php, php, "App.php", false).unwrap();
+        let (fm, _f, specs) = measured(Lang::Php, php, "App.php", false);
         assert!(specs.iter().any(|s| s.contains("DotEnv")), "got {specs:?}");
         assert!(specs.iter().any(|s| s.contains("Database")), "got {specs:?}");
 
@@ -2893,7 +3204,7 @@ pub fn sub(a: i32, b: i32) -> i32 {
         // namespace_use_clause. Matching only the declaration's direct children
         // silently found NOTHING, so PHP produced 0 edges over 138 real files.
         let php = "<?php\nnamespace Tina4;\nuse Tina4\\ORM;\nuse Tina4\\Database\\Database;\nrequire_once \"helpers.php\";\nfunction f($a) { return $a; }\n";
-        let (fm, _f, specs) = analyze_source(Lang::Php, php, "Frond.php", false).unwrap();
+        let (fm, _f, specs) = measured(Lang::Php, php, "Frond.php", false);
         let mut got = specs.clone();
         got.sort();
         assert_eq!(
@@ -3347,6 +3658,339 @@ impl Config {
         );
         let _ = fs::remove_dir_all(dir);
     }
+
+    // ---- Parse-health guard --------------------------------------------------
+    //
+    // tree-sitter always returns a tree, so a file it cannot parse still yields
+    // LOC, CC and MI - all confidently wrong, because the decision points inside
+    // an ERROR region are invisible to the walks that count them. Found via a
+    // Delphi grammar gap that put 51.5% of a real corpus inside ERROR regions,
+    // but it applies to every language the engine claims.
+
+    /// A real, multi-branch function per language. Long enough to have
+    /// decisions, functions and MI worth reporting, so "it still reports" means
+    /// something.
+    const HEALTHY: [(&str, &str, &str); 5] = [
+        (
+            "python", "ok.py",
+            "def classify(value, limit):\n    if value is None:\n        return 'none'\n    if value > limit:\n        return 'high'\n    elif value < 0:\n        return 'negative'\n    return 'ok'\n\n\ndef total(rows):\n    out = 0\n    for row in rows:\n        if row:\n            out += row\n    return out\n",
+        ),
+        (
+            "php", "ok.php",
+            "<?php\nfunction classify($value, $limit) {\n    if ($value === null) { return 'none'; }\n    if ($value > $limit) { return 'high'; }\n    elseif ($value < 0) { return 'negative'; }\n    return 'ok';\n}\n\nfunction total($rows) {\n    $out = 0;\n    foreach ($rows as $row) {\n        if ($row) { $out += $row; }\n    }\n    return $out;\n}\n",
+        ),
+        (
+            "ruby", "ok.rb",
+            "def classify(value, limit)\n  return 'none' if value.nil?\n  return 'high' if value > limit\n  return 'negative' if value < 0\n  'ok'\nend\n\ndef total(rows)\n  out = 0\n  rows.each do |row|\n    out += row if row\n  end\n  out\nend\n",
+        ),
+        (
+            "ts", "ok.ts",
+            "export function classify(value: number | null, limit: number): string {\n  if (value === null) { return 'none'; }\n  if (value > limit) { return 'high'; }\n  else if (value < 0) { return 'negative'; }\n  return 'ok';\n}\n\nexport function total(rows: number[]): number {\n  let out = 0;\n  for (const row of rows) {\n    if (row) { out += row; }\n  }\n  return out;\n}\n",
+        ),
+        (
+            "rust", "ok.rs",
+            "pub fn classify(value: Option<i32>, limit: i32) -> &'static str {\n    let Some(v) = value else { return \"none\" };\n    if v > limit {\n        \"high\"\n    } else if v < 0 {\n        \"negative\"\n    } else {\n        \"ok\"\n    }\n}\n\npub fn total(rows: &[i32]) -> i32 {\n    let mut out = 0;\n    for row in rows {\n        if *row != 0 {\n            out += row;\n        }\n    }\n    out\n}\n",
+        ),
+    ];
+
+    #[test]
+    fn healthy_real_source_parses_at_full_health_in_every_language() {
+        // The calibration behind MIN_PARSE_HEALTH, and the control for the
+        // refusal tests below: if this drifts, the floor is wrong, not the guard.
+        for (name, _file, src) in HEALTHY {
+            let lang = match name {
+                "python" => Lang::Python,
+                "php" => Lang::Php,
+                "ruby" => Lang::Ruby,
+                "ts" => Lang::Ts,
+                _ => Lang::Rust,
+            };
+            let (fm, _f, _s) = measured(lang, src, "t", false);
+            assert_eq!(fm.parse_health, 1.0, "{name}: clean source must parse at 1.0");
+            assert!(
+                fm.parse_health >= MIN_PARSE_HEALTH,
+                "{name}: healthy source must never be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_healthy_file_still_reports_full_metrics_in_every_language() {
+        // THE NEGATIVE CONTROL, and the reason the refusal tests mean anything.
+        // A guard that refused everything would pass every test above this one.
+        // So: drive the same five languages through the WHOLE scan and demand
+        // real numbers out the other side.
+        for (name, file, src) in HEALTHY {
+            let (report, dir) = scan_temp(&format!("healthy_{name}"), &[(file, src)]);
+            assert_eq!(
+                report.refused.len(),
+                0,
+                "{name}: healthy source must NOT be refused - {:?}",
+                report.refused.iter().map(|r| &r.reason).collect::<Vec<_>>()
+            );
+            assert_eq!(report.files.len(), 1, "{name}: healthy source must be measured");
+            let fm = &report.files[0];
+            assert_eq!(fm.parse_health, 1.0, "{name}: health");
+            assert_eq!(fm.functions, 2, "{name}: both functions must be found");
+            assert!(fm.loc >= 10, "{name}: LOC must be real, got {}", fm.loc);
+            assert!(fm.complexity >= 4, "{name}: CC must count the branches, got {}", fm.complexity);
+            assert!(
+                fm.maintainability > 0.0,
+                "{name}: MI must be reported, got {}",
+                fm.maintainability
+            );
+            assert!(
+                !report.offenders.iter().any(|o| o.kind == "unparsed"),
+                "{name}: healthy source must raise no `unparsed` offender"
+            );
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn a_badly_broken_file_is_refused_in_every_language() {
+        // Real garbage, not a mock: text that the real grammar genuinely cannot
+        // parse. Each is structurally broken from near the top so the ERROR
+        // region covers most of the file, which is exactly the Delphi shape.
+        let broken = [
+            ("python", "py", "def f(:\n  ??? not python at all ~~~\n  <<<>>>\n  ]]]}}}\n  def ((\n"),
+            ("php", "php", "<?php\nfunction ((( {{{ ]]] ???\n  &&& ||| >>>\n  class class class\n"),
+            ("ruby", "rb", "def f(\n  ??? ]]] }}}\n  end end end end\n  class class class\n"),
+            ("ts", "ts", "function ((( {{{ ]]]\n  ??? >>> <<<\n  class class class\n  ))) }}}\n"),
+            ("rust", "rs", "fn f( { ]]] ???\n  >>> <<< |||\n  struct struct struct\n  ))) }}}\n"),
+        ];
+        for (name, ext, src) in broken {
+            let (report, dir) = scan_temp(
+                &format!("broken_{name}"),
+                &[(&format!("bad.{ext}"), src)],
+            );
+            assert_eq!(
+                report.files.len(),
+                0,
+                "{name}: an unparseable file must NOT appear in file_metrics - \
+                 its numbers would poison every average"
+            );
+            assert_eq!(
+                report.refused.len(),
+                1,
+                "{name}: an unparseable file must be REFUSED, not silently skipped"
+            );
+            assert!(
+                report.refused[0].parse_health < MIN_PARSE_HEALTH,
+                "{name}: refused at health {}",
+                report.refused[0].parse_health
+            );
+            // Visible in the ranked list, not only in a section nobody reads.
+            assert!(
+                report.offenders.iter().any(|o| o.kind == "unparsed"
+                    && o.detail.contains("NOT MEASURED")),
+                "{name}: refusal must surface as an `unparsed` offender"
+            );
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn a_refused_file_does_not_drag_down_a_healthy_scan() {
+        // The reason refusal beats "report it anyway": one unreadable file must
+        // not move the numbers for the files that ARE readable.
+        let good = "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n";
+        let (solo, d1) = scan_temp("solo_ok", &[("good.rs", good)]);
+        let (mixed, d2) = scan_temp(
+            "mixed_ok",
+            &[("good.rs", good), ("bad.rs", "fn f( { ]]] ???\n  >>> <<< |||\n  struct struct struct\n  ))) }}}\n")],
+        );
+        assert_eq!(mixed.files.len(), 1, "only the healthy file is measured");
+        assert_eq!(mixed.refused.len(), 1);
+        assert_eq!(
+            solo.files[0].maintainability, mixed.files[0].maintainability,
+            "the healthy file's MI must be identical whether or not a broken \
+             file sat next to it"
+        );
+        let _ = fs::remove_dir_all(d1);
+        let _ = fs::remove_dir_all(d2);
+    }
+
+    #[test]
+    fn a_refused_file_contributes_no_duplication() {
+        // Shapes hashed out of a misparse are noise. Two identically-broken
+        // files would otherwise "duplicate" each other and invent a finding.
+        let junk = "fn f( { ]]] ???\n  >>> <<< |||\n  struct struct struct\n  ))) }}}\n  ??? ]]] {{{\n  <<< >>> |||\n  fn fn fn fn\n";
+        let (report, dir) = scan_temp("junk_dup", &[("a.rs", junk), ("b.rs", junk)]);
+        assert_eq!(report.refused.len(), 2, "both are rubble");
+        assert!(
+            report.clones.is_empty(),
+            "two unparseable files must not be reported as duplicates of each \
+             other: {:?}",
+            report.clones
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn generated_doxygen_output_is_not_scanned_as_source() {
+        // Scanning tina4delphi used to report metrics for seven Doxygen files
+        // and nothing else - a report entirely about code nobody wrote.
+        // Detected by Doxygen's own marker file, not by directory name, because
+        // `docs/` and `html/` are legitimate places for hand-written source.
+        let dir = std::env::temp_dir().join(format!("tina4_doxy_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let gen = dir.join("docs/html");
+        fs::create_dir_all(&gen).unwrap();
+        fs::write(gen.join("doxygen.css"), "body{}\n").unwrap();
+        fs::write(gen.join("search.js"), "function search(a){ if(a){return 1;} return 0; }\n").unwrap();
+        // A hand-written source file in a plain docs dir must STILL be scanned.
+        let real = dir.join("docs/examples");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("demo.js"), "function demo(a){ if(a){return 1;} return 0; }\n").unwrap();
+
+        let mut found = Vec::new();
+        walk_dir(&dir, &mut found);
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            !names.contains(&"search.js".to_string()),
+            "generated Doxygen JS must not be scanned as source: {names:?}"
+        );
+        assert!(
+            names.contains(&"demo.js".to_string()),
+            "a real source file under docs/ must STILL be scanned - the marker \
+             file is the signal, not the directory name: {names:?}"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_refusal_is_loud_enough_to_fail_a_ci_gate() {
+        // The whole point of refusing rather than skipping. A refused file has
+        // to reach `--fail-on warn`, or a scan that measured nothing can still
+        // exit 0 and read as green.
+        let (report, dir) = scan_temp(
+            "refusal_gate",
+            &[("bad.py", "def f(:\n  ??? not python at all ~~~\n  <<<>>>\n  ]]]}}}\n  def ((\n")],
+        );
+        let summary = build_summary(&report, report.offenders.len());
+        assert_eq!(summary.files_refused, 1, "the summary must count the refusal");
+        assert_eq!(summary.files_analyzed, 0);
+        let has_warn = report.offenders.iter().any(|o| o.severity == "warn");
+        let has_error = report.offenders.iter().any(|o| o.severity == "error");
+        assert!(has_warn, "a refusal must raise at least a warn");
+        assert_eq!(
+            compute_exit_code(Some("warn"), has_warn, has_error),
+            1,
+            "`--fail-on warn` must go red on a file the engine could not read"
+        );
+        // The other half, deliberately: refusal is a TOOLING gap, not a defect
+        // in the code being measured, so it must not newly break existing
+        // `--fail-on error` runs.
+        assert_eq!(
+            compute_exit_code(Some("error"), has_warn, has_error),
+            0,
+            "`--fail-on error` must stay green - a grammar gap is not the \
+             author's error"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    // ---- Recursion depth (a PRE-EXISTING crash, not a duplication one) --------
+    //
+    // Five walks recurse per AST level. Reproduced against the 58f7f73 release
+    // binary on macOS 26.5.2 arm64: a 60,000-term left-associative Python
+    // expression, one term per line, aborts the process with
+    // `fatal runtime error: stack overflow`, exit 134, taking the entire scan
+    // with it. `looks_minified` does not fire - the file is 10 bytes per line
+    // against its 200 threshold.
+
+    /// A left-associative expression `terms` deep, one term per line, so
+    /// `looks_minified` cannot short-circuit the case under test.
+    fn deep_expression(terms: usize) -> String {
+        let mut src = String::from("x = (a0\n");
+        for i in 1..terms {
+            src.push_str(&format!("  + a{i}\n"));
+        }
+        src.push_str(")\n");
+        src
+    }
+
+    #[test]
+    fn a_pathologically_deep_file_is_refused_instead_of_aborting_the_scan() {
+        let src = deep_expression(MAX_AST_DEPTH + 200);
+        assert!(
+            !looks_minified(&src),
+            "the fixture must reach the guard, not be filtered as a bundle"
+        );
+        let good = "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n";
+        let (report, dir) = scan_temp("deep", &[("deep.py", &src), ("ok.rs", good)]);
+        // Reaching this line at all is most of the assertion: the pre-change
+        // binary never returns from here.
+        assert_eq!(report.refused.len(), 1, "the deep file must be refused");
+        assert!(
+            report.refused[0].reason.contains("nests deeper"),
+            "the reason must name the real cause: {}",
+            report.refused[0].reason
+        );
+        assert_eq!(
+            report.files.len(),
+            1,
+            "the REST of the scan must survive - one bad file must not cost the \
+             whole report"
+        );
+        assert_eq!(report.files[0].path, "ok.rs");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_deeply_nested_but_survivable_file_is_still_measured() {
+        // The negative control for the depth guard. A limit that refused
+        // anything nested at all would pass the test above and be useless.
+        // 600 is 7x deeper than the deepest real file in the whole corpus
+        // (79, src/agent.rs) and still comfortably measured.
+        let src = deep_expression(600);
+        let (report, dir) = scan_temp("deep_ok", &[("deepish.py", &src)]);
+        assert_eq!(
+            report.refused.len(),
+            0,
+            "600 levels is under the {MAX_AST_DEPTH} limit and must be measured: {:?}",
+            report.refused.iter().map(|r| &r.reason).collect::<Vec<_>>()
+        );
+        assert_eq!(report.files.len(), 1);
+        assert!(report.files[0].loc > 0);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn depth_guard_boundary_is_exact() {
+        // Pinned on a REAL parsed tree, both sides, so the guard cannot drift
+        // off by one in either direction.
+        let mut parser = Parser::new();
+        parser.set_language(&Lang::Python.tree_sitter_language()).unwrap();
+        let tree = parser.parse(deep_expression(50), None).unwrap();
+        let root = tree.root_node();
+        // Measure the tree's true depth iteratively, then bracket it.
+        let mut depth = 0usize;
+        let mut stack = vec![(root, 0usize)];
+        while let Some((node, d)) = stack.pop() {
+            if d > depth {
+                depth = d;
+            }
+            let mut c = node.walk();
+            for child in node.children(&mut c) {
+                stack.push((child, d + 1));
+            }
+        }
+        assert!(depth > 10, "the fixture must actually be deep, got {depth}");
+        assert!(!depth_exceeds(root, depth), "depth {depth} does not EXCEED {depth}");
+        assert!(
+            depth_exceeds(root, depth - 1),
+            "depth {depth} does exceed {}",
+            depth - 1
+        );
+    }
+
+
+
 
     // ---- The parity lock against the REAL Python master reference ------------
 

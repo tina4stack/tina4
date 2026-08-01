@@ -1440,12 +1440,26 @@ pub(crate) fn analyze_source(
 // by hash - rather than the token-window scan PMD's CPD uses, because the engine
 // already has a real parse and a shape hash is immune to reformatting.
 //
-// WHAT IT DETECTS. Hashing the sequence of node KINDS with all identifier and
-// literal TEXT excluded finds Type-1 (exact) and Type-2 (renamed) clones in the
-// Roy/Cordy taxonomy. Two blocks that differ only in variable names, literals or
-// whitespace collide, which is the point. Type-3 (gapped) and Type-4 (semantic)
-// clones are NOT detected; that needs sub-tree differencing, and a report that
-// silently claimed to cover them would be worse than one with a stated ceiling.
+// WHAT IT DETECTS, measured against tree-sitter 0.26.11 rather than asserted.
+// Hashing the sequence of node KINDS with all identifier and literal TEXT
+// excluded gives TYPE-1 PLUS CONSISTENT RENAMING: two blocks that differ only in
+// their variable names, in same-kind literal values, or in whitespace and
+// indentation collide, which is the point.
+//
+// It is NOT full Type-2 in the Roy/Cordy sense, and the doc used to say it was.
+// Their Type-2 is verbatim "identical fragments except for variations in
+// identifiers, literals, types, layout and COMMENTS", and comments are the one
+// it fails: comment nodes are hashed like any other, so adding a comment changes
+// the shape. Measured MISS in all five languages - Python `#` and docstring,
+// Rust `//` and `///`, PHP `/** */`, TS jsdoc, Ruby `#`. Locked by
+// `comments_are_hashed_so_this_is_not_full_type_2` so the claim cannot drift
+// back. Fixing it is a real option (skip `is_extra()` nodes) but it changes
+// which clones the engine reports, which is a `--fail-on` contract change and
+// belongs in its own discussed change - not smuggled in as a doc correction.
+//
+// Type-3 (gapped) and Type-4 (semantic) clones are NOT detected at all; that
+// needs sub-tree differencing, and a report that silently claimed to cover them
+// would be worse than one with a stated ceiling.
 //
 // Anonymous token kinds ARE hashed, so `a + b` and `x - y` do not collide even
 // though both are a binary expression over two identifiers. Excluding operators
@@ -1532,20 +1546,36 @@ fn shape_hash_of(kind: &str, child_hashes: &[u64]) -> u64 {
 }
 
 /// Walk one file's tree, emitting a fragment for every sub-tree big enough to be
-/// worth reporting. Returns this node's (hash, node_count).
+/// worth reporting. Returns this node's (hash, node_count, parsed_cleanly).
+///
+/// `parsed_cleanly` is false for any sub-tree containing an ERROR or MISSING
+/// node, and such a sub-tree NEVER becomes a fragment. A shape hashed out of a
+/// misparse describes the parser's recovery, not the author's code, so two files
+/// whose only similarity is being broken would otherwise be reported as
+/// duplicates of each other. Measured on tree-sitter 0.26.11: seven lines of
+/// pure Python garbage fold into a 69-node ERROR node spanning 7 lines, clearing
+/// both gates below on its own.
+///
+/// This is belt AND braces with the parse-health refusal in `analyze_source`,
+/// deliberately. The refusal drops whole files below a THRESHOLD; this makes the
+/// guarantee unconditional, so it still holds for the error regions inside a
+/// file healthy enough to be reported, and it does not quietly weaken if that
+/// threshold is ever tuned.
 fn collect_fragments(
     node: Node,
     file: u32,
     out: &mut Vec<CloneFragment>,
-) -> (u64, u32) {
+) -> (u64, u32, bool) {
     let mut child_hashes: Vec<u64> = Vec::new();
     let mut count: u32 = 1;
+    let mut parsed_cleanly = !node.is_error() && !node.is_missing();
     let mut c = node.walk();
     if c.goto_first_child() {
         loop {
-            let (h, n) = collect_fragments(c.node(), file, out);
+            let (h, n, clean) = collect_fragments(c.node(), file, out);
             child_hashes.push(h);
             count += n;
+            parsed_cleanly &= clean;
             if !c.goto_next_sibling() {
                 break;
             }
@@ -1557,13 +1587,14 @@ fn collect_fragments(
     // Only NAMED nodes are candidates: an anonymous token is punctuation and can
     // never be a meaningful duplicate on its own, though its kind still shapes
     // the hash of the parent that contains it.
-    if node.is_named()
+    if parsed_cleanly
+        && node.is_named()
         && count >= MIN_CLONE_NODES
         && end_line.saturating_sub(start_line) + 1 >= MIN_CLONE_LINES
     {
         out.push(CloneFragment { hash, file, start_line, end_line, nodes: count });
     }
-    (hash, count)
+    (hash, count, parsed_cleanly)
 }
 
 /// A set of fragments that share a shape.
@@ -3989,8 +4020,162 @@ impl Config {
         );
     }
 
+    // ---- Duplication must never be built out of a misparse -------------------
 
+    #[test]
+    fn an_error_region_never_becomes_a_clone_fragment() {
+        // Seven lines of garbage that tree-sitter folds into ONE ERROR node.
+        // Measured on tree-sitter 0.26.11: that node is 69 nodes over 7 lines,
+        // so it clears MIN_CLONE_NODES (60) and MIN_CLONE_LINES (6) on its own
+        // and the pre-change `collect_fragments` emitted it as a candidate.
+        let junk = "class ][ oops @@@\n  %%%% ????\n  ]]] [[[ }}}\n  &&& ||| ^^^\n  ~~~ !!! @@@\n  ((( ))) {{{\n  ,,, ... ;;;\n";
+        let mut parser = Parser::new();
+        parser.set_language(&Lang::Python.tree_sitter_language()).unwrap();
+        let tree = parser.parse(junk, None).unwrap();
 
+        // First prove the fixture is still the hard case it was written to be:
+        // an ERROR node that WOULD qualify if nothing stopped it.
+        let mut qualifying_error = false;
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            let mut c = node.walk();
+            let children: Vec<Node> = node.children(&mut c).collect();
+            if node.is_error() {
+                let mut count = 0u32;
+                let mut inner = vec![node];
+                while let Some(n) = inner.pop() {
+                    count += 1;
+                    let mut ic = n.walk();
+                    for ch in n.children(&mut ic) {
+                        inner.push(ch);
+                    }
+                }
+                let lines = node.end_position().row - node.start_position().row + 1;
+                if count >= MIN_CLONE_NODES && lines >= MIN_CLONE_LINES {
+                    qualifying_error = true;
+                }
+            }
+            stack.extend(children);
+        }
+        assert!(
+            qualifying_error,
+            "fixture no longer contains an ERROR node big enough to clear both \
+             clone gates - it is not testing anything"
+        );
+
+        let mut fragments: Vec<CloneFragment> = Vec::new();
+        let (_hash, _count, clean) = collect_fragments(tree.root_node(), 0, &mut fragments);
+        assert!(!clean, "a tree with an ERROR node is not clean");
+        assert!(
+            fragments.is_empty(),
+            "no fragment may be hashed out of a parse error: {fragments:?}"
+        );
+    }
+
+    #[test]
+    fn two_differently_broken_files_are_never_duplicates_of_each_other() {
+        // The failure this guards against, stated plainly: being unparseable is
+        // not a similarity. Two files whose only common property is that the
+        // grammar gave up on them must produce no finding at all.
+        let a = "def f(:\n  ??? not python ~~~\n  <<<>>>\n  ]]]}}}\n  def ((\n  class ][\n  @@@ %%%\n";
+        let b = "class ][ oops @@@\n  %%%% ????\n  ]]] [[[ }}}\n  &&& ||| ^^^\n  ~~~ !!! @@@\n  ((( ))) {{{\n  ,,, ... ;;;\n";
+        let (report, dir) = scan_temp("two_broken", &[("a.py", a), ("b.py", b)]);
+        assert_eq!(report.refused.len(), 2, "both are rubble");
+        assert!(
+            report.clones.is_empty(),
+            "two DIFFERENT unparseable files must not be reported as duplicates: {:?}",
+            report.clones
+        );
+        assert!(
+            !report.offenders.iter().any(|o| o.kind == "duplication"),
+            "no duplication offender may come out of two misparses"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn comments_are_hashed_so_this_is_not_full_type_2() {
+        // Locks the HONEST label on the detector. Roy/Cordy Type-II tolerates
+        // comments; this implementation does not, in any of the five languages.
+        // Measured, not assumed - and pinned here so the doc comment above
+        // `collect_fragments` cannot drift back to claiming Type-2.
+        //
+        // The positive half is the same test: identifiers and same-kind literals
+        // ARE normalised away, which is what makes the detector worth having.
+        fn shape(lang: Lang, src: &str) -> u64 {
+            let mut parser = Parser::new();
+            parser.set_language(&lang.tree_sitter_language()).unwrap();
+            let tree = parser.parse(src, None).unwrap();
+            let mut out = Vec::new();
+            collect_fragments(tree.root_node(), 0, &mut out).0
+        }
+        // Renaming is invisible - the property the whole metric rests on.
+        assert_eq!(
+            shape(Lang::Python, "def a(x):\n    return x + 1\n"),
+            shape(Lang::Python, "def b(y):\n    return y + 1\n"),
+            "an identifier rename must NOT change the shape"
+        );
+        // A same-kind literal change is invisible too.
+        assert_eq!(
+            shape(Lang::Python, "def a(x):\n    return x + 1\n"),
+            shape(Lang::Python, "def a(x):\n    return x + 2\n"),
+            "a same-kind literal change must NOT change the shape"
+        );
+        // Layout is invisible - whitespace never becomes a node.
+        assert_eq!(
+            shape(Lang::Python, "def a(x):\n    return x + 1\n"),
+            shape(Lang::Python, "def a(x):\n        return  x  +  1\n"),
+            "reformatting must NOT change the shape"
+        );
+        // An operator IS significant - the anonymous token is hashed.
+        assert_ne!(
+            shape(Lang::Python, "def a(x):\n    return x + 1\n"),
+            shape(Lang::Python, "def a(x):\n    return x - 1\n"),
+            "`+` and `-` must not collide"
+        );
+        // And the documented ceiling: comments are NOT normalised away.
+        for (name, lang, plain, commented) in [
+            (
+                "python", Lang::Python,
+                "def a(x):\n    return x + 1\n",
+                "def a(x):\n    # explain\n    return x + 1\n",
+            ),
+            (
+                "python-docstring", Lang::Python,
+                "def a(x):\n    return x + 1\n",
+                "def a(x):\n    \"doc\"\n    return x + 1\n",
+            ),
+            (
+                "php", Lang::Php,
+                "<?php\nfunction a($x) { return $x + 1; }\n",
+                "<?php\n/** d */\nfunction a($x) { return $x + 1; }\n",
+            ),
+            (
+                "ruby", Lang::Ruby,
+                "def a(x)\n  x + 1\nend\n",
+                "# c\ndef a(x)\n  x + 1\nend\n",
+            ),
+            (
+                "ts", Lang::Ts,
+                "function a(x: number) { return x + 1; }\n",
+                "// c\nfunction a(x: number) { return x + 1; }\n",
+            ),
+            (
+                "rust", Lang::Rust,
+                "fn a(x: i32) -> i32 { x + 1 }\n",
+                "/// doc\nfn a(x: i32) -> i32 { x + 1 }\n",
+            ),
+        ] {
+            assert_ne!(
+                shape(lang, plain),
+                shape(lang, commented),
+                "{name}: comments ARE hashed today. If this now matches, the \
+                 engine has become comment-blind and the doc comment on the \
+                 duplication section must be updated to say so - it is a \
+                 change in which clones get reported, not a free win."
+            );
+        }
+    }
 
     // ---- The parity lock against the REAL Python master reference ------------
 

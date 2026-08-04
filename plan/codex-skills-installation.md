@@ -38,7 +38,8 @@ Make the `tina4` Rust client install and verify the complete Tina4 skill set for
 - [x] Build the optimized Rust binary and verify crate packaging on Windows.
 - [x] Run `tina4-documentation` `docs:build` with `tina4press` available.
 - [x] Bump the client from the already-tagged `3.8.64` to `3.8.65` on `feature/release3.8.65`.
-- [ ] Commit the client and documentation changes, create a signed `v3.8.65` tag, and publish the release.
+- [x] Commit the client (`458e8e0`) and documentation (`cb27831`) changes on their `feature/release3.8.65` branches.
+- [ ] Create a GitHub-verified signed `v3.8.65` tag and publish the release.
 - [ ] Regenerate and verify release `SHA256SUMS` after the final Windows binary is Authenticode-signed.
 
 ## Safety requirements

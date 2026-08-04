@@ -97,6 +97,20 @@ tina4 serve
 | `tina4 i-want-to-stop-using-v2-and-switch-to-v3` | Migrate a v2 project to the v3 structure |
 | `tina4 update` | Self-update the tina4 binary and remove old v2 CLI binaries |
 
+### AI skills
+
+Choose the coding tool that should receive the Tina4 skills; the installer never writes both locations unless you explicitly select `all`.
+
+```bash
+# Claude Code / Claude Desktop
+curl -fsSL https://tina4.com/install-skills.sh | TINA4_SKILLS_TARGET=claude sh
+
+# Codex CLI, IDE extension, or desktop app
+curl -fsSL https://tina4.com/install-skills.sh | TINA4_SKILLS_TARGET=codex sh
+```
+
+On Windows, set `$env:TINA4_SKILLS_TARGET` to `claude` or `codex` before running `install-skills.ps1`. `tina4 setup` offers the same choice and writes `AGENTS.md` for Codex projects.
+
 ## How it works
 
 1. **Language detection**: scans for `pyproject.toml`, `composer.json`, `Gemfile`, or `package.json` to determine the project language

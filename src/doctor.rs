@@ -8,7 +8,8 @@ use std::process::Command;
 /// refresh command. Fetch-source and refresh-command are the SAME URL on purpose,
 /// so what doctor reports as "latest" is exactly what a refresh would install.
 const SKILLS_INSTALL_URL: &str = "https://tina4.com/install-skills.sh";
-const SKILLS_INSTALL_CMD: &str = "curl -fsSL https://tina4.com/install-skills.sh | sh";
+const SKILLS_INSTALL_CMD: &str = "curl -fsSL https://tina4.com/install-skills.sh | TINA4_SKILLS_TARGET=claude sh";
+const CODEX_SKILLS_INSTALL_CMD: &str = "curl -fsSL https://tina4.com/install-skills.sh | TINA4_SKILLS_TARGET=codex sh";
 
 struct ToolCheck {
     name: &'static str,
@@ -178,6 +179,7 @@ pub fn run() {
 
     // --- Tina4 AI skills (global ~/.claude/skills) ---
     check_skills_currency();
+    check_codex_skills_currency();
 
     // --- macOS build tools (Xcode Command Line Tools) ---
     // Homebrew, git, and the PHP/Ruby/Node runtimes need these; Python (uv) does
@@ -489,6 +491,65 @@ fn check_skills_currency() {
     println!(
         "      {}",
         "refresh writes ~/.claude/skills only - it never changes a project's CLAUDE.md".dimmed()
+    );
+}
+
+/// Read-only currency report for Codex personal skills in ~/.agents/skills.
+fn check_codex_skills_currency() {
+    println!();
+    println!("  {}", "Tina4 AI skills (Codex)".bold());
+    println!("  {}", "-".repeat(70));
+
+    let skills_dir = match home_dir() {
+        Some(h) => h.join(".agents").join("skills"),
+        None => {
+            println!("  {} could not resolve home directory", icon_warn().yellow());
+            return;
+        }
+    };
+    let known = [
+        "tina4-developer-python", "tina4-developer-php", "tina4-developer-ruby",
+        "tina4-developer-nodejs", "tina4-js", "tina4-maintainer",
+    ];
+    let present = if skills_dir.is_dir() {
+        known.iter().filter(|s| skills_dir.join(s).join("SKILL.md").is_file()).count()
+    } else {
+        0
+    };
+
+    match classify_skills(skills_dir.is_dir(), read_installed_skills_ref(&skills_dir), fetch_latest_skills_ref()) {
+        SkillsStatus::NotInstalled => println!(
+            "  {} skills not installed  {}  {}",
+            icon_fail().red(), "->".dimmed(), format!("run: {}", CODEX_SKILLS_INSTALL_CMD).yellow()
+        ),
+        SkillsStatus::Current(reference) => println!(
+            "  {} {}",
+            icon_ok().green(), format!("current - ref {} ({} skills installed)", reference, present).cyan()
+        ),
+        SkillsStatus::Stale { installed, latest } => {
+            println!(
+                "  {} {}",
+                icon_warn().yellow(),
+                format!("update available - installed {}, latest {}", installed, latest).yellow()
+            );
+            println!("      {} {}", "refresh:".dimmed(), CODEX_SKILLS_INSTALL_CMD.yellow());
+        }
+        SkillsStatus::InstalledUnknownLatest(reference) => println!(
+            "  {} {}  {}",
+            icon_info().blue(), format!("ref {} ({} skills)", reference, present).cyan(),
+            "could not check latest (offline)".dimmed()
+        ),
+        SkillsStatus::UnknownInstalled(latest) => {
+            let tail = latest.map_or_else(
+                || "version not recorded - re-run the Codex installer".to_string(),
+                |reference| format!("version not recorded (latest is {}) - re-run the Codex installer", reference),
+            );
+            println!("  {} {} ({} skills present)", icon_info().blue(), tail.yellow(), present);
+        }
+    }
+    println!(
+        "      {}",
+        "refresh writes ~/.agents/skills only - it never changes a project's AGENTS.md".dimmed()
     );
 }
 

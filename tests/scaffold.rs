@@ -131,3 +131,73 @@ fn init_python_scaffolds_runnable_project() {
     assert!(proj.join(".env").is_file());
     let _ = fs::remove_dir_all(&base);
 }
+
+#[test]
+#[ignore = "needs npm + network; run with: cargo test -- --ignored"]
+fn init_js_scaffolds_a_project_that_tests_and_audits_clean() {
+    // Regression gate for four defects the tina4js scaffold shipped:
+    //
+    //   1. package.json declared `"test": "vitest run"` with no vitest
+    //      dependency, so `npm test` died with "vitest: command not found"
+    //      on every freshly created project.
+    //   2. No test file and no tests/ directory, so once vitest was installed
+    //      `npm test` still exited 1 with "No test files found".
+    //   3. vite was pinned to ^5.4.0, which resolves to a version depending on
+    //      esbuild <=0.24.2 (GHSA-67mh-4wv8-2f99), so `npm audit` reported two
+    //      advisories on a brand new project.
+    //   4. vite.config.ts used __dirname, which Vite's native config loader
+    //      does not define and which becomes the default in a future major.
+    //
+    // Asserts on generated content rather than on npm's output, so the test
+    // stays fast and does not depend on the advisory database of the day.
+    let base = unique_dir("init-js");
+    let out = Command::new(BIN)
+        .args(["init", "js", "app"])
+        .current_dir(&base)
+        .env("TINA4_INIT_NO_SERVE", "1")
+        .output()
+        .expect("run tina4 init js");
+    assert!(out.status.success(), "init js failed: {}", String::from_utf8_lossy(&out.stderr));
+    let proj = base.join("app");
+
+    let package_json = fs::read_to_string(proj.join("package.json")).expect("package.json");
+    assert!(
+        package_json.contains("\"vitest\""),
+        "package.json declares a vitest test script but does not depend on vitest:\n{package_json}"
+    );
+    assert!(
+        package_json.contains("\"jsdom\""),
+        "tina4js touches HTMLElement on import, so tests need a DOM environment:\n{package_json}"
+    );
+    assert!(
+        !package_json.contains("\"vite\": \"^5"),
+        "vite ^5 pulls esbuild <=0.24.2 (GHSA-67mh-4wv8-2f99):\n{package_json}"
+    );
+
+    // The example test must exist AND be discoverable by vitest's default glob.
+    let example = proj.join("tests/signals.test.ts");
+    assert!(example.is_file(), "no example test, so `npm test` exits 1 on a new project");
+    let example_body = fs::read_to_string(&example).unwrap();
+    assert!(
+        example_body.contains("expect("),
+        "the example test must actually assert something:\n{example_body}"
+    );
+
+    let vite_config = fs::read_to_string(proj.join("vite.config.ts")).expect("vite.config.ts");
+    // Match the CALL, not the word: the template explains the change in a
+    // comment that necessarily mentions __dirname.
+    assert!(
+        !vite_config.contains("resolve(__dirname"),
+        "__dirname is undefined under Vite's native config loader:\n{vite_config}"
+    );
+    assert!(
+        vite_config.contains("resolve(import.meta.dirname"),
+        "the alias must resolve from import.meta.dirname:\n{vite_config}"
+    );
+    assert!(
+        vite_config.contains("environment: 'jsdom'"),
+        "without a DOM environment every test file fails to import tina4js:\n{vite_config}"
+    );
+
+    let _ = fs::remove_dir_all(&base);
+}

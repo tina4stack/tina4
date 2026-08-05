@@ -1,6 +1,6 @@
 [package]
 name = "tina4"
-version = "3.8.65"
+version = "3.8.66"
 edition = "2021"
 description = "Tina4 — Unified CLI for Python, PHP, Ruby, and Node.js frameworks"
 license = "MIT"
@@ -37,6 +37,9 @@ tree-sitter-python = "0.25"
 tree-sitter-php = "0.24"
 tree-sitter-ruby = "0.23"
 tree-sitter-typescript = "0.23"
+# Rust itself. Until this landed the metrics engine could not measure its own
+# implementation language — `tina4 metrics` on this repo saw zero files.
+tree-sitter-rust = "0.24"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -40,13 +40,29 @@ tina4 migrate                    Run database migrations
 tina4 test                       Run tests
 tina4 routes                     List registered routes
 tina4 metrics                    Report code-health top offenders (complexity, large files,
-                                 low maintainability, untested). Flags: --top N, --json,
+                                 low maintainability, untested, duplication). Flags: --top N, --json,
                                  --fail-on warn|error (CI gate), --path DIR|FILE. NATIVE +
                                  language-agnostic (ADR-0002, src/metrics.rs): scans SOURCE
-                                 directly for Python/PHP/Ruby/TypeScript+JS via tree-sitter,
+                                 directly for Python/PHP/Ruby/TypeScript+JS/Rust via tree-sitter,
                                  with NO Tina4 project and NO running framework required.
                                  Formula parity with the Python master (metrics.py) — CC/MI/
                                  thresholds identical, locked by a real parity test.
+                                 DRY: cross-file duplicate detection via AST-shape hashing
+                                 (Baxter-style), language-agnostic so it covers all five
+                                 languages through one code path. Finds Type-1 (exact)
+                                 clones plus consistent identifier and same-kind literal
+                                 renaming. NOT full Type-2: comments are hashed, so adding
+                                 a comment breaks the match (measured in all five
+                                 languages, locked by a test). Type-3/4 are NOT detected.
+                                 PARSE-HEALTH GUARD: a file the engine cannot read is
+                                 REFUSED, never reported and never silently dropped. Two
+                                 reasons trigger it, both per file: under 95% of lines
+                                 parsing cleanly, or an AST nesting deeper than 800 levels
+                                 (which used to abort the whole scan with a stack
+                                 overflow). A refused file is excluded from every average,
+                                 listed under `unparsed` in --json, counted as
+                                 `files_refused` in the summary, and raised as a `warn`
+                                 offender so --fail-on warn goes red on it.
 tina4 scss                       Compile SCSS files
 tina4 ai                         Detect AI tools and install context
 tina4 update                     Self-update the binary
@@ -181,11 +197,18 @@ binary via `which::which("claude")` and — because on Windows `claude` is a
 - grass: SCSS compiler
 - which: Binary lookup
 - ctrlc: Signal handling
-- tree-sitter + tree-sitter-python / -php / -ruby / -typescript: real per-language
-  AST parsing for the native `tina4 metrics` engine (ADR-0002, src/metrics.rs).
-  These grammar crates add ~4.9MB to the release binary (the C parsers); accepted
-  for accurate cross-language complexity/MI. Core frameworks stay zero-dep — this
-  is the Rust CLI, and Carbonah already sets the tree-sitter precedent in-house.
+- tree-sitter + tree-sitter-python / -php / -ruby / -typescript / -rust: real
+  per-language AST parsing for the native `tina4 metrics` engine (ADR-0002,
+  src/metrics.rs). These grammar crates add ~6MB to the release binary (the C
+  parsers); accepted for accurate cross-language complexity/MI. Core frameworks
+  stay zero-dep — this is the Rust CLI, and Carbonah already sets the tree-sitter
+  precedent in-house.
+  `-rust` was added so the engine can measure its own implementation language;
+  it cost +1.07MB (8.68MB -> 9.75MB, measured on macOS arm64, release profile).
+  There is deliberately NO Pascal/Delphi grammar: the only published crate
+  (tree-sitter-pascal 0.10.2) cannot parse Delphi 10.3+ inline loop variables and
+  leaves 51.5% of the real tina4delphi corpus unparsed, so `.pas` is not claimed
+  rather than reported wrong.
 
 ## Links
 

@@ -2,10 +2,19 @@
 //
 // Scans SOURCE directly — per file LOC, cyclomatic complexity (McCabe),
 // maintainability index (Radon/Microsoft), efferent coupling, function count —
-// for Python / PHP / Ruby / TypeScript+JS, with NO Tina4 project and NO running
-// framework required. Replaces the four per-framework metrics modules and, for
-// the first time, covers the frontend (tina4-js .ts) and arbitrary non-framework
-// code.
+// for Python / PHP / Ruby / TypeScript+JS / Rust, with NO Tina4 project and NO
+// running framework required. Replaces the four per-framework metrics modules
+// and, for the first time, covers the frontend (tina4-js .ts) and arbitrary
+// non-framework code.
+//
+// Rust was added last and closed a real blind spot: until then the engine could
+// not measure its OWN implementation language, so `tina4 metrics` pointed at
+// this repo found zero files and the CLI was the one Tina4 codebase nobody could
+// audit.
+//
+// Pascal / Delphi is deliberately ABSENT. The only published grammar crate
+// cannot parse Delphi 10.3+ inline loop variables, which puts 51.5% of the real
+// tina4delphi corpus inside a parse-error region; see `pascal_is_not_claimed`.
 //
 // tina4: ADR-0002 — formulas + thresholds mirror the Python master reference
 // tina4-python/tina4_python/dev_admin/metrics.py EXACTLY, so the existing
@@ -27,6 +36,7 @@ pub(crate) enum Lang {
     Php,
     Ruby,
     Ts, // TypeScript + TSX + JavaScript (parsed with the tsx grammar)
+    Rust,
 }
 
 impl Lang {
@@ -36,6 +46,7 @@ impl Lang {
             "php" => Some(Lang::Php),
             "rb" => Some(Lang::Ruby),
             "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "mts" | "cts" => Some(Lang::Ts),
+            "rs" => Some(Lang::Rust),
             _ => None,
         }
     }
@@ -46,6 +57,7 @@ impl Lang {
             Lang::Php => tree_sitter_php::LANGUAGE_PHP.into(),
             Lang::Ruby => tree_sitter_ruby::LANGUAGE.into(),
             Lang::Ts => tree_sitter_typescript::LANGUAGE_TSX.into(),
+            Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
         }
     }
 }
@@ -97,6 +109,11 @@ pub(crate) struct FileMetrics {
     pub coupling_efferent: usize,
     pub coupling_afferent: usize,
     pub instability: f64, // rounded to 3 dp
+
+    /// Fraction of lines that parsed cleanly (1.0 = perfect). Serialised so a
+    /// consumer can see WHY a file was refused, and so a file that is close to
+    /// the floor is visible before it drops below it.
+    pub parse_health: f64, // rounded to 3 dp
 }
 
 // ── Rounding + MI formula (mirror metrics.py exactly) ─────────────────────────
@@ -131,7 +148,18 @@ fn is_code_line(line: &str, lang: Lang) -> bool {
     match lang {
         Lang::Python | Lang::Ruby => !t.starts_with('#'),
         Lang::Php => !(t.starts_with("//") || t.starts_with('#') || t.starts_with("/*") || t.starts_with('*')),
-        Lang::Ts => !(t.starts_with("//") || t.starts_with("/*") || t.starts_with('*')),
+        // Rust shares TypeScript's comment shapes exactly: `//` also covers the
+        // doc forms `///` and `//!`, `/*` opens a block (which nests in Rust, but
+        // that only matters to the parser, not to a line-prefix count), and a
+        // leading `*` is the block-continuation convention.
+        //
+        // Known, deliberate limitation, identical to the one PHP and TS already
+        // carry: a line that STARTS with a dereference (`*counter = 0;`) is read
+        // as a comment continuation. Rust hits this more often than TS does, but
+        // the point of ADR-0002 is one definition of LOC for every language, so
+        // Rust does not get a private rule. It undercounts by a handful of lines
+        // in the worst file, never enough to move an MI band.
+        Lang::Ts | Lang::Rust => !(t.starts_with("//") || t.starts_with("/*") || t.starts_with('*')),
     }
 }
 
@@ -346,7 +374,32 @@ const GENERIC_OPERATOR_TOKENS: &[&str] = &[
     "^=", "<<=", ">>=", ".=", "??", "?", "=~", "->", "=>", "::",
 ];
 
-fn generic_is_operand_leaf(kind: &str) -> bool {
+/// Rust's leaf kinds carry names no other grammar in the set uses, EXCEPT
+/// `primitive_type`, which tree-sitter-php also emits (for `int`/`string` type
+/// hints). That collision is why this list is gated on the language instead of
+/// being merged into the shared one: folding it in would silently have moved
+/// every PHP file's Halstead volume, and therefore its MI, with nothing in the
+/// suite to catch it (the parity lock covers Python only). Gating makes
+/// "the other four are untouched" true by construction rather than by luck.
+fn rust_is_operand_leaf(kind: &str) -> bool {
+    matches!(
+        kind,
+        "integer_literal"
+            | "float_literal"
+            | "boolean_literal"
+            | "char_literal"
+            | "primitive_type"
+            | "field_identifier"
+            | "self"
+            | "super"
+            | "crate"
+    )
+}
+
+fn generic_is_operand_leaf(kind: &str, lang: Lang) -> bool {
+    if lang == Lang::Rust && rust_is_operand_leaf(kind) {
+        return true;
+    }
     matches!(
         kind,
         "identifier"
@@ -372,10 +425,16 @@ fn generic_is_operand_leaf(kind: &str) -> bool {
     )
 }
 
-fn generic_halstead(node: Node, src: &[u8], operators: &mut Halstead, operands: &mut Halstead) {
+fn generic_halstead(
+    node: Node,
+    src: &[u8],
+    lang: Lang,
+    operators: &mut Halstead,
+    operands: &mut Halstead,
+) {
     let kind = node.kind();
     if node.is_named() {
-        if node.named_child_count() == 0 && generic_is_operand_leaf(kind) {
+        if node.named_child_count() == 0 && generic_is_operand_leaf(kind, lang) {
             operands.add(node.utf8_text(src).unwrap_or("").chars().take(50).collect::<String>());
         }
     } else if GENERIC_OPERATOR_TOKENS.contains(&kind) {
@@ -384,7 +443,7 @@ fn generic_halstead(node: Node, src: &[u8], operators: &mut Halstead, operands: 
     let mut c = node.walk();
     if c.goto_first_child() {
         loop {
-            generic_halstead(c.node(), src, operators, operands);
+            generic_halstead(c.node(), src, lang, operators, operands);
             if !c.goto_next_sibling() {
                 break;
             }
@@ -396,10 +455,138 @@ fn file_volume(root: Node, src: &[u8], lang: Lang) -> f64 {
     let mut operators = Halstead::default();
     let mut operands = Halstead::default();
     match lang {
+        // Python alone has a cross-language parity target (metrics.py), so it
+        // alone gets the ast-exact implementation. Rust joins PHP / Ruby / TS on
+        // the generic walk: there is no second Rust implementation to agree with,
+        // and the generic operator/operand split is the same McCabe-adjacent
+        // definition the other three already feed into MI.
         Lang::Python => py_halstead(root, None, None, None, src, &mut operators, &mut operands),
-        _ => generic_halstead(root, src, &mut operators, &mut operands),
+        _ => generic_halstead(root, src, lang, &mut operators, &mut operands),
     }
     volume(operators.unique.len(), operands.unique.len(), operators.total, operands.total)
+}
+
+// ── Parse health ──────────────────────────────────────────────────────────────
+//
+// tree-sitter ALWAYS returns a tree. When it cannot parse something it wraps the
+// region in an ERROR node and carries on, which is the right behaviour for an
+// editor and a trap for a metrics engine: every number downstream is still
+// computed, still plausible, and quietly wrong, because the decision points and
+// operators inside an ERROR region are invisible to the walks that count them.
+//
+// A file the engine cannot read must therefore be REFUSED and said so, never
+// silently reported and never silently skipped. This was found via Delphi (a
+// grammar gap put 51.5% of a real corpus inside ERROR regions) but it is not a
+// Delphi problem - it applies to all five shipping languages equally, and a
+// malformed .py or a .ts using syntax newer than the vendored grammar hits it
+// the same way.
+
+/// Fraction of source lines that parsed cleanly: 1.0 is a perfect parse, 0.0 is
+/// a file entirely inside error regions.
+///
+/// Measured by LINE COVERAGE rather than by counting ERROR nodes, because the
+/// two diverge badly. One ERROR node can swallow a thousand lines, and a
+/// thousand tiny ones can sit on a single line; only the span says how much of
+/// the file the engine actually understood.
+///
+/// Children of an ERROR node are not descended into - they are junk by
+/// definition, and the parent's span already covers them.
+fn parse_health(root: Node, total_lines: usize) -> f64 {
+    if total_lines == 0 {
+        return 1.0;
+    }
+    let mut bad: HashSet<usize> = HashSet::new();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        // MISSING nodes are zero-width insertions the parser invented to
+        // recover. They mark a real defect but cover no source, so they are
+        // counted at their own line rather than over a span.
+        if n.is_error() || n.is_missing() {
+            for row in n.start_position().row..=n.end_position().row {
+                bad.insert(row);
+            }
+            if n.is_error() {
+                continue;
+            }
+        }
+        let mut c = n.walk();
+        for child in n.children(&mut c) {
+            stack.push(child);
+        }
+    }
+    let clean = total_lines.saturating_sub(bad.len());
+    (clean as f64 / total_lines as f64).clamp(0.0, 1.0)
+}
+
+/// Below this fraction of cleanly-parsed lines a file is REFUSED rather than
+/// reported.
+///
+/// Calibrated against every corpus to hand rather than guessed. Measured over
+/// 1,875 files in tina4-python, tina4-php, tina4-ruby, tina4-nodejs, tina4-js
+/// and this CLI's own src:
+///
+/// * 1,873 parse at health EXACTLY 1.000.
+/// * 2 do not, and both sit far above the floor: 0.993
+///   (`tina4-php/tests/OrmQueryBuilderBugsPostgresTest.php`) and 0.994
+///   (`tina4-nodejs/types/core/src/devAdmin.d.ts`, a `.d.ts` read with the TSX
+///   grammar). Real grammar gaps, and small ones.
+/// * NONE is below 0.95.
+///
+/// So the gap between healthy and broken is not a gradient to tune along, it is
+/// a cliff, and 0.95 sits in the empty space under it with the nearest real file
+/// four points clear. It tolerates a stray region from one unsupported construct
+/// - where the surrounding metrics are still broadly meaningful - and refuses
+/// anything structurally misread. It is deliberately NOT 1.0: that would refuse
+/// those two real files over a single unrecognised construct, and make the
+/// engine useless on any codebase slightly ahead of its vendored grammars.
+const MIN_PARSE_HEALTH: f64 = 0.95;
+
+/// Deepest AST nesting the engine's RECURSIVE walks will attempt.
+///
+/// Five walks recurse once per tree level - `collect_functions`,
+/// `count_own_decisions`, `py_halstead`, `generic_halstead` and
+/// `collect_fragments` - and none of them had a bound. Measured on macOS 26.5.2
+/// arm64 against the 58f7f73 release binary: a 60,000-term left-associative
+/// Python expression written one term per line parses fine (tree depth 60,003),
+/// then aborts the whole process with `fatal runtime error: stack overflow`,
+/// exit 134. Nothing upstream catches it - the file is 10 bytes per line, so
+/// `looks_minified` (threshold 200) does not fire.
+///
+/// This is a PRE-EXISTING defect, not something duplication introduced: the
+/// three walks that feed LOC / CC / MI have recursed unguarded since the engine
+/// was written, so the crash predates both `cd4dae8` and `58f7f73`.
+///
+/// 800 is bracketed by two measurements rather than picked:
+///
+/// * DEEPEST REAL FILE = 79, `src/agent.rs`, over 1,875 files in tina4-python,
+///   tina4-php, tina4-ruby, tina4-nodejs, tina4-js and this CLI's own src.
+///   Per-repo maxima are 50 / 50 / 35 / 56 / 31 / 79. Ten times the deepest
+///   thing anyone has actually written is not a limit real code can hit.
+/// * FIRST ABORT = depth 1800, measured in the harshest environment the walks
+///   run in - a DEBUG build on a 2 MiB cargo-test worker thread (depth 1700
+///   still completes). The release binary on the 8 MiB main thread survives far
+///   more. Half the worst-case ceiling leaves the guard itself with margin.
+///
+/// A file past it is REFUSED like any other the engine cannot read. Refusal
+/// names the file; a crash names nothing and loses the entire scan with it.
+const MAX_AST_DEPTH: usize = 800;
+
+/// Does any node nest deeper than `limit`?
+///
+/// Deliberately ITERATIVE. A recursive depth check would overflow the very stack
+/// it exists to protect, on exactly the input it exists to catch.
+fn depth_exceeds(root: Node, limit: usize) -> bool {
+    let mut stack = vec![(root, 0usize)];
+    while let Some((node, depth)) = stack.pop() {
+        if depth > limit {
+            return true;
+        }
+        let mut c = node.walk();
+        for child in node.children(&mut c) {
+            stack.push((child, depth + 1));
+        }
+    }
+    false
 }
 
 // ── Cyclomatic complexity ─────────────────────────────────────────────────────
@@ -483,7 +670,55 @@ fn is_decision(node: Node, lang: Lang, src: &[u8]) -> u32 {
                 (k == "binary_expression" && is_boolean_binary(node, src)) as u32
             }
         }
+        // Node kinds verified against tree-sitter-rust 0.24.2 by dumping a real
+        // parse, not from memory. Three of them are easy to get wrong:
+        //
+        //  * `if let` / `while let` do NOT have their own node kinds. The grammar
+        //    reuses `if_expression` / `while_expression` with a `let_condition`
+        //    child, so matching the plain kinds already covers both. Adding an
+        //    `if_let_expression` arm would have matched nothing and looked fine.
+        //  * `else_clause` is NOT counted. `else` is the fall-through edge, not a
+        //    decision; `else if` nests a second `if_expression` inside the clause
+        //    and is counted there, so `if/else if/else` scores 2, which is right.
+        //  * `try_expression` is the `?` operator. It is a real early-return
+        //    branch and is invisible if you only look for keywords - this is the
+        //    one the brief flagged and it is worth 1 per `?`.
+        //
+        // `loop_expression` has no condition but still closes a cycle in the
+        // control-flow graph, so it earns its point like any other loop.
+        Lang::Rust => {
+            if matches!(
+                k,
+                "if_expression"
+                    | "while_expression"
+                    | "loop_expression"
+                    | "for_expression"
+                    | "try_expression"
+            ) {
+                1
+            } else if k == "match_arm" {
+                // Every arm is a branch EXCEPT the wildcard `_`, which is the
+                // fall-through. This follows the precedent already set for
+                // TypeScript, where tree-sitter names `default:` `switch_default`
+                // (not `switch_case`) and the engine therefore never counts it.
+                // Verified: `match { 1 => .., 2 | 3 => .., _ => .. }` scores 2.
+                (!is_rust_wildcard_arm(node, src)) as u32
+            } else {
+                (k == "binary_expression" && is_boolean_binary(node, src)) as u32
+            }
+        }
     }
+}
+
+/// Is this `match_arm` the catch-all `_ => ...`?
+///
+/// Compared on the pattern's TEXT rather than its node kind: the kind name for a
+/// wildcard has moved between grammar versions, and `_` is unambiguous.
+fn is_rust_wildcard_arm(node: Node, src: &[u8]) -> bool {
+    node.child_by_field_name("pattern")
+        .and_then(|p| p.utf8_text(src).ok())
+        .map(|t| t.trim() == "_")
+        .unwrap_or(false)
 }
 
 /// True for a node that opens a new measurement scope: a nested function (it is
@@ -499,6 +734,7 @@ fn is_scope_boundary(kind: &str, lang: Lang) -> bool {
             | "trait_declaration" | "enum_declaration"),
         Lang::Ruby => matches!(kind, "class" | "module"),
         Lang::Ts => matches!(kind, "class_declaration" | "class"),
+        Lang::Rust => is_class_node(kind, Lang::Rust),
     }
 }
 
@@ -548,6 +784,19 @@ fn is_function_node(kind: &str, lang: Lang) -> bool {
                 | "function_expression"
                 | "arrow_function"
         ),
+        // `closure_expression` is deliberately NOT here. A Rust closure is the
+        // analogue of a Python lambda, not of a TypeScript arrow: the language is
+        // saturated with one-line iterator adapters (`.map(|x| x + 1)`), and
+        // listing each as a function would bury the real hot spots under hundreds
+        // of CC-1 entries and drag every avg_complexity down. Like a lambda, a
+        // closure's decisions stay charged to the function that writes it, which
+        // is why `is_scope_boundary` does not stop at one either.
+        //
+        // `function_signature_item` (a bodyless trait method) IS counted, on the
+        // precedent PHP already sets: tree-sitter-php reports an interface's
+        // bodyless `public function sig();` as a `method_declaration`, and the
+        // engine has always counted it.
+        Lang::Rust => matches!(kind, "function_item" | "function_signature_item"),
     }
 }
 
@@ -557,6 +806,14 @@ fn is_class_node(kind: &str, lang: Lang) -> bool {
         Lang::Php => matches!(kind, "class_declaration" | "trait_declaration" | "interface_declaration"),
         Lang::Ruby => matches!(kind, "class" | "module"),
         Lang::Ts => matches!(kind, "class_declaration" | "class"),
+        // `impl_item` is what gives a Rust method its qualifier: `impl Point`
+        // and `impl Draw for Point` both carry the implementing type in a field
+        // named `type` (NOT `name` - see `node_name`), so `fn draw` inside either
+        // is reported as `Point.draw`.
+        Lang::Rust => matches!(
+            kind,
+            "impl_item" | "trait_item" | "struct_item" | "enum_item" | "union_item"
+        ),
     }
 }
 
@@ -575,12 +832,26 @@ fn is_type_decl_node(kind: &str, lang: Lang) -> bool {
     }
     match lang {
         Lang::Ts => matches!(kind, "interface_declaration" | "type_alias_declaration" | "enum_declaration"),
+        // A Rust module's public surface is its types, and a test names them
+        // directly (`metrics::FileMetrics`). `type_item` covers `type Alias = ..`.
+        // Without this every .rs file raised a false "untested" offender, exactly
+        // as an interface-only TypeScript module used to.
+        Lang::Rust => kind == "type_item",
         _ => false,
     }
 }
 
+/// The declared name of a type or function node.
+///
+/// Falls back to the `type` field because Rust's `impl_item` has no `name`: both
+/// `impl Point` and `impl Draw for Point` store the implementing type under
+/// `type` (and the trait, when present, under `trait`). Without the fallback
+/// every method in the CLI would have been reported bare as `run` or `new`
+/// instead of `Report.run`. No other grammar in the set puts a `type` field on a
+/// node this is called with, so the fallback cannot affect them.
 fn node_name(node: Node, src: &[u8]) -> Option<String> {
     node.child_by_field_name("name")
+        .or_else(|| node.child_by_field_name("type"))
         .and_then(|n| n.utf8_text(src).ok())
         .map(|s| s.to_string())
 }
@@ -649,6 +920,7 @@ fn is_import_node(kind: &str, lang: Lang) -> bool {
             | "require_expression" | "include_expression" | "include_once_expression"),
         Lang::Ruby => false, // require is a plain method call — counted below
         Lang::Ts => matches!(kind, "import_statement"),
+        Lang::Rust => matches!(kind, "use_declaration" | "mod_item"),
     }
 }
 
@@ -785,6 +1057,34 @@ fn extract_import_specs(root: Node, lang: Lang, src: &[u8]) -> Vec<String> {
                     let t = t.trim();
                     if t.contains('\\') && t.len() > 1 {
                         specs.push(t.to_string());
+                    }
+                }
+            }
+            // `use crate::console::icon_ok;` -> "crate::console::icon_ok". The
+            // whole path is kept as written and narrowed to a file in
+            // `resolve_import`, which is the only place that knows the file set.
+            Lang::Rust if kind == "use_declaration" => {
+                if let Some(arg) = node.child_by_field_name("argument") {
+                    if let Ok(t) = arg.utf8_text(src) {
+                        // `use std::{fs, io}` -> keep the `std::` stem only; a
+                        // brace group is always external here (an intra-crate
+                        // group would still resolve through its stem).
+                        let head = t.split('{').next().unwrap_or(t).trim().trim_end_matches("::");
+                        if !head.is_empty() {
+                            specs.push(head.to_string());
+                        }
+                    }
+                }
+            }
+            // `mod agent;` with NO body is a declaration that agent.rs (or
+            // agent/mod.rs) is part of this crate - the strongest internal edge
+            // Rust has, and the one that wires main.rs to every other file in
+            // this CLI. `mod x { .. }` with a body is an inline module and no
+            // edge at all, so the bodyless form is what qualifies.
+            Lang::Rust if kind == "mod_item" && node.child_by_field_name("body").is_none() => {
+                if let Some(n) = node.child_by_field_name("name") {
+                    if let Ok(t) = n.utf8_text(src) {
+                        specs.push(format!("mod:{}", t.trim()));
                     }
                 }
             }
@@ -930,6 +1230,58 @@ fn resolve_import(
                 }
             }
         }
+        // Rust resolution, single-crate layout (what this CLI is).
+        //
+        // Two specifier shapes reach here. `mod:agent` is a bodyless `mod`
+        // declaration and names a sibling file directly. Everything else is a
+        // `use` path, where only the leading segment says whether it can be
+        // internal at all: `crate` / `self` / `super` can, a bare first segment
+        // (`std`, `clap`, `serde`) is an external crate and must resolve to None
+        // or every third-party import would be miscounted as internal coupling.
+        //
+        // A `use` path mixes module segments with the ITEM it imports
+        // (`crate::console::icon_ok` = module `console`, item `icon_ok`), and
+        // nothing in the path says where the split is. So each prefix is offered
+        // longest-first and the file set decides.
+        Lang::Rust => {
+            if let Some(m) = spec.strip_prefix("mod:") {
+                let base = if dir.is_empty() { m.to_string() } else { format!("{dir}/{m}") };
+                push(format!("{base}.rs"));
+                push(format!("{base}/mod.rs"));
+            } else {
+                let segs: Vec<&str> = spec.split("::").filter(|s| !s.is_empty()).collect();
+                let first = *segs.first()?;
+                let (mut base, rest): (String, &[&str]) = match first {
+                    // `crate::` is anchored at the crate root, which IS the scan
+                    // root, so the base is empty rather than the current dir.
+                    "crate" => (String::new(), &segs[1..]),
+                    "self" => (dir.clone(), &segs[1..]),
+                    "super" => {
+                        let mut climbed = dir.clone();
+                        let mut i = 0;
+                        while segs.get(i) == Some(&"super") {
+                            climbed = parent_dir(&climbed);
+                            i += 1;
+                        }
+                        (climbed, &segs[i..])
+                    }
+                    _ => return None, // an external crate, excluded by design
+                };
+                if base == "." {
+                    base = String::new();
+                }
+                // Longest prefix first: `console::icon_ok` tries console/icon_ok
+                // before console, so a real nested module always wins over a
+                // same-named item in its parent.
+                for take in (1..=rest.len()).rev() {
+                    let joined = rest[..take].join("/");
+                    let full =
+                        if base.is_empty() { joined.clone() } else { format!("{base}/{joined}") };
+                    push(format!("{full}.rs"));
+                    push(format!("{full}/mod.rs"));
+                }
+            }
+        }
         Lang::Php => {
             // A `use` path is a namespace; PSR-4 maps it onto directories.
             let as_path = spec.trim_start_matches('\\').replace('\\', "/");
@@ -958,17 +1310,64 @@ fn resolve_import(
 
 // ── Analyze one source string ─────────────────────────────────────────────────
 
+/// What one file contributed to the report.
+///
+/// A single verdict, decided in ONE place, is the whole point. The engine used
+/// to answer "did this file parse?" with `Option` (grammar missing) and then
+/// silently report numbers for anything that came back `Some` - including a file
+/// tree-sitter had wrapped almost entirely in ERROR nodes. Refusal has to be a
+/// value the caller must handle, not an absence it can overlook.
+pub(crate) enum FileAnalysis {
+    Measured {
+        metrics: FileMetrics,
+        functions: Vec<FunctionInfo>,
+        imports: Vec<String>,
+        /// Clone fragments with `file` left at 0; only the caller knows the
+        /// index. Computed here so the tree is parsed ONCE per file instead of
+        /// once for metrics and again for duplication.
+        fragments: Vec<CloneFragment>,
+    },
+    /// Read, and deliberately NOT reported on.
+    Refused { reason: String, parse_health: f64 },
+}
+
 pub(crate) fn analyze_source(
     lang: Lang,
     source: &str,
     rel_path: &str,
     has_tests: bool,
-) -> Option<(FileMetrics, Vec<FunctionInfo>, Vec<String>)> {
+) -> Option<FileAnalysis> {
     let mut parser = Parser::new();
     parser.set_language(&lang.tree_sitter_language()).ok()?;
     let tree = parser.parse(source, None)?;
     let root = tree.root_node();
     let src = source.as_bytes();
+
+    // ── Refusal gate 1: nesting the recursive walks below cannot survive. ──
+    // Checked BEFORE any of them run, because the failure mode is aborting the
+    // process, not returning a wrong number.
+    if depth_exceeds(root, MAX_AST_DEPTH) {
+        return Some(FileAnalysis::Refused {
+            reason: format!(
+                "AST nests deeper than {MAX_AST_DEPTH} levels - measuring it would overflow the stack"
+            ),
+            // Nothing is known about its parse health; it was never walked.
+            parse_health: 0.0,
+        });
+    }
+
+    // ── Refusal gate 2: too much of the file sits inside parse-error regions. ──
+    // Also before the walks, so a file the engine cannot read costs it nothing.
+    let health = round_dp(parse_health(root, source.lines().count()), 3);
+    if health < MIN_PARSE_HEALTH {
+        return Some(FileAnalysis::Refused {
+            reason: format!(
+                "only {:.0}% of lines parsed - metrics would be wrong, not just imprecise",
+                health * 100.0
+            ),
+            parse_health: health,
+        });
+    }
 
     let loc = count_loc(source, lang);
 
@@ -1024,8 +1423,250 @@ pub(crate) fn analyze_source(
         coupling_efferent: 0,
         coupling_afferent: 0,
         instability: 0.0,
+        parse_health: health,
     };
-    Some((fm, functions, specs))
+
+    let mut fragments: Vec<CloneFragment> = Vec::new();
+    collect_fragments(root, 0, &mut fragments);
+
+    Some(FileAnalysis::Measured { metrics: fm, functions, imports: specs, fragments })
+}
+
+// ── Duplication (DRY) ─────────────────────────────────────────────────────────
+//
+// Cross-file, AST-shape based, and therefore language-agnostic by construction:
+// it works for all five languages through the same code path, and a sixth would
+// need no work here. This is the Baxter et al. approach - hash sub-trees, group
+// by hash - rather than the token-window scan PMD's CPD uses, because the engine
+// already has a real parse and a shape hash is immune to reformatting.
+//
+// WHAT IT DETECTS, measured against tree-sitter 0.26.11 rather than asserted.
+// Hashing the sequence of node KINDS with all identifier and literal TEXT
+// excluded gives TYPE-1 PLUS CONSISTENT RENAMING: two blocks that differ only in
+// their variable names, in same-kind literal values, or in whitespace and
+// indentation collide, which is the point.
+//
+// It is NOT full Type-2 in the Roy/Cordy sense, and the doc used to say it was.
+// Their Type-2 is verbatim "identical fragments except for variations in
+// identifiers, literals, types, layout and COMMENTS", and comments are the one
+// it fails: comment nodes are hashed like any other, so adding a comment changes
+// the shape. Measured MISS in all five languages - Python `#` and docstring,
+// Rust `//` and `///`, PHP `/** */`, TS jsdoc, Ruby `#`. Locked by
+// `comments_are_hashed_so_this_is_not_full_type_2` so the claim cannot drift
+// back. Fixing it is a real option (skip `is_extra()` nodes) but it changes
+// which clones the engine reports, which is a `--fail-on` contract change and
+// belongs in its own discussed change - not smuggled in as a doc correction.
+//
+// Type-3 (gapped) and Type-4 (semantic) clones are NOT detected at all; that
+// needs sub-tree differencing, and a report that silently claimed to cover them
+// would be worse than one with a stated ceiling.
+//
+// Anonymous token kinds ARE hashed, so `a + b` and `x - y` do not collide even
+// though both are a binary expression over two identifiers. Excluding operators
+// was the obvious simplification and it is exactly what makes a shape hash
+// notorious for false positives.
+//
+// tina4: thresholds below are the one genuinely tunable decision here. They are
+// deliberately expressed as two INDEPENDENT gates because either alone is known
+// to misbehave: a node-count gate alone fires on a long flat list of struct
+// fields, and a line gate alone fires on any six sparsely-formatted lines.
+
+/// Minimum AST nodes in a sub-tree before it can be reported as duplicated.
+///
+/// Sits between jscpd's 50-token default and PMD CPD's 100-token Java default.
+/// AST nodes are finer-grained than source tokens (an `if` statement is several
+/// nodes), so a node count maps to roughly half as many tokens: 60 nodes is on
+/// the order of 30-40 tokens of real code.
+const MIN_CLONE_NODES: u32 = 60;
+
+/// Minimum SOURCE LINES a duplicate must span. Matches SonarQube's 10-line
+/// default intent while staying tighter, and it is what stops a one-line
+/// accessor or a short guard clause from ever being reported however many times
+/// it appears.
+const MIN_CLONE_LINES: usize = 6;
+
+/// One duplicated region: where it is and how big.
+///
+/// `file` is an INDEX into the scanned file list rather than a String. With one
+/// fragment per qualifying sub-tree, a large project produces hundreds of
+/// thousands of these, and a cloned path on each is the difference between a
+/// few MB and a few hundred. The hash is a u64 for the same reason - the
+/// normalised shape string is never retained, only folded in.
+#[derive(Clone, Debug)]
+pub(crate) struct CloneFragment {
+    hash: u64,
+    file: u32,
+    start_line: usize,
+    end_line: usize,
+    nodes: u32,
+}
+
+impl CloneFragment {
+    fn lines(&self) -> usize {
+        self.end_line.saturating_sub(self.start_line) + 1
+    }
+    /// Does this fragment sit inside `other`, INCLUDING covering the exact same
+    /// span?
+    ///
+    /// The equal-span case is the one that matters and it is easy to get wrong.
+    /// A single duplicated block produces a fragment at every wrapper level that
+    /// shares its line range - `expression_statement` around `call_expression`
+    /// around the arguments - each with a DIFFERENT shape hash, so they form
+    /// separate groups that all report the same lines. Excluding equal spans
+    /// (the obvious reading of "strictly inside") let all of them through and the
+    /// same clone was listed three or four times.
+    ///
+    /// Self-suppression is not a risk: a group is only ever tested against
+    /// groups already KEPT, never against itself.
+    fn inside(&self, other: &CloneFragment) -> bool {
+        self.file == other.file
+            && self.start_line >= other.start_line
+            && self.end_line <= other.end_line
+    }
+}
+
+/// Fold a node's kind and its children's hashes into one structural hash.
+///
+/// Bottom-up and single-pass: every node's hash is built from the hashes its
+/// children already produced, so the whole file costs O(nodes). Serialising each
+/// candidate sub-tree to a string and hashing that would be O(nodes * depth) and
+/// would allocate a string per candidate.
+fn shape_hash_of(kind: &str, child_hashes: &[u64]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    kind.hash(&mut h);
+    // Length is folded in so a node with two children cannot collide with a
+    // differently-shaped node whose child hashes happen to concatenate the same.
+    child_hashes.len().hash(&mut h);
+    for c in child_hashes {
+        c.hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Walk one file's tree, emitting a fragment for every sub-tree big enough to be
+/// worth reporting. Returns this node's (hash, node_count, parsed_cleanly).
+///
+/// `parsed_cleanly` is false for any sub-tree containing an ERROR or MISSING
+/// node, and such a sub-tree NEVER becomes a fragment. A shape hashed out of a
+/// misparse describes the parser's recovery, not the author's code, so two files
+/// whose only similarity is being broken would otherwise be reported as
+/// duplicates of each other. Measured on tree-sitter 0.26.11: seven lines of
+/// pure Python garbage fold into a 69-node ERROR node spanning 7 lines, clearing
+/// both gates below on its own.
+///
+/// This is belt AND braces with the parse-health refusal in `analyze_source`,
+/// deliberately. The refusal drops whole files below a THRESHOLD; this makes the
+/// guarantee unconditional, so it still holds for the error regions inside a
+/// file healthy enough to be reported, and it does not quietly weaken if that
+/// threshold is ever tuned.
+fn collect_fragments(
+    node: Node,
+    file: u32,
+    out: &mut Vec<CloneFragment>,
+) -> (u64, u32, bool) {
+    let mut child_hashes: Vec<u64> = Vec::new();
+    let mut count: u32 = 1;
+    let mut parsed_cleanly = !node.is_error() && !node.is_missing();
+    let mut c = node.walk();
+    if c.goto_first_child() {
+        loop {
+            let (h, n, clean) = collect_fragments(c.node(), file, out);
+            child_hashes.push(h);
+            count += n;
+            parsed_cleanly &= clean;
+            if !c.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+    let hash = shape_hash_of(node.kind(), &child_hashes);
+    let start_line = node.start_position().row + 1;
+    let end_line = node.end_position().row + 1;
+    // Only NAMED nodes are candidates: an anonymous token is punctuation and can
+    // never be a meaningful duplicate on its own, though its kind still shapes
+    // the hash of the parent that contains it.
+    if parsed_cleanly
+        && node.is_named()
+        && count >= MIN_CLONE_NODES
+        && end_line.saturating_sub(start_line) + 1 >= MIN_CLONE_LINES
+    {
+        out.push(CloneFragment { hash, file, start_line, end_line, nodes: count });
+    }
+    (hash, count, parsed_cleanly)
+}
+
+/// A set of fragments that share a shape.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct CloneGroup {
+    pub files: Vec<String>,
+    pub first_file: String,
+    pub first_line: usize,
+    pub copies: usize,
+    pub lines: usize,
+    pub cross_file: bool,
+}
+
+/// Group fragments by shape, then keep only the MAXIMAL ones.
+///
+/// The suppression pass is not an optimisation, it is what makes the output
+/// readable. If a 200-node block is duplicated then so is every one of its
+/// sub-blocks, so a raw grouping reports the same clone at a dozen nesting
+/// depths and buries the finding. A group is dropped when every one of its
+/// fragments sits inside a fragment of some larger surviving group.
+fn group_clones(mut frags: Vec<CloneFragment>, paths: &[String]) -> Vec<CloneGroup> {
+    // Largest first, so a parent is always considered before its children.
+    frags.sort_by(|a, b| b.nodes.cmp(&a.nodes).then(a.file.cmp(&b.file)).then(a.start_line.cmp(&b.start_line)));
+
+    let mut by_hash: BTreeMap<u64, Vec<CloneFragment>> = BTreeMap::new();
+    for f in frags {
+        by_hash.entry(f.hash).or_default().push(f);
+    }
+
+    // Only shapes that actually repeat.
+    let mut candidates: Vec<Vec<CloneFragment>> =
+        by_hash.into_values().filter(|v| v.len() >= 2).collect();
+    candidates.sort_by(|a, b| b[0].nodes.cmp(&a[0].nodes));
+
+    let mut kept: Vec<Vec<CloneFragment>> = Vec::new();
+    for group in candidates {
+        let covered = group.iter().all(|f| {
+            kept.iter().any(|k| k.iter().any(|big| f.inside(big)))
+        });
+        if !covered {
+            kept.push(group);
+        }
+    }
+
+    let mut out: Vec<CloneGroup> = kept
+        .into_iter()
+        .map(|g| {
+            let mut files: Vec<String> = g
+                .iter()
+                .map(|f| paths.get(f.file as usize).cloned().unwrap_or_default())
+                .collect();
+            files.sort();
+            files.dedup();
+            let first = &g[0];
+            CloneGroup {
+                cross_file: files.len() > 1,
+                first_file: paths.get(first.file as usize).cloned().unwrap_or_default(),
+                first_line: first.start_line,
+                copies: g.len(),
+                lines: first.lines(),
+                files,
+            }
+        })
+        .collect();
+    // Biggest, most-repeated first - that is the order someone fixing them wants.
+    out.sort_by(|a, b| {
+        (b.lines * b.copies)
+            .cmp(&(a.lines * a.copies))
+            .then(b.copies.cmp(&a.copies))
+            .then(a.first_file.cmp(&b.first_file))
+    });
+    out
 }
 
 // ── File discovery ─────────────────────────────────────────────────────────────
@@ -1067,6 +1708,27 @@ fn looks_minified(source: &str) -> bool {
     source.len() / lines > 200
 }
 
+/// Is this directory a documentation GENERATOR's output tree?
+///
+/// Detected by a marker file the generator always writes, not by directory name:
+/// `docs/`, `html/` and `site/` are all perfectly good places for hand-written
+/// source, so banning the name would exclude real code, while the marker only
+/// ever appears in generated output.
+///
+/// This matters because the engine is language-agnostic and therefore sees any
+/// `.js` it walks past. Doxygen ships jQuery plus its own `search.js` in
+/// `docs/html/`, and scanning tina4delphi produced metrics for seven Doxygen
+/// files and nothing else - a report entirely about code nobody wrote. It is
+/// the same class of error as measuring a file that did not parse: measuring
+/// something that is not the thing.
+fn is_generated_docs_dir(dir: &Path) -> bool {
+    // Doxygen always emits doxygen.css alongside its HTML/JS. Sphinx always
+    // emits .buildinfo at its output root.
+    ["doxygen.css", "doxygen.svg", ".buildinfo"]
+        .iter()
+        .any(|marker| dir.join(marker).is_file())
+}
+
 fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     let mut items: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
@@ -1075,6 +1737,9 @@ fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) {
         if path.is_dir() {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name.starts_with('.') || IGNORED_DIRS.contains(&name) {
+                continue;
+            }
+            if is_generated_docs_dir(&path) {
                 continue;
             }
             walk_dir(&path, files);
@@ -1309,6 +1974,34 @@ fn module_has_tests(file: &Path, idx: &TestIndex, declared_types: &[String]) -> 
     false
 }
 
+/// Rust keeps its unit tests INSIDE the file they test, behind `#[cfg(test)]`,
+/// rather than in a sibling `tests/` tree. Every stage of `module_has_tests`
+/// looks for an external test file, so without this the convention reads as "no
+/// test anywhere" and every single .rs file raises a false `untested` offender —
+/// which is exactly the noise that makes an offender list get ignored.
+///
+/// Matched on the source text, not the AST: `#[cfg(test)]` is an attribute whose
+/// node shape varies across grammar versions, and the string is unambiguous.
+fn rust_has_inline_tests(source: &str) -> bool {
+    source.contains("#[cfg(test)]")
+}
+
+/// A file the engine REFUSED to measure because too little of it parsed.
+///
+/// Deliberately a first-class part of the report rather than an omission. A
+/// refused file is excluded from `file_metrics` so it cannot skew an average
+/// with numbers derived from rubble, and listed here so it is never merely
+/// ABSENT - "the engine could not read this" and "this file is fine" must not
+/// look the same to anyone reading the output.
+#[derive(Serialize, Clone, Debug)]
+pub(crate) struct RefusedFile {
+    pub path: String,
+    /// Fraction of lines that parsed cleanly, rounded to 3 dp.
+    pub parse_health: f64,
+    pub lines: usize,
+    pub reason: String,
+}
+
 // ── Offenders ───────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Clone)]
@@ -1407,13 +2100,88 @@ fn build_offenders(files: &[FileMetrics], functions: &[FunctionInfo]) -> Vec<Off
         }
     }
 
-    // Sort by (severity rank, score) descending, stable.
+    sort_offenders(&mut items);
+    items
+}
+
+/// Sort by (severity rank, score) descending, stable.
+fn sort_offenders(items: &mut [Offender]) {
     items.sort_by(|a, b| {
         severity_rank(&b.severity)
             .cmp(&severity_rank(&a.severity))
             .then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
     });
-    items
+}
+
+/// Turn refused files into offenders so they appear in the ranked list, not
+/// only in a separate section someone might not read.
+///
+/// Severity is `warn`, not `error`, and that is a deliberate compatibility
+/// call: a file the engine cannot parse is a TOOLING gap (a grammar older than
+/// the source it is fed), not a defect in the code being measured, and
+/// promoting it to `error` would newly break every existing `--fail-on error`
+/// CI run for reasons outside the author's control. `warn` still trips
+/// `--fail-on warn`, and the summary line says it loudly either way.
+fn refusal_offenders(refused: &[RefusedFile]) -> Vec<Offender> {
+    refused
+        .iter()
+        .map(|r| Offender {
+            file: r.path.clone(),
+            line: 1,
+            kind: "unparsed".to_string(),
+            severity: "warn".to_string(),
+            // Bigger unreadable files are a bigger hole in the report.
+            score: r.lines as f64 / 100.0,
+            detail: format!("NOT MEASURED - {}", r.reason),
+        })
+        .collect()
+}
+
+/// Turn clone groups into offenders.
+///
+/// Kept separate from `build_offenders` because duplication is the only rule
+/// that is a property of the SCAN rather than of a single file - it cannot be
+/// computed from one file's metrics, and folding it in would have forced every
+/// existing caller to supply a whole-project argument it does not have.
+///
+/// Severity mirrors the existing rules rather than inventing a scale: a
+/// duplicate spanning many lines or repeated many times is an `error`, anything
+/// else over the reporting floor is a `warn`. `score` is lines * copies, which
+/// is the number of duplicated lines the codebase would shed by unifying it -
+/// the same "how much does fixing this buy" ranking the other rules use.
+fn clone_offenders(groups: &[CloneGroup]) -> Vec<Offender> {
+    groups
+        .iter()
+        .map(|g| {
+            let wasted = g.lines * g.copies;
+            let where_ = if g.cross_file {
+                format!(" across {} files", g.files.len())
+            } else {
+                String::new()
+            };
+            Offender {
+                file: g.first_file.clone(),
+                line: g.first_line,
+                kind: "duplication".to_string(),
+                // Cross-file duplication is the expensive kind - it is the one
+                // that drifts out of sync - so it escalates sooner.
+                severity: if wasted >= 60 || (g.cross_file && wasted >= 40) {
+                    "error"
+                } else {
+                    "warn"
+                }
+                .to_string(),
+                score: wasted as f64,
+                detail: format!(
+                    "{} duplicated lines x {} copies{} - {} lines could be removed",
+                    g.lines,
+                    g.copies,
+                    where_,
+                    g.lines * (g.copies - 1)
+                ),
+            }
+        })
+        .collect()
 }
 
 // ── Summary + JSON payload ────────────────────────────────────────────────────
@@ -1427,6 +2195,14 @@ struct Summary {
     scan_mode: String,
     scan_root: String,
     total_offenders: usize,
+    /// Maximal duplicated blocks found across the whole scan, and the lines that
+    /// would disappear if each group were unified to a single definition. Whole-
+    /// scan facts, so they live on the summary rather than on any one file.
+    duplicate_blocks: usize,
+    duplicate_lines: usize,
+    /// Files the parse-health guard REFUSED. Reported so a hole in the coverage
+    /// is never invisible - the whole point of the guard.
+    files_refused: usize,
 }
 
 #[derive(Serialize)]
@@ -1442,6 +2218,11 @@ struct JsonPayload {
     most_complex_functions: Vec<FunctionInfo>,
     /// file -> imported files, both sides relative paths inside the scan.
     dependency_graph: BTreeMap<String, Vec<String>>,
+    /// Maximal duplicated AST shapes, biggest payoff first.
+    duplication: Vec<CloneGroup>,
+    /// Files excluded from every number above because too little of them
+    /// parsed. Present even when empty so a consumer can rely on the key.
+    unparsed: Vec<RefusedFile>,
 }
 
 pub(crate) struct Report {
@@ -1454,6 +2235,8 @@ pub(crate) struct Report {
     /// implementation keyed this on module names while looking it up by path, so
     /// nothing ever matched and the dependency view drew no edges at all.
     dependency_graph: BTreeMap<String, Vec<String>>,
+    clones: Vec<CloneGroup>,
+    refused: Vec<RefusedFile>,
 }
 
 pub(crate) fn analyze_targets(files: &[PathBuf], scan_root: &str) -> Report {
@@ -1463,6 +2246,12 @@ pub(crate) fn analyze_targets(files: &[PathBuf], scan_root: &str) -> Report {
     // Pass 1 cannot resolve imports: a specifier only becomes an edge once every
     // file in the scan is known. Park the raw specifiers with their language.
     let mut pending: Vec<(String, Lang, Vec<String>)> = Vec::new();
+    // Duplication is the one metric that cannot be computed a file at a time, so
+    // fragments accumulate across the whole scan and are grouped in pass 2.
+    // `clone_paths` is the index space `CloneFragment.file` points into.
+    let mut fragments: Vec<CloneFragment> = Vec::new();
+    let mut clone_paths: Vec<String> = Vec::new();
+    let mut refused: Vec<RefusedFile> = Vec::new();
 
     for path in files {
         let Some(lang) = Lang::from_path(path) else { continue };
@@ -1473,11 +2262,33 @@ pub(crate) fn analyze_targets(files: &[PathBuf], scan_root: &str) -> Report {
         }
         let rel = rel_display(path, scan_root);
         let declared = declared_type_names(&source, lang);
-        let has_tests = module_has_tests(path, &test_index, &declared);
-        if let Some((fm, funcs, specs)) = analyze_source(lang, &source, &rel, has_tests) {
-            pending.push((fm.path.clone(), lang, specs));
-            file_metrics.push(fm);
-            all_functions.extend(funcs);
+        let has_tests = (lang == Lang::Rust && rust_has_inline_tests(&source))
+            || module_has_tests(path, &test_index, &declared);
+        match analyze_source(lang, &source, &rel, has_tests) {
+            // The engine could not read the file. It is kept OUT of every
+            // aggregate - one file's rubble must not move another file's
+            // numbers - and reported by name, because "could not read this" and
+            // "this file is fine" must never look the same in the output.
+            Some(FileAnalysis::Refused { reason, parse_health }) => {
+                refused.push(RefusedFile {
+                    path: rel,
+                    parse_health,
+                    lines: source.lines().count(),
+                    reason,
+                });
+            }
+            Some(FileAnalysis::Measured { metrics, functions, imports, fragments: frags }) => {
+                // Fragments come back index-less; only this loop knows which
+                // slot in `clone_paths` the file took.
+                let idx = clone_paths.len() as u32;
+                clone_paths.push(metrics.path.clone());
+                fragments.extend(frags.into_iter().map(|f| CloneFragment { file: idx, ..f }));
+                pending.push((metrics.path.clone(), lang, imports));
+                file_metrics.push(metrics);
+                all_functions.extend(functions);
+            }
+            // No grammar, or the parser returned nothing at all.
+            None => {}
         }
     }
 
@@ -1525,13 +2336,20 @@ pub(crate) fn analyze_targets(files: &[PathBuf], scan_root: &str) -> Report {
         };
     }
 
-    let offenders = build_offenders(&file_metrics, &all_functions);
+    let clones = group_clones(fragments, &clone_paths);
+    let mut offenders = build_offenders(&file_metrics, &all_functions);
+    offenders.extend(clone_offenders(&clones));
+    offenders.extend(refusal_offenders(&refused));
+    sort_offenders(&mut offenders);
+
     Report {
         files: file_metrics,
         functions: all_functions,
         offenders,
         scan_root: scan_root.to_string(),
         dependency_graph,
+        clones,
+        refused,
     }
 }
 
@@ -1556,6 +2374,9 @@ fn build_summary(report: &Report, total_offenders: usize) -> Summary {
         scan_mode: "project".to_string(),
         scan_root: report.scan_root.clone(),
         total_offenders,
+        duplicate_blocks: report.clones.len(),
+        duplicate_lines: report.clones.iter().map(|c| c.lines * (c.copies - 1)).sum(),
+        files_refused: report.refused.len(),
     }
 }
 
@@ -1617,6 +2438,8 @@ pub fn run(path: Option<String>, top: Option<usize>, json: bool, fail_on: Option
             file_metrics: report.files.clone(),
             most_complex_functions: by_cc,
             dependency_graph: report.dependency_graph.clone(),
+            duplication: report.clones.clone(),
+            unparsed: report.refused.clone(),
         };
         println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
         return exit_code;
@@ -1643,12 +2466,43 @@ fn print_human(summary: &Summary, shown: &[Offender]) {
         "  files: {}   functions: {}   avg complexity: {}   avg maintainability: {}",
         summary.files_analyzed, summary.total_functions, summary.avg_complexity, summary.avg_maintainability
     );
+    if summary.files_refused > 0 {
+        println!(
+            "  {}",
+            paint(
+                // Reason-agnostic on purpose: a file is refused for failing to
+                // parse OR for nesting deeper than the walks survive, and the
+                // per-file reason is on its `unparsed` offender.
+                &format!(
+                    "! {} file(s) NOT MEASURED - the engine could not read them (see `unparsed` offenders)",
+                    summary.files_refused
+                ),
+                "33"
+            )
+        );
+    }
+    if summary.duplicate_blocks > 0 {
+        println!(
+            "  duplication: {} repeated blocks   {} lines removable by unifying them",
+            summary.duplicate_blocks, summary.duplicate_lines
+        );
+    }
     let showing = if shown.is_empty() { String::new() } else { format!(" (showing top {})", shown.len()) };
     println!("  offenders: {} total{}", summary.total_offenders, showing);
     println!();
 
     if shown.is_empty() {
-        println!("  {}", paint("\u{2713} no offenders \u{2014} clean", "32"));
+        // "clean" and "nothing was looked at" must not print the same thing.
+        // Scanning tina4delphi found 39 Pascal files, claimed none of them, and
+        // reported a green tick.
+        if summary.files_analyzed == 0 {
+            println!(
+                "  {}",
+                paint("no supported source files found - nothing was measured", "33")
+            );
+        } else {
+            println!("  {}", paint("\u{2713} no offenders \u{2014} clean", "32"));
+        }
         println!();
         return;
     }
@@ -1693,24 +2547,382 @@ mod tests {
         std::fs::read_to_string(manifest().join("tests/fixtures").join(name)).unwrap()
     }
 
+    /// Destructure a MEASURED analysis, or fail loudly.
+    ///
+    /// A test that quietly accepted a refusal would be asserting nothing at all,
+    /// so a refusal panics with the reason attached.
+    fn measured(
+        lang: Lang,
+        src: &str,
+        rel: &str,
+        has_tests: bool,
+    ) -> (FileMetrics, Vec<FunctionInfo>, Vec<String>) {
+        match analyze_source(lang, src, rel, has_tests).expect("grammar must load") {
+            FileAnalysis::Measured { metrics, functions, imports, .. } => {
+                (metrics, functions, imports)
+            }
+            FileAnalysis::Refused { reason, parse_health } => {
+                panic!("{rel}: REFUSED at parse health {parse_health} - {reason}")
+            }
+        }
+    }
+
     fn analyze_py(src: &str) -> (FileMetrics, Vec<FunctionInfo>) {
-        let (fm, fns, _specs) = analyze_source(Lang::Python, src, "t.py", false).unwrap();
+        let (fm, fns, _specs) = measured(Lang::Python, src, "t.py", false);
         (fm, fns)
     }
 
     fn analyze_ts(src: &str) -> (FileMetrics, Vec<FunctionInfo>) {
-        let (fm, fns, _specs) = analyze_source(Lang::Ts, src, "t.ts", false).unwrap();
+        let (fm, fns, _specs) = measured(Lang::Ts, src, "t.ts", false);
         (fm, fns)
     }
 
     fn analyze_php(src: &str) -> (FileMetrics, Vec<FunctionInfo>) {
-        let (fm, fns, _specs) = analyze_source(Lang::Php, src, "t.php", false).unwrap();
+        let (fm, fns, _specs) = measured(Lang::Php, src, "t.php", false);
         (fm, fns)
     }
 
     fn analyze_rb(src: &str) -> (FileMetrics, Vec<FunctionInfo>) {
-        let (fm, fns, _specs) = analyze_source(Lang::Ruby, src, "t.rb", false).unwrap();
+        let (fm, fns, _specs) = measured(Lang::Ruby, src, "t.rb", false);
         (fm, fns)
+    }
+
+    fn analyze_rs(src: &str) -> (FileMetrics, Vec<FunctionInfo>) {
+        let (fm, fns, _specs) = measured(Lang::Rust, src, "t.rs", false);
+        (fm, fns)
+    }
+
+    // ---- Rust (ADR-0002 self-measurement) -------------------------------------
+    //
+    // Until Rust landed, the engine could not measure its OWN implementation
+    // language: `tina4 metrics` pointed at this repo found zero files. Every
+    // expected number below is hand-derived from the source in the test, so the
+    // analyzer is calibrated against McCabe rather than merely self-consistent.
+
+    #[test]
+    fn rust_counts_every_decision_kind_once() {
+        // Hand count, base 1 plus:
+        //   if a > 0                -> if_expression      1
+        //   if let Some(v) = b      -> if_expression      1  (NOT a separate kind)
+        //   while a > 0             -> while_expression   1
+        //   loop { break }          -> loop_expression    1
+        //   for i in 0..10          -> for_expression     1
+        //   c?                      -> try_expression     1  (the easy one to miss)
+        //   a > 0 && a < 10         -> binary &&          1  (`>` and `<` are not)
+        // = 8
+        let src = "\
+fn f(a: i32, b: Option<i32>, c: Result<i32, String>) -> Result<i32, String> {
+    if a > 0 { return Ok(1); }
+    if let Some(v) = b { let _ = v; }
+    while a > 0 { break; }
+    loop { break; }
+    for i in 0..10 { let _ = i; }
+    let _q = c?;
+    let _z = a > 0 && a < 10;
+    Ok(0)
+}
+";
+        let (fm, fns) = analyze_rs(src);
+        assert_eq!(fm.functions, 1);
+        assert_eq!(fns[0].complexity, 8, "1 + if + if-let + while + loop + for + ? + &&");
+    }
+
+    #[test]
+    fn rust_try_operator_is_a_real_branch() {
+        // Isolated so a regression in `?` alone cannot hide inside the big count
+        // above. Each `?` is an early return, so three of them are three branches.
+        let one = "fn f(c: Result<i32, String>) -> Result<i32, String> { Ok(c?) }\n";
+        assert_eq!(analyze_rs(one).1[0].complexity, 2, "1 + one ?");
+        let three = "fn f(a: Result<i32, String>, b: Result<i32, String>, c: Result<i32, String>) -> Result<i32, String> { Ok(a? + b? + c?) }\n";
+        assert_eq!(analyze_rs(three).1[0].complexity, 4, "1 + three ?");
+        // The negative half: no `?` means no extra branch.
+        let none = "fn f(c: i32) -> i32 { c }\n";
+        assert_eq!(analyze_rs(none).1[0].complexity, 1);
+    }
+
+    #[test]
+    fn rust_else_is_not_a_decision_but_else_if_is() {
+        // `if/else` is ONE decision - `else` is the fall-through edge. `else if`
+        // nests a second if_expression and so is a second decision. Counting
+        // `else_clause` would score these 3 and 4 instead of 2 and 3.
+        let if_else = "fn f(a: i32) -> i32 { if a > 0 { 1 } else { 2 } }\n";
+        assert_eq!(analyze_rs(if_else).1[0].complexity, 2, "if/else = 1 decision");
+        let chain = "fn f(a: i32) -> i32 { if a > 0 { 1 } else if a < 0 { 2 } else { 3 } }\n";
+        assert_eq!(analyze_rs(chain).1[0].complexity, 3, "if / else-if / else = 2 decisions");
+    }
+
+    #[test]
+    fn rust_wildcard_match_arm_is_not_a_decision() {
+        // Mirrors the TypeScript precedent: tree-sitter names `default:`
+        // `switch_default`, so the engine has never counted it. `_` is the same
+        // fall-through, so three arms with a wildcard are two decisions.
+        let src = "fn f(a: i32) -> i32 { match a { 1 => 1, 2 => 2, _ => 0 } }\n";
+        assert_eq!(analyze_rs(src).1[0].complexity, 3, "1 + two real arms, wildcard excluded");
+        // Without a wildcard every arm counts.
+        let exhaustive = "fn f(a: bool) -> i32 { match a { true => 1, false => 0 } }\n";
+        assert_eq!(analyze_rs(exhaustive).1[0].complexity, 3, "1 + two arms");
+    }
+
+    #[test]
+    fn rust_closure_decisions_stay_with_the_enclosing_function() {
+        // A closure is Rust's lambda, not TypeScript's arrow: `.map(|x| ..)` is
+        // everywhere, and listing each as a function would bury the real hot
+        // spots under CC-1 noise. So the closure is not reported separately and
+        // its branch is charged to the function that writes it.
+        let src = "fn f(xs: Vec<i32>) -> Vec<i32> { xs.into_iter().map(|x| if x > 0 { 1 } else { 0 }).collect() }\n";
+        let (fm, fns) = analyze_rs(src);
+        assert_eq!(fm.functions, 1, "the closure is not a function of its own");
+        assert_eq!(fns[0].complexity, 2, "1 + the closure's if");
+    }
+
+    #[test]
+    fn rust_impl_method_is_named_for_its_type() {
+        // impl_item stores the type under a field called `type`, NOT `name`.
+        // Without the node_name fallback every method reported bare.
+        let inherent = "struct Point;\nimpl Point { fn new() -> Self { Point } }\n";
+        let (_fm, fns) = analyze_rs(inherent);
+        assert_eq!(fns[0].name, "Point.new");
+
+        let trait_impl = "struct Point;\ntrait Draw { fn draw(&self); }\nimpl Draw for Point { fn draw(&self) {} }\n";
+        let (_fm, fns) = analyze_rs(trait_impl);
+        assert!(
+            fns.iter().any(|f| f.name == "Point.draw"),
+            "a trait impl is named for the implementing TYPE, not the trait: {:?}",
+            fns.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn rust_loc_excludes_line_doc_and_block_comments() {
+        let src = "\
+// a line comment
+/// a doc comment
+//! an inner doc comment
+/* a block comment
+ * continued
+ */
+fn f() -> i32 {
+    1
+}
+";
+        let (fm, _fns) = analyze_rs(src);
+        // Only `fn f() -> i32 {`, `1` and `}` are code.
+        assert_eq!(fm.loc, 3, "six comment lines must not count as code");
+    }
+
+    /// NEGATIVE CONTROL. A short, clean, low-complexity Rust file must score
+    /// HIGH and raise no offender. Without this, a change that simply broke the
+    /// Rust analyzer - making everything look complex and unmaintainable - would
+    /// pass every assertion above, since those only check that numbers are large.
+    #[test]
+    fn rust_negative_control_a_clean_file_scores_clean() {
+        let src = "\
+pub fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+pub fn sub(a: i32, b: i32) -> i32 {
+    a - b
+}
+";
+        // has_tests: true, because `untested` is a fact about the fixture, not
+        // about the analyzer, and this control is asserting that the ANALYSIS is
+        // clean.
+        let (fm, fns, _s) = measured(Lang::Rust, src, "clean.rs", true);
+        assert_eq!(fm.functions, 2);
+        assert!(fns.iter().all(|f| f.complexity == 1), "straight-line code is CC 1");
+        assert!(
+            fm.maintainability > 60.0,
+            "a trivial module must score HIGH (well clear of the 40 offender line), got {}",
+            fm.maintainability
+        );
+        assert!(
+            build_offenders(&[fm], &fns).is_empty(),
+            "a clean file must raise no offender at all"
+        );
+    }
+
+    /// Calibration, not self-consistency: the SAME two trivial functions written
+    /// in all five languages must land in the same maintainability band.
+    ///
+    /// This is what catches a Rust analyzer that is internally coherent but
+    /// systematically wrong - if the decision set or the operand-leaf list were
+    /// badly off, Rust's MI would drift away from the other four and every
+    /// number in the audit would be quietly mis-scaled. Measured at the time of
+    /// writing: rust 70.4, ts 72.4, ruby 72.4, php 71.0.
+    ///
+    /// Python is excluded from the band on purpose: it alone uses the ast-exact
+    /// `py_halstead` (volume 12 here against the generic walk's 31) because it
+    /// alone has a cross-language parity target, so it legitimately scores
+    /// higher and is not evidence of anything about Rust.
+    #[test]
+    fn rust_maintainability_is_in_band_with_the_other_languages() {
+        let cases = [
+            (
+                "rust",
+                Lang::Rust,
+                "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\npub fn sub(a: i32, b: i32) -> i32 {\n    a - b\n}\n",
+            ),
+            (
+                "ts",
+                Lang::Ts,
+                "export function add(a: number, b: number): number {\n    return a + b;\n}\n\nexport function sub(a: number, b: number): number {\n    return a - b;\n}\n",
+            ),
+            (
+                "php",
+                Lang::Php,
+                "<?php\nfunction add($a, $b) {\n    return $a + $b;\n}\n\nfunction sub($a, $b) {\n    return $a - $b;\n}\n",
+            ),
+            (
+                "ruby",
+                Lang::Ruby,
+                "def add(a, b)\n  a + b\nend\n\ndef sub(a, b)\n  a - b\nend\n",
+            ),
+        ];
+        let mut scores = Vec::new();
+        for (name, lang, src) in cases {
+            let (fm, _f, _s) = measured(lang, src, "t", false);
+            assert_eq!(fm.functions, 2, "{name}: both functions must be found");
+            scores.push((name, fm.maintainability));
+        }
+        let rust = scores.iter().find(|(n, _)| *n == "rust").unwrap().1;
+        for (name, mi) in &scores {
+            assert!(
+                (rust - mi).abs() < 8.0,
+                "rust MI {rust} is out of band with {name} MI {mi} for identical logic \
+                 - the Rust decision set or operand list has drifted"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_mod_and_crate_paths_resolve_to_real_files() {
+        let src = "mod agent;\npub mod console;\nuse crate::console::icon_ok;\nuse std::fs;\nuse serde::Serialize;\n";
+        let (_fm, _fns, specs) = measured(Lang::Rust, src, "main.rs", false);
+        assert!(specs.contains(&"mod:agent".to_string()), "got {specs:?}");
+        assert!(specs.contains(&"mod:console".to_string()), "got {specs:?}");
+        assert!(specs.contains(&"crate::console::icon_ok".to_string()), "got {specs:?}");
+
+        let paths = pathset(&["main.rs", "agent.rs", "console.rs"]);
+        assert_eq!(
+            resolve_import("mod:agent", "main.rs", Lang::Rust, &paths, None),
+            Some("agent.rs".to_string())
+        );
+        assert_eq!(
+            resolve_import("crate::console::icon_ok", "main.rs", Lang::Rust, &paths, None),
+            Some("console.rs".to_string()),
+            "the item tail is dropped once the module prefix matches a file"
+        );
+        // The negative half, and the one that matters most: an EXTERNAL crate
+        // must not resolve, or every third-party import becomes fake internal
+        // coupling and instability collapses to a constant.
+        //
+        // The names are chosen so the assertion can actually FAIL. `console` and
+        // `session` are both real crates on crates.io AND real files in this
+        // repo, so a resolver that ignores the leading segment would happily
+        // bind `use console::Term` to the local console.rs and invent an edge
+        // that does not exist. Asserting against `std::fs` alone proves nothing
+        // here - there is no std.rs to collide with, so it returns None whether
+        // the rule is right or wrong.
+        assert_eq!(
+            resolve_import("console::Term", "main.rs", Lang::Rust, &paths, None),
+            None,
+            "a BARE first segment is an external crate even when a local file shares its name"
+        );
+        assert_eq!(
+            resolve_import("crate::console::Term", "main.rs", Lang::Rust, &paths, None),
+            Some("console.rs".to_string()),
+            "the same path via `crate::` IS the local file - this is the contrast that makes the rule meaningful"
+        );
+        assert_eq!(resolve_import("std::fs", "main.rs", Lang::Rust, &paths, None), None);
+        assert_eq!(resolve_import("serde::Serialize", "main.rs", Lang::Rust, &paths, None), None);
+    }
+
+    /// Adding a language must not move the FOUR that already shipped.
+    ///
+    /// The live hazard was concrete: Rust needs `primitive_type` treated as a
+    /// Halstead operand, and tree-sitter-php emits `primitive_type` too (for
+    /// `int` / `string` type hints). Folding the Rust leaf kinds into the shared
+    /// list would have shifted every PHP file's volume, and therefore its MI,
+    /// with nothing in the suite to notice - the parity lock covers Python only.
+    ///
+    /// So the Rust kinds are gated on the language, and these are the exact
+    /// volumes the generic walk produced BEFORE Rust existed. If a future change
+    /// widens the shared list, this test goes red instead of the audit going
+    /// quietly wrong.
+    #[test]
+    fn adding_rust_does_not_perturb_the_other_languages() {
+        for (name, lang, src) in [
+            (
+                "ts",
+                Lang::Ts,
+                "export function add(a: number, b: number): number {\n    return a + b;\n}\n\nexport function sub(a: number, b: number): number {\n    return a - b;\n}\n",
+            ),
+            (
+                "php",
+                Lang::Php,
+                "<?php\nfunction add($a, $b) {\n    return $a + $b;\n}\n\nfunction sub($a, $b) {\n    return $a - $b;\n}\n",
+            ),
+            (
+                "ruby",
+                Lang::Ruby,
+                "def add(a, b)\n  a + b\nend\n\ndef sub(a, b)\n  a - b\nend\n",
+            ),
+        ] {
+            let (fm, _f, _s) = measured(lang, src, "t", false);
+            assert_eq!(
+                fm.halstead_volume, 31.02,
+                "{name}: Halstead volume moved - the Rust operand kinds have leaked \
+                 into the shared list and every {name} MI in the audit is now wrong"
+            );
+        }
+        // A PHP typed signature is the specific collision: `int` parses as
+        // `primitive_type`, which Rust counts and PHP must NOT.
+        let typed = "<?php\nfunction add(int $a, int $b): int {\n    return $a + $b;\n}\n";
+        let (fm, _f, _s) = measured(Lang::Php, typed, "t.php", false);
+        assert_eq!(
+            fm.halstead_volume, 12.0,
+            "PHP `primitive_type` must stay uncounted"
+        );
+    }
+
+    /// Pascal / Delphi is deliberately NOT wired up, and that is a measured
+    /// decision rather than an omission.
+    ///
+    /// The only published crate, `tree-sitter-pascal` 0.10.2 (Isopod), compiles
+    /// against tree-sitter 0.26 and handles classic Object Pascal well, but it
+    /// cannot parse Delphi 10.3+ inline loop variables (`for var X in Y do`,
+    /// upstream issue #15, still open). Measured against the real tina4delphi
+    /// corpus: 20,977 of 40,719 lines - 51.5% - fall inside an ERROR region,
+    /// including 100% of Tina4Frond.pas and 92.8% of Tina4HTMLRender.pas.
+    ///
+    /// Claiming `.pas` would mean emitting an MI derived from a tree where half
+    /// the decision points are invisible. A missing number is recoverable; a
+    /// confident wrong one is not. So `.pas` stays unrecognised until a grammar
+    /// that parses the corpus is available.
+    #[test]
+    fn pascal_is_not_claimed() {
+        for ext in ["pas", "dpr", "dpk", "inc", "PAS"] {
+            assert_eq!(
+                Lang::from_path(Path::new(&format!("a.{ext}"))),
+                None,
+                "{ext} must not be claimed while no grammar can parse the corpus"
+            );
+        }
+    }
+
+    #[test]
+    fn rust_inline_cfg_test_module_counts_as_tested() {
+        // Rust puts unit tests inside the file. Every stage of module_has_tests
+        // looks for an external test FILE, so without this every .rs file in the
+        // repo raised a false `untested` offender.
+        assert!(rust_has_inline_tests("fn f() {}\n#[cfg(test)]\nmod tests { #[test] fn t() {} }\n"));
+        // The negative half: a file with no test module is genuinely untested.
+        assert!(!rust_has_inline_tests("fn f() -> i32 { 1 }\n"));
+        assert!(
+            !rust_has_inline_tests("// mentions cfg and test but declares neither\n"),
+            "the marker is the attribute, not the words"
+        );
     }
 
     // ---- Language-agnostic building blocks -----------------------------------
@@ -1725,8 +2937,13 @@ mod tests {
         for ext in ["ts", "tsx", "js", "jsx", "mjs"] {
             assert_eq!(Lang::from_path(Path::new(&format!("a.{ext}"))), Some(Lang::Ts));
         }
+        assert_eq!(Lang::from_path(Path::new("a.rs")), Some(Lang::Rust));
+        assert_eq!(Lang::from_path(Path::new("A.RS")), Some(Lang::Rust), "extension match is case-insensitive");
         assert_eq!(Lang::from_path(Path::new("a.md")), None);
         assert_eq!(Lang::from_path(Path::new("noext")), None);
+        // Pascal is deliberately NOT wired up - see the `pascal_is_not_claimed`
+        // test below for why claiming it would be worse than omitting it.
+        assert_eq!(Lang::from_path(Path::new("a.pas")), None);
     }
 
     #[test]
@@ -1867,6 +3084,7 @@ mod tests {
             path: "x.py".into(), loc, complexity: 0, avg_complexity: 0.0,
             functions: funcs, maintainability: mi, halstead_volume: 0.0, has_tests,
             dep_count: 0, coupling_efferent: 0, coupling_afferent: 0, instability: 0.0,
+            parse_health: 1.0,
         }
     }
     fn func_with(cc: u32) -> FunctionInfo {
@@ -1957,17 +3175,17 @@ mod tests {
     #[test]
     fn analyzes_php_ruby_typescript_without_a_project() {
         let php = "<?php\nfunction f($a){ if ($a && $a > 0) { return 1; } return 0; }\n";
-        let (fm, fns, _s) = analyze_source(Lang::Php, php, "t.php", false).unwrap();
+        let (fm, fns, _s) = measured(Lang::Php, php, "t.php", false);
         assert_eq!(fm.functions, 1);
         assert!(fns[0].complexity >= 3); // 1 + if + &&
         assert!(fm.maintainability > 0.0 && fm.maintainability <= 100.0);
 
         let rb = "def f(a)\n  return 1 if a && a > 0\n  0\nend\n";
-        let (fm, _f, _s) = analyze_source(Lang::Ruby, rb, "t.rb", false).unwrap();
+        let (fm, _f, _s) = measured(Lang::Ruby, rb, "t.rb", false);
         assert_eq!(fm.functions, 1);
 
         let ts = "export const f = (a: number) => { if (a && a > 0) { return 1; } return 0; };\n";
-        let (fm, fns, _s) = analyze_source(Lang::Ts, ts, "t.ts", false).unwrap();
+        let (fm, fns, _s) = measured(Lang::Ts, ts, "t.ts", false);
         assert_eq!(fm.functions, 1, "top-level arrow function is counted");
         assert!(fns[0].complexity >= 3);
     }
@@ -1975,7 +3193,7 @@ mod tests {
     #[test]
     fn typescript_imports_are_counted_as_dep_count() {
         let ts = "import { a } from './a';\nimport b from './b';\nconst x = () => a + b;\n";
-        let (fm, _f, specs) = analyze_source(Lang::Ts, ts, "t.ts", false).unwrap();
+        let (fm, _f, specs) = measured(Lang::Ts, ts, "t.ts", false);
         // dep_count is every import as written - the number the dashboard badges.
         assert_eq!(fm.dep_count, 2);
         // Order is not part of the contract: the walk is a stack-based DFS and the
@@ -1995,7 +3213,7 @@ mod tests {
         // is 243 inline references against 72 `use` lines, so counting only `use`
         // understated PHP coupling by 3-4x (40 edges instead of 138).
         let php = "<?php\nnamespace Tina4;\nfunction boot() {\n    \\Tina4\\DotEnv::load();\n    $d = \\Tina4\\Database::create('x');\n    return \\Tina4\\Database::create('y');\n}\n";
-        let (fm, _f, specs) = analyze_source(Lang::Php, php, "App.php", false).unwrap();
+        let (fm, _f, specs) = measured(Lang::Php, php, "App.php", false);
         assert!(specs.iter().any(|s| s.contains("DotEnv")), "got {specs:?}");
         assert!(specs.iter().any(|s| s.contains("Database")), "got {specs:?}");
 
@@ -2017,7 +3235,7 @@ mod tests {
         // namespace_use_clause. Matching only the declaration's direct children
         // silently found NOTHING, so PHP produced 0 edges over 138 real files.
         let php = "<?php\nnamespace Tina4;\nuse Tina4\\ORM;\nuse Tina4\\Database\\Database;\nrequire_once \"helpers.php\";\nfunction f($a) { return $a; }\n";
-        let (fm, _f, specs) = analyze_source(Lang::Php, php, "Frond.php", false).unwrap();
+        let (fm, _f, specs) = measured(Lang::Php, php, "Frond.php", false);
         let mut got = specs.clone();
         got.sort();
         assert_eq!(
@@ -2234,6 +3452,731 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    // ---- Duplication / DRY ---------------------------------------------------
+    //
+    // Real files on a real filesystem, driven through the real `analyze_targets`
+    // two-pass scan. Every case plants a KNOWN answer, so a detector that finds
+    // nothing and a detector that flags everything both fail.
+
+    /// Write `files` into a fresh temp dir and run the full scan over them.
+    fn scan_temp(tag: &str, files: &[(&str, &str)]) -> (Report, PathBuf) {
+        let dir = std::env::temp_dir()
+            .join(format!("tina4_dup_{tag}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let mut paths = Vec::new();
+        for (name, body) in files {
+            let p = dir.join(name);
+            if let Some(parent) = p.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(&p, body).unwrap();
+            paths.push(p);
+        }
+        let report = analyze_targets(&paths, dir.to_str().unwrap());
+        (report, dir)
+    }
+
+    /// A block big enough to clear both gates, parameterised so callers can vary
+    /// the identifiers (a Type-2 clone) or an operator (NOT a clone).
+    fn dup_block(fn_name: &str, var: &str, op: &str) -> String {
+        format!(
+            "fn {fn_name}(input: i32) -> i32 {{
+    let mut {var} = 0;
+    for step in 0..input {{
+        if step % 2 == 0 {{
+            {var} = {var} {op} step;
+        }} else if step % 3 == 0 {{
+            {var} = {var} {op} (step * 2);
+        }} else {{
+            {var} = {var} {op} 1;
+        }}
+    }}
+    if {var} > 100 {{
+        {var} = 100;
+    }}
+    {var}
+}}
+"
+        )
+    }
+
+    #[test]
+    fn a_planted_duplicate_pair_is_found() {
+        // THE positive gate. Two identical blocks, one file.
+        let src = format!("{}\n{}", dup_block("alpha", "total", "+"), dup_block("beta", "total", "+"));
+        let (report, dir) = scan_temp("pair", &[("a.rs", &src)]);
+        assert!(
+            !report.clones.is_empty(),
+            "a planted identical pair must be reported as duplication"
+        );
+        let g = &report.clones[0];
+        assert!(g.copies >= 2, "expected at least 2 copies, got {}", g.copies);
+        assert!(
+            report.offenders.iter().any(|o| o.kind == "duplication"),
+            "the clone must surface as a `duplication` offender"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn changing_one_of_the_pair_stops_it_being_reported() {
+        // The other half of the same gate, and the one that proves the detector
+        // is reading STRUCTURE rather than just finding any two big blocks.
+        // `+` becomes `-` in one copy: same shape, different operator.
+        let src = format!("{}\n{}", dup_block("alpha", "total", "+"), dup_block("beta", "total", "-"));
+        let (report, dir) = scan_temp("broken", &[("a.rs", &src)]);
+        assert!(
+            report.clones.is_empty(),
+            "changing an OPERATOR must break the match - shape hashing that ignored \
+             operator tokens would still call these duplicates: {:?}",
+            report.clones
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn renaming_identifiers_does_not_defeat_detection() {
+        // Type-2 clone (Roy/Cordy): copy-paste-and-rename is the single most
+        // common real duplication, and an engine that misses it is not measuring
+        // DRY at all. Different function name, different variable name, identical
+        // structure.
+        let src = format!("{}\n{}", dup_block("alpha", "total", "+"), dup_block("gamma", "accumulator", "+"));
+        let (report, dir) = scan_temp("renamed", &[("a.rs", &src)]);
+        assert!(
+            !report.clones.is_empty(),
+            "a renamed copy is still a duplicate and must be found"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn duplication_is_detected_across_files() {
+        // Cross-file is the whole point - a single-file duplication number is
+        // nearly worthless, and it is also the case an accumulator scoped to one
+        // file would silently miss.
+        let a = dup_block("alpha", "total", "+");
+        let b = dup_block("beta", "total", "+");
+        let (report, dir) = scan_temp("xfile", &[("a.rs", &a), ("b.rs", &b)]);
+        let cross: Vec<&CloneGroup> = report.clones.iter().filter(|c| c.cross_file).collect();
+        assert!(
+            !cross.is_empty(),
+            "the same block in two different files must be reported as cross-file: {:?}",
+            report.clones
+        );
+        assert_eq!(cross[0].files.len(), 2, "both files must be named");
+        assert!(
+            report
+                .offenders
+                .iter()
+                .any(|o| o.kind == "duplication" && o.detail.contains("across 2 files")),
+            "the offender detail must say it spans files"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// NEGATIVE CONTROL. A detector that flags everything would pass every test
+    /// above. This file has NO duplication and must produce none.
+    #[test]
+    fn duplication_negative_control_distinct_code_is_not_flagged() {
+        let src = "\
+fn parse_port(raw: &str) -> Option<u16> {
+    raw.trim().parse::<u16>().ok()
+}
+
+fn banner(name: &str, version: &str) -> String {
+    format!(\"{name} v{version} ready\")
+}
+
+fn is_even(n: i64) -> bool {
+    n % 2 == 0
+}
+
+fn clamp_ratio(value: f64) -> f64 {
+    if value < 0.0 {
+        return 0.0;
+    }
+    if value > 1.0 {
+        return 1.0;
+    }
+    value
+}
+";
+        let (report, dir) = scan_temp("clean", &[("clean.rs", src)]);
+        assert!(
+            report.clones.is_empty(),
+            "structurally distinct functions must NOT be reported as duplicates: {:?}",
+            report.clones
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    /// The false-positive case that kills duplication tools in practice: a file
+    /// full of near-identical trivial accessors. They ARE the same shape, and a
+    /// size gate is the only thing standing between a useful report and one
+    /// nobody reads.
+    #[test]
+    fn trivial_repeated_accessors_are_below_the_reporting_floor() {
+        let src = "\
+struct Config { host: String, port: String, user: String, pass: String, name: String }
+
+impl Config {
+    fn host(&self) -> &str { &self.host }
+    fn port(&self) -> &str { &self.port }
+    fn user(&self) -> &str { &self.user }
+    fn pass(&self) -> &str { &self.pass }
+    fn name(&self) -> &str { &self.name }
+}
+";
+        let (report, dir) = scan_temp("getters", &[("cfg.rs", src)]);
+        assert!(
+            report.clones.is_empty(),
+            "five identical one-line getters must NOT be reported - they are \
+             identical by nature and unifying them would make the code worse: {:?}",
+            report.clones
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn duplication_works_for_every_language_not_just_rust() {
+        // Language-agnostic by construction: the detector never names a node
+        // kind, so a sixth language would need no work here. Proven, not
+        // asserted - each language gets its own planted pair.
+        let py_block = |n: &str| format!(
+            "def {n}(items):\n    total = 0\n    for item in items:\n        if item > 0:\n            total += item\n        elif item < 0:\n            total -= item\n        else:\n            total += 1\n    if total > 100:\n        total = 100\n    return total\n");
+        let php_block = |n: &str| format!(
+            "function {n}($items) {{\n    $total = 0;\n    foreach ($items as $item) {{\n        if ($item > 0) {{\n            $total += $item;\n        }} elseif ($item < 0) {{\n            $total -= $item;\n        }} else {{\n            $total += 1;\n        }}\n    }}\n    if ($total > 100) {{\n        $total = 100;\n    }}\n    return $total;\n}}\n");
+        let rb_block = |n: &str| format!(
+            "def {n}(items)\n  total = 0\n  items.each do |item|\n    if item > 0\n      total += item\n    elsif item < 0\n      total -= item\n    else\n      total += 1\n    end\n  end\n  if total > 100\n    total = 100\n  end\n  total\nend\n");
+        let ts_block = |n: &str| format!(
+            "export function {n}(items: number[]): number {{\n    let total = 0;\n    for (const item of items) {{\n        if (item > 0) {{\n            total += item;\n        }} else if (item < 0) {{\n            total -= item;\n        }} else {{\n            total += 1;\n        }}\n    }}\n    if (total > 100) {{\n        total = 100;\n    }}\n    return total;\n}}\n");
+
+        for (tag, name, body) in [
+            ("py", "a.py", format!("{}\n{}", py_block("alpha"), py_block("beta"))),
+            ("php", "a.php", format!("<?php\n{}\n{}", php_block("alpha"), php_block("beta"))),
+            ("rb", "a.rb", format!("{}\n{}", rb_block("alpha"), rb_block("beta"))),
+            ("ts", "a.ts", format!("{}\n{}", ts_block("alpha"), ts_block("beta"))),
+        ] {
+            let (report, dir) = scan_temp(tag, &[(name, &body)]);
+            assert!(
+                !report.clones.is_empty(),
+                "{tag}: a planted duplicate pair must be found in EVERY language, \
+                 not just Rust"
+            );
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn nested_copies_of_one_clone_are_reported_once() {
+        // A duplicated block also duplicates every sub-block inside it, at every
+        // wrapper level. Without maximal-only suppression the same clone lands in
+        // the report three or four times and buries the real findings - which is
+        // exactly what the first working version did (92 groups collapsed to 45).
+        let src = format!("{}\n{}", dup_block("alpha", "total", "+"), dup_block("beta", "total", "+"));
+        let (report, dir) = scan_temp("nested", &[("a.rs", &src)]);
+        let at_same_place: Vec<&CloneGroup> = report
+            .clones
+            .iter()
+            .filter(|c| c.first_file == "a.rs" && c.first_line == report.clones[0].first_line)
+            .collect();
+        assert_eq!(
+            at_same_place.len(),
+            1,
+            "one duplicated region must yield ONE group, not one per nesting level: {:?}",
+            report.clones
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    // ---- Parse-health guard --------------------------------------------------
+    //
+    // tree-sitter always returns a tree, so a file it cannot parse still yields
+    // LOC, CC and MI - all confidently wrong, because the decision points inside
+    // an ERROR region are invisible to the walks that count them. Found via a
+    // Delphi grammar gap that put 51.5% of a real corpus inside ERROR regions,
+    // but it applies to every language the engine claims.
+
+    /// A real, multi-branch function per language. Long enough to have
+    /// decisions, functions and MI worth reporting, so "it still reports" means
+    /// something.
+    const HEALTHY: [(&str, &str, &str); 5] = [
+        (
+            "python", "ok.py",
+            "def classify(value, limit):\n    if value is None:\n        return 'none'\n    if value > limit:\n        return 'high'\n    elif value < 0:\n        return 'negative'\n    return 'ok'\n\n\ndef total(rows):\n    out = 0\n    for row in rows:\n        if row:\n            out += row\n    return out\n",
+        ),
+        (
+            "php", "ok.php",
+            "<?php\nfunction classify($value, $limit) {\n    if ($value === null) { return 'none'; }\n    if ($value > $limit) { return 'high'; }\n    elseif ($value < 0) { return 'negative'; }\n    return 'ok';\n}\n\nfunction total($rows) {\n    $out = 0;\n    foreach ($rows as $row) {\n        if ($row) { $out += $row; }\n    }\n    return $out;\n}\n",
+        ),
+        (
+            "ruby", "ok.rb",
+            "def classify(value, limit)\n  return 'none' if value.nil?\n  return 'high' if value > limit\n  return 'negative' if value < 0\n  'ok'\nend\n\ndef total(rows)\n  out = 0\n  rows.each do |row|\n    out += row if row\n  end\n  out\nend\n",
+        ),
+        (
+            "ts", "ok.ts",
+            "export function classify(value: number | null, limit: number): string {\n  if (value === null) { return 'none'; }\n  if (value > limit) { return 'high'; }\n  else if (value < 0) { return 'negative'; }\n  return 'ok';\n}\n\nexport function total(rows: number[]): number {\n  let out = 0;\n  for (const row of rows) {\n    if (row) { out += row; }\n  }\n  return out;\n}\n",
+        ),
+        (
+            "rust", "ok.rs",
+            "pub fn classify(value: Option<i32>, limit: i32) -> &'static str {\n    let Some(v) = value else { return \"none\" };\n    if v > limit {\n        \"high\"\n    } else if v < 0 {\n        \"negative\"\n    } else {\n        \"ok\"\n    }\n}\n\npub fn total(rows: &[i32]) -> i32 {\n    let mut out = 0;\n    for row in rows {\n        if *row != 0 {\n            out += row;\n        }\n    }\n    out\n}\n",
+        ),
+    ];
+
+    #[test]
+    fn healthy_real_source_parses_at_full_health_in_every_language() {
+        // The calibration behind MIN_PARSE_HEALTH, and the control for the
+        // refusal tests below: if this drifts, the floor is wrong, not the guard.
+        for (name, _file, src) in HEALTHY {
+            let lang = match name {
+                "python" => Lang::Python,
+                "php" => Lang::Php,
+                "ruby" => Lang::Ruby,
+                "ts" => Lang::Ts,
+                _ => Lang::Rust,
+            };
+            let (fm, _f, _s) = measured(lang, src, "t", false);
+            assert_eq!(fm.parse_health, 1.0, "{name}: clean source must parse at 1.0");
+            assert!(
+                fm.parse_health >= MIN_PARSE_HEALTH,
+                "{name}: healthy source must never be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_healthy_file_still_reports_full_metrics_in_every_language() {
+        // THE NEGATIVE CONTROL, and the reason the refusal tests mean anything.
+        // A guard that refused everything would pass every test above this one.
+        // So: drive the same five languages through the WHOLE scan and demand
+        // real numbers out the other side.
+        for (name, file, src) in HEALTHY {
+            let (report, dir) = scan_temp(&format!("healthy_{name}"), &[(file, src)]);
+            assert_eq!(
+                report.refused.len(),
+                0,
+                "{name}: healthy source must NOT be refused - {:?}",
+                report.refused.iter().map(|r| &r.reason).collect::<Vec<_>>()
+            );
+            assert_eq!(report.files.len(), 1, "{name}: healthy source must be measured");
+            let fm = &report.files[0];
+            assert_eq!(fm.parse_health, 1.0, "{name}: health");
+            assert_eq!(fm.functions, 2, "{name}: both functions must be found");
+            assert!(fm.loc >= 10, "{name}: LOC must be real, got {}", fm.loc);
+            assert!(fm.complexity >= 4, "{name}: CC must count the branches, got {}", fm.complexity);
+            assert!(
+                fm.maintainability > 0.0,
+                "{name}: MI must be reported, got {}",
+                fm.maintainability
+            );
+            assert!(
+                !report.offenders.iter().any(|o| o.kind == "unparsed"),
+                "{name}: healthy source must raise no `unparsed` offender"
+            );
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn a_badly_broken_file_is_refused_in_every_language() {
+        // Real garbage, not a mock: text that the real grammar genuinely cannot
+        // parse. Each is structurally broken from near the top so the ERROR
+        // region covers most of the file, which is exactly the Delphi shape.
+        let broken = [
+            ("python", "py", "def f(:\n  ??? not python at all ~~~\n  <<<>>>\n  ]]]}}}\n  def ((\n"),
+            ("php", "php", "<?php\nfunction ((( {{{ ]]] ???\n  &&& ||| >>>\n  class class class\n"),
+            ("ruby", "rb", "def f(\n  ??? ]]] }}}\n  end end end end\n  class class class\n"),
+            ("ts", "ts", "function ((( {{{ ]]]\n  ??? >>> <<<\n  class class class\n  ))) }}}\n"),
+            ("rust", "rs", "fn f( { ]]] ???\n  >>> <<< |||\n  struct struct struct\n  ))) }}}\n"),
+        ];
+        for (name, ext, src) in broken {
+            let (report, dir) = scan_temp(
+                &format!("broken_{name}"),
+                &[(&format!("bad.{ext}"), src)],
+            );
+            assert_eq!(
+                report.files.len(),
+                0,
+                "{name}: an unparseable file must NOT appear in file_metrics - \
+                 its numbers would poison every average"
+            );
+            assert_eq!(
+                report.refused.len(),
+                1,
+                "{name}: an unparseable file must be REFUSED, not silently skipped"
+            );
+            assert!(
+                report.refused[0].parse_health < MIN_PARSE_HEALTH,
+                "{name}: refused at health {}",
+                report.refused[0].parse_health
+            );
+            // Visible in the ranked list, not only in a section nobody reads.
+            assert!(
+                report.offenders.iter().any(|o| o.kind == "unparsed"
+                    && o.detail.contains("NOT MEASURED")),
+                "{name}: refusal must surface as an `unparsed` offender"
+            );
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn a_refused_file_does_not_drag_down_a_healthy_scan() {
+        // The reason refusal beats "report it anyway": one unreadable file must
+        // not move the numbers for the files that ARE readable.
+        let good = "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n";
+        let (solo, d1) = scan_temp("solo_ok", &[("good.rs", good)]);
+        let (mixed, d2) = scan_temp(
+            "mixed_ok",
+            &[("good.rs", good), ("bad.rs", "fn f( { ]]] ???\n  >>> <<< |||\n  struct struct struct\n  ))) }}}\n")],
+        );
+        assert_eq!(mixed.files.len(), 1, "only the healthy file is measured");
+        assert_eq!(mixed.refused.len(), 1);
+        assert_eq!(
+            solo.files[0].maintainability, mixed.files[0].maintainability,
+            "the healthy file's MI must be identical whether or not a broken \
+             file sat next to it"
+        );
+        let _ = fs::remove_dir_all(d1);
+        let _ = fs::remove_dir_all(d2);
+    }
+
+    #[test]
+    fn a_refused_file_contributes_no_duplication() {
+        // Shapes hashed out of a misparse are noise. Two identically-broken
+        // files would otherwise "duplicate" each other and invent a finding.
+        let junk = "fn f( { ]]] ???\n  >>> <<< |||\n  struct struct struct\n  ))) }}}\n  ??? ]]] {{{\n  <<< >>> |||\n  fn fn fn fn\n";
+        let (report, dir) = scan_temp("junk_dup", &[("a.rs", junk), ("b.rs", junk)]);
+        assert_eq!(report.refused.len(), 2, "both are rubble");
+        assert!(
+            report.clones.is_empty(),
+            "two unparseable files must not be reported as duplicates of each \
+             other: {:?}",
+            report.clones
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn generated_doxygen_output_is_not_scanned_as_source() {
+        // Scanning tina4delphi used to report metrics for seven Doxygen files
+        // and nothing else - a report entirely about code nobody wrote.
+        // Detected by Doxygen's own marker file, not by directory name, because
+        // `docs/` and `html/` are legitimate places for hand-written source.
+        let dir = std::env::temp_dir().join(format!("tina4_doxy_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let gen = dir.join("docs/html");
+        fs::create_dir_all(&gen).unwrap();
+        fs::write(gen.join("doxygen.css"), "body{}\n").unwrap();
+        fs::write(gen.join("search.js"), "function search(a){ if(a){return 1;} return 0; }\n").unwrap();
+        // A hand-written source file in a plain docs dir must STILL be scanned.
+        let real = dir.join("docs/examples");
+        fs::create_dir_all(&real).unwrap();
+        fs::write(real.join("demo.js"), "function demo(a){ if(a){return 1;} return 0; }\n").unwrap();
+
+        let mut found = Vec::new();
+        walk_dir(&dir, &mut found);
+        let names: Vec<String> = found
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            !names.contains(&"search.js".to_string()),
+            "generated Doxygen JS must not be scanned as source: {names:?}"
+        );
+        assert!(
+            names.contains(&"demo.js".to_string()),
+            "a real source file under docs/ must STILL be scanned - the marker \
+             file is the signal, not the directory name: {names:?}"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_refusal_is_loud_enough_to_fail_a_ci_gate() {
+        // The whole point of refusing rather than skipping. A refused file has
+        // to reach `--fail-on warn`, or a scan that measured nothing can still
+        // exit 0 and read as green.
+        let (report, dir) = scan_temp(
+            "refusal_gate",
+            &[("bad.py", "def f(:\n  ??? not python at all ~~~\n  <<<>>>\n  ]]]}}}\n  def ((\n")],
+        );
+        let summary = build_summary(&report, report.offenders.len());
+        assert_eq!(summary.files_refused, 1, "the summary must count the refusal");
+        assert_eq!(summary.files_analyzed, 0);
+        let has_warn = report.offenders.iter().any(|o| o.severity == "warn");
+        let has_error = report.offenders.iter().any(|o| o.severity == "error");
+        assert!(has_warn, "a refusal must raise at least a warn");
+        assert_eq!(
+            compute_exit_code(Some("warn"), has_warn, has_error),
+            1,
+            "`--fail-on warn` must go red on a file the engine could not read"
+        );
+        // The other half, deliberately: refusal is a TOOLING gap, not a defect
+        // in the code being measured, so it must not newly break existing
+        // `--fail-on error` runs.
+        assert_eq!(
+            compute_exit_code(Some("error"), has_warn, has_error),
+            0,
+            "`--fail-on error` must stay green - a grammar gap is not the \
+             author's error"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    // ---- Recursion depth (a PRE-EXISTING crash, not a duplication one) --------
+    //
+    // Five walks recurse per AST level. Reproduced against the 58f7f73 release
+    // binary on macOS 26.5.2 arm64: a 60,000-term left-associative Python
+    // expression, one term per line, aborts the process with
+    // `fatal runtime error: stack overflow`, exit 134, taking the entire scan
+    // with it. `looks_minified` does not fire - the file is 10 bytes per line
+    // against its 200 threshold.
+
+    /// A left-associative expression `terms` deep, one term per line, so
+    /// `looks_minified` cannot short-circuit the case under test.
+    fn deep_expression(terms: usize) -> String {
+        let mut src = String::from("x = (a0\n");
+        for i in 1..terms {
+            src.push_str(&format!("  + a{i}\n"));
+        }
+        src.push_str(")\n");
+        src
+    }
+
+    #[test]
+    fn a_pathologically_deep_file_is_refused_instead_of_aborting_the_scan() {
+        let src = deep_expression(MAX_AST_DEPTH + 200);
+        assert!(
+            !looks_minified(&src),
+            "the fixture must reach the guard, not be filtered as a bundle"
+        );
+        let good = "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n";
+        let (report, dir) = scan_temp("deep", &[("deep.py", &src), ("ok.rs", good)]);
+        // Reaching this line at all is most of the assertion: the pre-change
+        // binary never returns from here.
+        assert_eq!(report.refused.len(), 1, "the deep file must be refused");
+        assert!(
+            report.refused[0].reason.contains("nests deeper"),
+            "the reason must name the real cause: {}",
+            report.refused[0].reason
+        );
+        assert_eq!(
+            report.files.len(),
+            1,
+            "the REST of the scan must survive - one bad file must not cost the \
+             whole report"
+        );
+        assert_eq!(report.files[0].path, "ok.rs");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_deeply_nested_but_survivable_file_is_still_measured() {
+        // The negative control for the depth guard. A limit that refused
+        // anything nested at all would pass the test above and be useless.
+        // 600 is 7x deeper than the deepest real file in the whole corpus
+        // (79, src/agent.rs) and still comfortably measured.
+        let src = deep_expression(600);
+        let (report, dir) = scan_temp("deep_ok", &[("deepish.py", &src)]);
+        assert_eq!(
+            report.refused.len(),
+            0,
+            "600 levels is under the {MAX_AST_DEPTH} limit and must be measured: {:?}",
+            report.refused.iter().map(|r| &r.reason).collect::<Vec<_>>()
+        );
+        assert_eq!(report.files.len(), 1);
+        assert!(report.files[0].loc > 0);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn depth_guard_boundary_is_exact() {
+        // Pinned on a REAL parsed tree, both sides, so the guard cannot drift
+        // off by one in either direction.
+        let mut parser = Parser::new();
+        parser.set_language(&Lang::Python.tree_sitter_language()).unwrap();
+        let tree = parser.parse(deep_expression(50), None).unwrap();
+        let root = tree.root_node();
+        // Measure the tree's true depth iteratively, then bracket it.
+        let mut depth = 0usize;
+        let mut stack = vec![(root, 0usize)];
+        while let Some((node, d)) = stack.pop() {
+            if d > depth {
+                depth = d;
+            }
+            let mut c = node.walk();
+            for child in node.children(&mut c) {
+                stack.push((child, d + 1));
+            }
+        }
+        assert!(depth > 10, "the fixture must actually be deep, got {depth}");
+        assert!(!depth_exceeds(root, depth), "depth {depth} does not EXCEED {depth}");
+        assert!(
+            depth_exceeds(root, depth - 1),
+            "depth {depth} does exceed {}",
+            depth - 1
+        );
+    }
+
+    // ---- Duplication must never be built out of a misparse -------------------
+
+    #[test]
+    fn an_error_region_never_becomes_a_clone_fragment() {
+        // Seven lines of garbage that tree-sitter folds into ONE ERROR node.
+        // Measured on tree-sitter 0.26.11: that node is 69 nodes over 7 lines,
+        // so it clears MIN_CLONE_NODES (60) and MIN_CLONE_LINES (6) on its own
+        // and the pre-change `collect_fragments` emitted it as a candidate.
+        let junk = "class ][ oops @@@\n  %%%% ????\n  ]]] [[[ }}}\n  &&& ||| ^^^\n  ~~~ !!! @@@\n  ((( ))) {{{\n  ,,, ... ;;;\n";
+        let mut parser = Parser::new();
+        parser.set_language(&Lang::Python.tree_sitter_language()).unwrap();
+        let tree = parser.parse(junk, None).unwrap();
+
+        // First prove the fixture is still the hard case it was written to be:
+        // an ERROR node that WOULD qualify if nothing stopped it.
+        let mut qualifying_error = false;
+        let mut stack = vec![tree.root_node()];
+        while let Some(node) = stack.pop() {
+            let mut c = node.walk();
+            let children: Vec<Node> = node.children(&mut c).collect();
+            if node.is_error() {
+                let mut count = 0u32;
+                let mut inner = vec![node];
+                while let Some(n) = inner.pop() {
+                    count += 1;
+                    let mut ic = n.walk();
+                    for ch in n.children(&mut ic) {
+                        inner.push(ch);
+                    }
+                }
+                let lines = node.end_position().row - node.start_position().row + 1;
+                if count >= MIN_CLONE_NODES && lines >= MIN_CLONE_LINES {
+                    qualifying_error = true;
+                }
+            }
+            stack.extend(children);
+        }
+        assert!(
+            qualifying_error,
+            "fixture no longer contains an ERROR node big enough to clear both \
+             clone gates - it is not testing anything"
+        );
+
+        let mut fragments: Vec<CloneFragment> = Vec::new();
+        let (_hash, _count, clean) = collect_fragments(tree.root_node(), 0, &mut fragments);
+        assert!(!clean, "a tree with an ERROR node is not clean");
+        assert!(
+            fragments.is_empty(),
+            "no fragment may be hashed out of a parse error: {fragments:?}"
+        );
+    }
+
+    #[test]
+    fn two_differently_broken_files_are_never_duplicates_of_each_other() {
+        // The failure this guards against, stated plainly: being unparseable is
+        // not a similarity. Two files whose only common property is that the
+        // grammar gave up on them must produce no finding at all.
+        let a = "def f(:\n  ??? not python ~~~\n  <<<>>>\n  ]]]}}}\n  def ((\n  class ][\n  @@@ %%%\n";
+        let b = "class ][ oops @@@\n  %%%% ????\n  ]]] [[[ }}}\n  &&& ||| ^^^\n  ~~~ !!! @@@\n  ((( ))) {{{\n  ,,, ... ;;;\n";
+        let (report, dir) = scan_temp("two_broken", &[("a.py", a), ("b.py", b)]);
+        assert_eq!(report.refused.len(), 2, "both are rubble");
+        assert!(
+            report.clones.is_empty(),
+            "two DIFFERENT unparseable files must not be reported as duplicates: {:?}",
+            report.clones
+        );
+        assert!(
+            !report.offenders.iter().any(|o| o.kind == "duplication"),
+            "no duplication offender may come out of two misparses"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn comments_are_hashed_so_this_is_not_full_type_2() {
+        // Locks the HONEST label on the detector. Roy/Cordy Type-II tolerates
+        // comments; this implementation does not, in any of the five languages.
+        // Measured, not assumed - and pinned here so the doc comment above
+        // `collect_fragments` cannot drift back to claiming Type-2.
+        //
+        // The positive half is the same test: identifiers and same-kind literals
+        // ARE normalised away, which is what makes the detector worth having.
+        fn shape(lang: Lang, src: &str) -> u64 {
+            let mut parser = Parser::new();
+            parser.set_language(&lang.tree_sitter_language()).unwrap();
+            let tree = parser.parse(src, None).unwrap();
+            let mut out = Vec::new();
+            collect_fragments(tree.root_node(), 0, &mut out).0
+        }
+        // Renaming is invisible - the property the whole metric rests on.
+        assert_eq!(
+            shape(Lang::Python, "def a(x):\n    return x + 1\n"),
+            shape(Lang::Python, "def b(y):\n    return y + 1\n"),
+            "an identifier rename must NOT change the shape"
+        );
+        // A same-kind literal change is invisible too.
+        assert_eq!(
+            shape(Lang::Python, "def a(x):\n    return x + 1\n"),
+            shape(Lang::Python, "def a(x):\n    return x + 2\n"),
+            "a same-kind literal change must NOT change the shape"
+        );
+        // Layout is invisible - whitespace never becomes a node.
+        assert_eq!(
+            shape(Lang::Python, "def a(x):\n    return x + 1\n"),
+            shape(Lang::Python, "def a(x):\n        return  x  +  1\n"),
+            "reformatting must NOT change the shape"
+        );
+        // An operator IS significant - the anonymous token is hashed.
+        assert_ne!(
+            shape(Lang::Python, "def a(x):\n    return x + 1\n"),
+            shape(Lang::Python, "def a(x):\n    return x - 1\n"),
+            "`+` and `-` must not collide"
+        );
+        // And the documented ceiling: comments are NOT normalised away.
+        for (name, lang, plain, commented) in [
+            (
+                "python", Lang::Python,
+                "def a(x):\n    return x + 1\n",
+                "def a(x):\n    # explain\n    return x + 1\n",
+            ),
+            (
+                "python-docstring", Lang::Python,
+                "def a(x):\n    return x + 1\n",
+                "def a(x):\n    \"doc\"\n    return x + 1\n",
+            ),
+            (
+                "php", Lang::Php,
+                "<?php\nfunction a($x) { return $x + 1; }\n",
+                "<?php\n/** d */\nfunction a($x) { return $x + 1; }\n",
+            ),
+            (
+                "ruby", Lang::Ruby,
+                "def a(x)\n  x + 1\nend\n",
+                "# c\ndef a(x)\n  x + 1\nend\n",
+            ),
+            (
+                "ts", Lang::Ts,
+                "function a(x: number) { return x + 1; }\n",
+                "// c\nfunction a(x: number) { return x + 1; }\n",
+            ),
+            (
+                "rust", Lang::Rust,
+                "fn a(x: i32) -> i32 { x + 1 }\n",
+                "/// doc\nfn a(x: i32) -> i32 { x + 1 }\n",
+            ),
+        ] {
+            assert_ne!(
+                shape(lang, plain),
+                shape(lang, commented),
+                "{name}: comments ARE hashed today. If this now matches, the \
+                 engine has become comment-blind and the doc comment on the \
+                 duplication section must be updated to say so - it is a \
+                 change in which clones get reported, not a free win."
+            );
+        }
+    }
+
     // ---- The parity lock against the REAL Python master reference ------------
 
     fn locate_tina4_python() -> Option<PathBuf> {
@@ -2448,5 +4391,6 @@ mod tests {
             "DatabaseTest.php tests Database, not Base"
         );
     }
+
 
 }

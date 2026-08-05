@@ -370,16 +370,11 @@ fn main() {
             if no_reload {
                 std::env::set_var("TINA4_NO_RELOAD", "true");
             }
-            // --no-browser must also propagate to the spawned language
-            // CLI. Without this, Rust suppressed its own
-            // open_browser() call but the framework process (tina4python,
-            // tina4php, etc.) still opened one of its own — the flag
-            // looked broken to anyone running the dev server in CI or
-            // a remote shell. Setting the env var here gives the
-            // language CLI the same signal Rust uses internally.
-            if no_browser {
-                std::env::set_var("TINA4_NO_BROWSER", "true");
-            }
+            // TINA4_NO_BROWSER is now set for the child unconditionally inside
+            // handle_serve — the CLI opens the browser, the framework must not.
+            // The conditional set that used to live here only covered the
+            // --no-browser case, which left a plain `serve` opening a duplicate
+            // tab from the framework side.
             handle_serve(port, &host, dev, production, no_browser);
         }
 
@@ -517,6 +512,26 @@ fn print_help(refresh: bool) {
 // ── Serve ────────────────────────────────────────────────────────
 
 pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_production: bool, no_browser: bool) {
+    // The CLI owns browser-opening. Decide OUR answer here, before any child is
+    // spawned, then suppress the child's unconditionally.
+    //
+    // Every framework also opens a browser on listen unless TINA4_NO_BROWSER is
+    // set, and we only propagated that when --no-browser was passed. So a plain
+    // `tina4 serve` opened THREE tabs: ours for the app, ours for /__dev, and
+    // the framework's duplicate of the app. Setting the var on the child after
+    // reading our own answer collapses that to the two we intend.
+    //
+    // The read must happen BEFORE the set_var below, or we would suppress
+    // ourselves along with the child.
+    let env_no_browser = read_dotenv_bool("TINA4_NO_BROWSER");
+    let os_no_browser = std::env::var("TINA4_NO_BROWSER")
+        .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes"))
+        .unwrap_or(false);
+    let cli_opens_browser = !(no_browser || env_no_browser || os_no_browser);
+    // Inherited by every spawn site in start_language_server, so a new runtime
+    // cannot forget it the way a per-Command .env() call could.
+    std::env::set_var("TINA4_NO_BROWSER", "true");
+
     // Background version check — warns if CLI is outdated
     std::thread::spawn(|| {
         if let Some(latest_tag) = get_latest_version() {
@@ -768,7 +783,9 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
 
     // Give the server a moment to bind, then open browser.
     //
-    // Three ways to suppress:
+    // Three ways to suppress, all folded into `cli_opens_browser` at the top of
+    // this function (it must be computed before we set TINA4_NO_BROWSER for the
+    // child, or we would read our own suppression back):
     //   1. `--no-browser` CLI flag
     //   2. `TINA4_NO_BROWSER=true` in the process environment
     //   3. `TINA4_NO_BROWSER=true` in the project's .env file
@@ -777,11 +794,7 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
     // entry in .env governs both browser-open points (fixes tina4-book#131).
     std::thread::sleep(std::time::Duration::from_secs(2));
     let url = format!("http://localhost:{}", port);
-    let env_no_browser = read_dotenv_bool("TINA4_NO_BROWSER");
-    let os_no_browser = std::env::var("TINA4_NO_BROWSER")
-        .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes"))
-        .unwrap_or(false);
-    if no_browser || env_no_browser || os_no_browser {
+    if !cli_opens_browser {
         println!("{} Server ready: {}", icon_ok().green(), url.cyan());
     } else {
         console::open_browser(&url);

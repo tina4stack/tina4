@@ -25,6 +25,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$Tag,            # e.g. v3.8.53
     [string]$Thumbprint = $env:CERT_THUMBPRINT,
+    [string]$Repo = "tina4stack/tina4",
     [string]$Binary = "tina4-windows-amd64.exe",
     [string]$TimestampUrl = "http://time.certum.pl/"
 )
@@ -66,7 +67,7 @@ New-Item -ItemType Directory -Force -Path $work | Out-Null
 Push-Location $work
 try {
     Write-Host "Downloading draft release assets for $Tag ..."
-    gh release download $Tag --dir . --clobber
+    gh release download $Tag --repo $Repo --dir . --clobber
     if ($LASTEXITCODE -ne 0) { Write-Error "gh release download failed for $Tag"; exit 1 }
     if (-not (Test-Path $Binary)) { Write-Error "$Binary not found in release $Tag"; exit 1 }
 
@@ -90,7 +91,7 @@ try {
     Write-Host "Signer verified: $($sig.SignerCertificate.Subject)"
 
     Write-Host "Uploading signed $Binary ..."
-    gh release upload $Tag $Binary --clobber
+    gh release upload $Tag $Binary --repo $Repo --clobber
     if ($LASTEXITCODE -ne 0) { Write-Error "upload of signed binary failed"; exit 1 }
 
     # Regenerate SHA256SUMS over the SIGNED set (sha256sum format: "<hash>  <name>").
@@ -103,11 +104,11 @@ try {
     # LF line endings + trailing newline, like sha256sum.
     [System.IO.File]::WriteAllText((Join-Path $work "SHA256SUMS"), (($lines -join "`n") + "`n"))
     Get-Content "SHA256SUMS"
-    gh release upload $Tag "SHA256SUMS" --clobber
+    gh release upload $Tag "SHA256SUMS" --repo $Repo --clobber
     if ($LASTEXITCODE -ne 0) { Write-Error "upload of SHA256SUMS failed"; exit 1 }
 
     Write-Host "Publishing release $Tag ..."
-    gh release edit $Tag --draft=false
+    gh release edit $Tag --repo $Repo --draft=false
     if ($LASTEXITCODE -ne 0) { Write-Error "publishing (un-draft) failed"; exit 1 }
 
     Write-Host ""

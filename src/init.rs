@@ -551,6 +551,7 @@ fn scaffold_project(language: &str, path: &str) {
             "src/routes",
             "src/pages",
             "src/public/css",
+            "tests",
         ]
     } else {
         vec![
@@ -902,10 +903,12 @@ fn scaffold_tina4js(path: &str) {
     "test": "vitest run"
   }},
   "dependencies": {{
-    "tina4js": "^1.0.7"
+    "tina4js": "^1.5.1"
   }},
   "devDependencies": {{
-    "vite": "^5.4.0",
+    "vite": "^8.2.0",
+    "vitest": "^4.1.10",
+    "jsdom": "^30.0.1",
     "typescript": "^5.4.0"
   }}
 }}
@@ -959,14 +962,55 @@ import { resolve } from 'path';
 export default defineConfig({
   resolve: {
     alias: {
-      '@': resolve(__dirname, 'src'),
+      // import.meta.dirname, not __dirname: Vite's native config loader does
+      // not define __dirname, and it becomes the default in a future major.
+      '@': resolve(import.meta.dirname, 'src'),
     },
+  },
+  test: {
+    // tina4-js is a Web Components framework: importing it touches HTMLElement
+    // at module load, so tests need a DOM. Without this every test file fails
+    // to import with "ReferenceError: HTMLElement is not defined".
+    environment: 'jsdom',
   },
   server: {
     port: 5173,
     // Proxy API calls to tina4-php/python backend in dev
     // proxy: { '/api': 'http://localhost:7145' },
   },
+});
+"#,
+    );
+
+    // tests/signals.test.ts
+    //
+    // One real example test, so `npm test` passes on a fresh project and the
+    // testing pattern is demonstrated rather than only declared in the script.
+    // It is a genuine gate: break signal or computed and it goes red.
+    write_file(
+        path,
+        "tests/signals.test.ts",
+        r#"import { describe, it, expect } from 'vitest';
+import { signal, computed } from 'tina4js';
+
+describe('signals', () => {
+  it('holds and updates a value', () => {
+    const count = signal(1);
+    expect(count.value).toBe(1);
+
+    count.value = 5;
+    expect(count.value).toBe(5);
+  });
+
+  it('re-derives a computed when its source changes', () => {
+    const count = signal(2);
+    const doubled = computed(() => count.value * 2);
+    expect(doubled.value).toBe(4);
+
+    // The assertion that matters: a computed is not a snapshot.
+    count.value = 10;
+    expect(doubled.value).toBe(20);
+  });
 });
 "#,
     );

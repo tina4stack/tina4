@@ -1,51 +1,75 @@
 #!/usr/bin/env bash
-# Tina4 AI skills installer for macOS / Linux
-# Usage: curl -fsSL https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.sh | sh
+# Tina4 AI skills installer for macOS / Linux.
 #
-# Installs the tina4 AI skills into ~/.claude/skills so Claude Desktop / Claude Code
-# use Tina4 conventions out of the box. As of 3.13.66 the developer skill is split
-# per language (each owned by its framework repo); tina4-js + tina4-maintainer are shared.
-# Stopgap until `tina4 skills install` ships embedded in the CLI binary.
+# Choose a target explicitly:
+#   curl -fsSL https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.sh | TINA4_SKILLS_TARGET=claude sh
+#   curl -fsSL https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.sh | TINA4_SKILLS_TARGET=codex sh
+# Use TINA4_SKILLS_TARGET=all only when both tools should receive the skills.
 set -euo pipefail
 
 # Pin skills to a released tag, not a moving branch, so an install is reproducible.
 # Bump this when the skills change in a new release. Override with TINA4_SKILLS_REF.
 ref="${TINA4_SKILLS_REF:-3.13.77}"
-dest="$HOME/.claude/skills"
+target="${TINA4_SKILLS_TARGET:-}"
+
+case "$target" in
+  claude) destinations=("$HOME/.claude/skills") ;;
+  codex)  destinations=("$HOME/.agents/skills") ;;
+  all)    destinations=("$HOME/.claude/skills" "$HOME/.agents/skills") ;;
+  *)
+    echo "error: set TINA4_SKILLS_TARGET to claude, codex, or all" >&2
+    exit 2
+    ;;
+esac
+
+stage="$(mktemp -d)"
+trap 'rm -rf "$stage"' EXIT
 
 # install_skill <repo> <skill> <reference.md ...>
 install_skill() {
   repo="$1"; skill="$2"; shift 2
   base="https://raw.githubusercontent.com/tina4stack/${repo}/${ref}/.claude/skills"
-  mkdir -p "$dest/$skill/references"
-  curl -fsSL "$base/$skill/SKILL.md" -o "$dest/$skill/SKILL.md"
-  for r in "$@"; do
-    curl -fsSL "$base/$skill/references/$r" -o "$dest/$skill/references/$r"
+  mkdir -p "$stage/$skill/references"
+  curl -fsSL "$base/$skill/SKILL.md" -o "$stage/$skill/SKILL.md"
+  for reference in "$@"; do
+    curl -fsSL "$base/$skill/references/$reference" -o "$stage/$skill/references/$reference"
   done
   echo "  + $skill  ($repo)"
+}
+
+publish_skills() {
+  for destination in "${destinations[@]}"; do
+    mkdir -p "$destination"
+    for source in "$stage"/*; do
+      skill="$(basename "$source")"
+      replacement="$destination/.${skill}.tina4-new"
+      rm -rf "$replacement"
+      cp -R "$source" "$replacement"
+      rm -rf "$destination/$skill"
+      mv "$replacement" "$destination/$skill"
+    done
+    printf '%s\n' "$ref" > "$destination/.tina4-skills-ref"
+    echo "  installed for $destination"
+  done
 }
 
 DEV_REFS="auth-and-services.md data-and-orm.md deployment.md routes-and-api.md templates-and-frontend.md realtime.md"
 
 echo ""
 echo "  Tina4 Skills Installer"
-echo "  Installing to: $dest  (ref: $ref)"
+echo "  Target: $target  (ref: $ref)"
 echo ""
 
-# Per-language developer skills (each from its own framework repo)
+# Per-language developer skills (each from its own framework repo).
 install_skill tina4-python  tina4-developer-python  $DEV_REFS
 install_skill tina4-php     tina4-developer-php     $DEV_REFS
 install_skill tina4-ruby    tina4-developer-ruby    $DEV_REFS
 install_skill tina4-nodejs  tina4-developer-nodejs  $DEV_REFS
-# Shared skills (canonical copy served from tina4-python)
+# Shared skills (canonical copy served from tina4-python).
 install_skill tina4-python  tina4-js          html-and-components.md signals-and-reactivity.md persistence.md rtc.md
 install_skill tina4-python  tina4-maintainer  cli-and-deployment.md frond-and-frontend.md routing-and-orm.md subsystems.md
 
-# Record the installed ref so `tina4 doctor` can report skills currency. This is
-# a GLOBAL marker under ~/.claude/skills only — it NEVER touches a project's
-# CLAUDE.md or any project file.
-printf '%s\n' "$ref" > "$dest/.tina4-skills-ref"
+publish_skills
 
 echo ""
-echo "  Done — six skills installed (ref $ref). Restart Claude (Desktop/Code) to pick them up."
-echo ""
+echo "  Done - six skills installed for $target (ref $ref). Restart your coding tool to pick them up."

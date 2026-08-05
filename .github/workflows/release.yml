@@ -280,7 +280,16 @@ jobs:
           # present. Retry instead of dying, and let the per-name check decide.
           got=""
           for attempt in 1 2 3 4 5 6; do
-            got=$(gh release view "${{ github.ref_name }}" --json assets -q '.assets[].name' 2>/dev/null | sort || true)
+            # Read the draft by LISTING releases, never `gh release view <tag>`.
+            # A DRAFT has no tag association in the API until it is published, so
+            # GET /releases/tags/<tag> 404s for it -- which `2>/dev/null` then
+            # swallowed into an empty set, and the guard reported a complete
+            # release as INCOMPLETE with "actual (0)". That is what v3.8.66 hit
+            # with all 8 assets present on the draft. GET /releases DOES include
+            # drafts, so match on tag_name there instead.
+            got=$(gh api "repos/${{ github.repository }}/releases" --paginate \
+                    --jq ".[] | select(.tag_name==\"${{ github.ref_name }}\") | .assets[].name" \
+                    2>/dev/null | sort || true)
             [ "$(printf '%s' "$got" | grep -c .)" -ge "$want" ] && break
             echo "attempt $attempt: $(printf '%s' "$got" | grep -c .) of $want assets listed, waiting..."
             sleep 10

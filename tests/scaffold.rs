@@ -160,6 +160,46 @@ fn init_js_scaffolds_a_project_that_tests_and_audits_clean() {
     assert!(out.status.success(), "init js failed: {}", String::from_utf8_lossy(&out.stderr));
     let proj = base.join("app");
 
+    // The scaffold must WIRE ITSELF, because a generator that emits a
+    // hand-maintained barrel teaches that pattern to every developer and every
+    // agent that copies it - which is exactly what happened: components/ shipped
+    // with NOTHING importing it, so a new user had no worked example of how a
+    // component gets included and had to guess.
+    let main_ts = fs::read_to_string(proj.join("src/main.ts")).expect("src/main.ts");
+    assert!(
+        main_ts.contains("import.meta.glob('./routes/**/*.ts', { eager: true })"),
+        "main.ts must glob routes eagerly, not import a barrel:\n{main_ts}"
+    );
+    assert!(
+        main_ts.contains("import.meta.glob('./components/**/*.ts', { eager: true })"),
+        "main.ts must glob components eagerly, or components never register:\n{main_ts}"
+    );
+    assert!(
+        !proj.join("src/routes/index.ts").exists(),
+        "src/routes/index.ts is the barrel the glob replaces - it must not be scaffolded"
+    );
+    // The catch-all must sit AFTER the glob, never inside routes/: glob keys
+    // arrive in alphabetical order and a `*` route registered first swallows
+    // every path.
+    assert!(
+        main_ts.contains("route('*'"),
+        "the catch-all belongs in main.ts after the glob:\n{main_ts}"
+    );
+    for entry in fs::read_dir(proj.join("src/routes")).expect("src/routes") {
+        let f = entry.expect("dir entry").path();
+        let body = fs::read_to_string(&f).unwrap_or_default();
+        assert!(
+            !body.contains("route('*'"),
+            "{f:?} registers a catch-all inside the globbed folder; it would shadow every route"
+        );
+    }
+    // A component nobody references is a folder with no example in it.
+    let home = fs::read_to_string(proj.join("src/pages/home.ts")).expect("src/pages/home.ts");
+    assert!(
+        home.contains("<app-header"),
+        "the scaffolded page must USE the scaffolded component:\n{home}"
+    );
+
     let package_json = fs::read_to_string(proj.join("package.json")).expect("package.json");
     assert!(
         package_json.contains("\"vitest\""),

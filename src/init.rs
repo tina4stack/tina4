@@ -1039,8 +1039,18 @@ describe('signals', () => {
     write_file(
         path,
         "src/main.ts",
-        r#"import { signal, computed, html, route, router, navigate, api } from 'tina4js';
-import '@/routes/index';
+        r#"import { html, route, router, api } from 'tina4js';
+
+// FOLDERS WIRE THEMSELVES. route() appends to the router table and
+// customElements.define() runs at module scope, so importing a file IS
+// registering what it declares - one glob replaces a hand-maintained barrel,
+// and a new route or component needs no edit here.
+//
+// { eager: true } is MANDATORY. Without it the glob hands back loader functions
+// nobody calls, so NOTHING registers and the app renders an empty page with no
+// error to read.
+import.meta.glob('./routes/**/*.ts', { eager: true });
+import.meta.glob('./components/**/*.ts', { eager: true });
 
 // Debug overlay in dev mode (Ctrl+Shift+D to toggle, tree-shaken from
 // production builds). Signals created before this dynamic import resolves —
@@ -1050,36 +1060,45 @@ if (import.meta.env.DEV) import('tina4js/debug');
 // Configure API (uncomment to connect to tina4-php/python backend)
 // api.configure({ baseUrl: '/api', auth: true });
 
-// Start router
-router.start({ target: '#root', mode: 'hash' });
-"#,
-    );
-
-    // src/routes/index.ts
-    write_file(
-        path,
-        "src/routes/index.ts",
-        r#"import { route, navigate, html, signal, computed } from 'tina4js';
-import { homePage } from '@/pages/home';
-
-// Home
-route('/', homePage);
-
-// About
-route('/about', () => html`
-  <div class="page">
-    <h1>About</h1>
-    <p>Built with <a href="https://github.com/tina4stack/tina4-js">tina4-js</a> — a sub-3KB reactive framework.</p>
-    <a href="/">Back home</a>
-  </div>
-`);
-
-// 404
+// The catch-all belongs HERE, after the glob. Inside routes/ it would sort
+// ahead of the real routes and every path would render 404.
 route('*', () => html`
   <div class="page">
     <h1>404</h1>
     <p>Page not found.</p>
     <a href="/">Go home</a>
+  </div>
+`);
+
+// Start router
+router.start({ target: '#root', mode: 'hash' });
+"#,
+    );
+
+    // src/routes/home.ts — one file per route; the glob in main.ts finds them.
+    write_file(
+        path,
+        "src/routes/home.ts",
+        r#"import { route } from 'tina4js';
+import { homePage } from '@/pages/home';
+
+// Adding a route means adding a FILE here. Nothing to register elsewhere:
+// main.ts globs this folder, and importing a file runs its route() call.
+route('/', homePage);
+"#,
+    );
+
+    // src/routes/about.ts
+    write_file(
+        path,
+        "src/routes/about.ts",
+        r#"import { route, html } from 'tina4js';
+
+route('/about', () => html`
+  <div class="page">
+    <h1>About</h1>
+    <p>Built with <a href="https://github.com/tina4stack/tina4-js">tina4-js</a> — a sub-3KB reactive framework.</p>
+    <a href="/">Back home</a>
   </div>
 `);
 "#,
@@ -1109,6 +1128,13 @@ export function homePage() {
   }, 3000);
 
   return html`
+    <!-- A COMPONENT IN USE. <app-header> is declared in
+         src/components/app-header.ts and registers itself the moment main.ts
+         globs that folder - there is no import to add here and no manifest to
+         update. This tag is the worked example; the folder used to ship with
+         nothing referencing it, so there was nothing to copy. -->
+    <app-header title="Welcome"></app-header>
+
     <div class="welcome">
       <div class="star">&#9733;</div>
       <h1>Tina4<span class="js">js</span></h1>

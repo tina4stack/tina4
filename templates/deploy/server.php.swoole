@@ -17,8 +17,32 @@ $port = (int)(getenv('TINA4_SWOOLE_PORT') ?: 7145);
 
 $http = new Swoole\Http\Server($host, $port);
 
+/**
+ * How many workers, on whichever extension is actually installed.
+ *
+ * OpenSwoole 22+ REMOVED the procedural swoole_*() aliases: on openswoole
+ * 26.2.0, swoole_cpu_num() and swoole_version() are both gone and the CPU count
+ * lives on OpenSwoole\Util. Mainline Swoole is the mirror image - it has the
+ * functions and no OpenSwoole\Util. Calling either one unguarded is a fatal at
+ * STARTUP on the other build, which is the worst place for it: the image builds
+ * fine, then the container exits 255 the moment it runs.
+ *
+ * (Measured: an earlier version of this file called swoole_cpu_num() directly
+ * and did exactly that.)
+ */
+$workers = (int)(getenv('TINA4_SWOOLE_WORKERS') ?: 0);
+if ($workers <= 0) {
+    if (class_exists('OpenSwoole\Util')) {
+        $workers = \OpenSwoole\Util::getCPUNum() * 2;
+    } elseif (function_exists('swoole_cpu_num')) {
+        $workers = swoole_cpu_num() * 2;
+    } else {
+        $workers = 4;
+    }
+}
+
 $http->set([
-    'worker_num' => (int)(getenv('TINA4_SWOOLE_WORKERS') ?: swoole_cpu_num() * 2),
+    'worker_num' => $workers,
 
     // Recycle a worker after this many requests. A Swoole worker is resident,
     // so anything an app leaks into a static accumulates across every request

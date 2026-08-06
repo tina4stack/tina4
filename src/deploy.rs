@@ -428,6 +428,50 @@ mod tests {
         assert!(NGINX_FPM_CONF.contains("vendor"), "the dependency tree must not be web-served");
     }
 
+    /// The swoole entry script must not call a procedural swoole_*() helper
+    /// unguarded.
+    ///
+    /// This is not hypothetical tidiness. OpenSwoole 22+ REMOVED those aliases:
+    /// on openswoole 26.2.0 swoole_cpu_num() and swoole_version() are both
+    /// gone, while mainline Swoole still has them. An earlier version of this
+    /// template called swoole_cpu_num() for the worker count, and the result
+    /// was the nastiest possible shape of failure - the image BUILT clean and
+    /// the container then exited 255 on startup with "Call to undefined
+    /// function swoole_cpu_num()". Measured, not imagined.
+    ///
+    /// A guarded call is fine and is what the template does now, so the check
+    /// is for a call OUTSIDE a function_exists() guard.
+    #[test]
+    fn the_swoole_entry_script_guards_every_procedural_helper() {
+        let code = php_code_only(SERVER_PHP_SWOOLE);
+        for helper in ["swoole_cpu_num", "swoole_version", "swoole_get_local_ip"] {
+            let calls = code.matches(&format!("{helper}(")).count();
+            if calls == 0 {
+                continue;
+            }
+            let guards = code.matches(&format!("function_exists('{helper}')")).count();
+            assert!(
+                guards >= 1,
+                "{helper}() is called but never guarded with function_exists();                  OpenSwoole 22+ removed it and the container will exit 255 at startup"
+            );
+        }
+    }
+
+    /// The worker count must resolve on BOTH builds, so both spellings have to
+    /// be present: OpenSwoole\Util for openswoole, the procedural helper for
+    /// mainline Swoole. One alone silently excludes half the users.
+    #[test]
+    fn the_swoole_entry_script_resolves_workers_on_either_extension() {
+        assert!(
+            php_code_only(SERVER_PHP_SWOOLE).contains(r"OpenSwoole\Util"),
+            r"no OpenSwoole\Util path: the worker count cannot resolve on openswoole"
+        );
+        assert!(
+            php_code_only(SERVER_PHP_SWOOLE).contains("swoole_cpu_num"),
+            "no swoole_cpu_num path: the worker count cannot resolve on mainline Swoole"
+        );
+    }
+
     /// A resident Swoole worker never discards process state between requests,
     /// so debug mode's ever-growing static arrays are a guaranteed leak.
     #[test]
@@ -474,6 +518,40 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// Comment-stripped view of a PHP file, for the same reason
+    /// shell_code_only() exists: a test about what the code CALLS must not read
+    /// what the comments SAY. The guard test below flagged its own template's
+    /// docblock - the sentence explaining that swoole_version() was removed
+    /// counted as a call to it.
+    ///
+    /// Handles `/* ... */` blocks (which is what a docblock is) and `//` line
+    /// comments. Not a PHP parser and does not need to be: these templates are
+    /// ours, and no string literal in them contains a comment opener.
+    fn php_code_only(src: &str) -> String {
+        let mut out = String::with_capacity(src.len());
+        let bytes: Vec<char> = src.chars().collect();
+        let mut i = 0;
+        while i < bytes.len() {
+            if i + 1 < bytes.len() && bytes[i] == '/' && bytes[i + 1] == '*' {
+                i += 2;
+                while i + 1 < bytes.len() && !(bytes[i] == '*' && bytes[i + 1] == '/') {
+                    i += 1;
+                }
+                i = (i + 2).min(bytes.len());
+                continue;
+            }
+            if i + 1 < bytes.len() && bytes[i] == '/' && bytes[i + 1] == '/' {
+                while i < bytes.len() && bytes[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            out.push(bytes[i]);
+            i += 1;
+        }
+        out
     }
 
     fn cmd_line(dockerfile: &str) -> &str {

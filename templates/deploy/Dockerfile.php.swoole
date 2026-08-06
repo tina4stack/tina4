@@ -50,6 +50,23 @@ COPY . /app
 # image that actually runs against a stock scaffold.
 COPY server.php /app/server.php
 
+# Smoke the worker-count resolution at BUILD time.
+#
+# `php -l` only PARSES; it cannot see a call to a function this extension does
+# not have. That gap is how OpenSwoole 22+ removing swoole_cpu_num() got out:
+# the image built clean and the container exited 255 on first deploy. This
+# asserts the resolution actually produces a positive worker count on THIS
+# build, so the same class of failure fails the build instead of the deploy.
+#
+# It is deliberately a plain assertion rather than anything clever that
+# rewrites and evals server.php - a smoke test that is itself fragile is worse
+# than none, because it fails for its own reasons and gets deleted.
+RUN php -r 'if (class_exists("OpenSwoole\\Util")) { $n = OpenSwoole\Util::getCPUNum() * 2; } \
+    elseif (function_exists("swoole_cpu_num")) { $n = swoole_cpu_num() * 2; } \
+    else { $n = 4; } \
+    if ($n < 1) { fwrite(STDERR, "worker count did not resolve\n"); exit(1); } \
+    echo "worker count resolves to $n on this build\n";'
+
 ENV TINA4_OVERRIDE_CLIENT=true \
     TINA4_DEBUG=false \
     TINA4_SWOOLE_HOST=0.0.0.0 \

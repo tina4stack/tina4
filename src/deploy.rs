@@ -33,8 +33,34 @@ impl Target {
     }
 }
 
+/// PHP runtime flavour for `deploy docker`.
+///
+/// PHP is the only language with a genuine choice here, because it is the only
+/// one where the process model is a deployment decision rather than a property
+/// of the runtime: cli keeps the framework's own forking server, fpm gives a
+/// fresh process per request behind nginx, and swoole keeps the app resident.
+/// The other three have one sensible answer each, so `--runtime` is refused
+/// there rather than silently ignored.
+#[derive(Clone, Copy, PartialEq)]
+pub enum PhpRuntime {
+    Cli,
+    Fpm,
+    Swoole,
+}
+
+impl PhpRuntime {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "cli" | "default" | "builtin" => Some(Self::Cli),
+            "fpm" | "php-fpm" | "fpm-nginx" => Some(Self::Fpm),
+            "swoole" | "openswoole" => Some(Self::Swoole),
+            _ => None,
+        }
+    }
+}
+
 /// Public entry point — invoked by `tina4 deploy <target>`.
-pub fn run(target: &str, force: bool) {
+pub fn run(target: &str, runtime: Option<&str>, force: bool) {
     let Some(target) = Target::parse(target) else {
         eprintln!(
             "{} unknown deploy target: {}\n  valid targets: docker, systemd, nginx, cpanel",
@@ -55,8 +81,35 @@ pub fn run(target: &str, force: bool) {
         }
     };
 
+    // Resolve --runtime before any file is written, so a typo fails with a
+    // named error instead of quietly producing the default image.
+    let php_runtime = match runtime {
+        None => PhpRuntime::Cli,
+        Some(raw) => {
+            if info.language != "php" {
+                eprintln!(
+                    "{} --runtime applies to PHP only; {} has one deployment runtime",
+                    icon_fail().red(),
+                    info.language
+                );
+                std::process::exit(2);
+            }
+            match PhpRuntime::parse(raw) {
+                Some(r) => r,
+                None => {
+                    eprintln!(
+                        "{} unknown PHP runtime: {}\n  valid runtimes: cli, fpm, swoole",
+                        icon_fail().red(),
+                        raw
+                    );
+                    std::process::exit(2);
+                }
+            }
+        }
+    };
+
     let written = match target {
-        Target::Docker => emit_docker(&info, force),
+        Target::Docker => emit_docker(&info, php_runtime, force),
         Target::Systemd => emit_systemd(&info, force),
         Target::Nginx => emit_nginx(&info, force),
         Target::Cpanel => emit_cpanel(&info, force),
@@ -82,10 +135,14 @@ pub fn run(target: &str, force: bool) {
 
 // ── Targets ───────────────────────────────────────────────────────────
 
-fn emit_docker(info: &ProjectInfo, force: bool) -> Vec<String> {
+fn emit_docker(info: &ProjectInfo, php_runtime: PhpRuntime, force: bool) -> Vec<String> {
     let dockerfile = match info.language.as_str() {
         "python"   => DOCKERFILE_PYTHON,
-        "php"      => DOCKERFILE_PHP,
+        "php"      => match php_runtime {
+            PhpRuntime::Cli    => DOCKERFILE_PHP,
+            PhpRuntime::Fpm    => DOCKERFILE_PHP_FPM,
+            PhpRuntime::Swoole => DOCKERFILE_PHP_SWOOLE,
+        },
         "ruby"     => DOCKERFILE_RUBY,
         "nodejs"   => DOCKERFILE_NODEJS,
         _          => DOCKERFILE_PYTHON,
@@ -96,6 +153,28 @@ fn emit_docker(info: &ProjectInfo, force: bool) -> Vec<String> {
     }
     if write_if_absent(".dockerignore", DOCKERIGNORE, force) {
         written.push(".dockerignore".to_string());
+    }
+
+    // Each PHP runtime needs its own companion files, and the Dockerfile COPYs
+    // them: emitting the Dockerfile without them produces an image that fails
+    // to build. They are written together or not at all.
+    if info.language == "php" {
+        match php_runtime {
+            PhpRuntime::Cli => {}
+            PhpRuntime::Swoole => {
+                if write_if_absent("server.php", SERVER_PHP_SWOOLE, force) {
+                    written.push("server.php".to_string());
+                }
+            }
+            PhpRuntime::Fpm => {
+                if write_if_absent("nginx.fpm.conf", NGINX_FPM_CONF, force) {
+                    written.push("nginx.fpm.conf".to_string());
+                }
+                if write_if_absent("docker-entrypoint.fpm.sh", ENTRYPOINT_FPM, force) {
+                    written.push("docker-entrypoint.fpm.sh".to_string());
+                }
+            }
+        }
     }
     written
 }
@@ -195,6 +274,11 @@ fn print_next_steps(target: Target) {
 
 const DOCKERFILE_PYTHON: &str = include_str!("../templates/deploy/Dockerfile.python");
 const DOCKERFILE_PHP: &str = include_str!("../templates/deploy/Dockerfile.php");
+const DOCKERFILE_PHP_FPM: &str = include_str!("../templates/deploy/Dockerfile.php.fpm");
+const DOCKERFILE_PHP_SWOOLE: &str = include_str!("../templates/deploy/Dockerfile.php.swoole");
+const SERVER_PHP_SWOOLE: &str = include_str!("../templates/deploy/server.php.swoole");
+const NGINX_FPM_CONF: &str = include_str!("../templates/deploy/nginx.fpm.conf");
+const ENTRYPOINT_FPM: &str = include_str!("../templates/deploy/docker-entrypoint.fpm.sh");
 const DOCKERFILE_RUBY: &str = include_str!("../templates/deploy/Dockerfile.ruby");
 const DOCKERFILE_NODEJS: &str = include_str!("../templates/deploy/Dockerfile.nodejs");
 const DOCKERIGNORE: &str = include_str!("../templates/deploy/dockerignore");
@@ -237,13 +321,159 @@ mod tests {
     // are pure string assertions over templates we own -- no dependency, no
     // double. The docker-build job in CI is the end-to-end partner to these.
 
-    fn all_dockerfiles() -> [(&'static str, &'static str); 4] {
+    fn all_dockerfiles() -> [(&'static str, &'static str); 6] {
+        [
+            ("python", DOCKERFILE_PYTHON),
+            ("php", DOCKERFILE_PHP),
+            ("php-fpm", DOCKERFILE_PHP_FPM),
+            ("php-swoole", DOCKERFILE_PHP_SWOOLE),
+            ("ruby", DOCKERFILE_RUBY),
+            ("nodejs", DOCKERFILE_NODEJS),
+        ]
+    }
+
+    // ── PHP runtime selection ─────────────────────────────────────────────
+
+    #[test]
+    fn php_runtime_parse_known() {
+        assert!(matches!(PhpRuntime::parse("cli"), Some(PhpRuntime::Cli)));
+        assert!(matches!(PhpRuntime::parse("FPM"), Some(PhpRuntime::Fpm)));
+        assert!(matches!(PhpRuntime::parse("php-fpm"), Some(PhpRuntime::Fpm)));
+        assert!(matches!(PhpRuntime::parse("swoole"), Some(PhpRuntime::Swoole)));
+        assert!(matches!(PhpRuntime::parse("openswoole"), Some(PhpRuntime::Swoole)));
+    }
+
+    #[test]
+    fn php_runtime_parse_unknown() {
+        assert!(PhpRuntime::parse("roadrunner").is_none());
+        assert!(PhpRuntime::parse("frankenphp").is_none());
+        assert!(PhpRuntime::parse("").is_none());
+    }
+
+    /// The three PHP images must be genuinely different programs. If two ever
+    /// collapse to the same bytes, `--runtime` is a lie that still exits 0.
+    #[test]
+    fn the_three_php_images_are_distinct() {
+        assert_ne!(DOCKERFILE_PHP, DOCKERFILE_PHP_FPM);
+        assert_ne!(DOCKERFILE_PHP, DOCKERFILE_PHP_SWOOLE);
+        assert_ne!(DOCKERFILE_PHP_FPM, DOCKERFILE_PHP_SWOOLE);
+    }
+
+    /// Every file a Dockerfile COPYs from the build context must be a file this
+    /// command actually writes. The swoole image COPYs server.php and the fpm
+    /// image COPYs two companions; emitting the Dockerfile without them yields
+    /// an image that cannot build, which is the same class of defect as the
+    /// un-runnable Python CMD these tests were written for.
+    #[test]
+    fn every_copied_companion_file_is_one_we_emit() {
+        assert!(DOCKERFILE_PHP_SWOOLE.contains("COPY server.php"));
+        assert!(!SERVER_PHP_SWOOLE.is_empty());
+
+        assert!(DOCKERFILE_PHP_FPM.contains("COPY nginx.fpm.conf"));
+        assert!(DOCKERFILE_PHP_FPM.contains("COPY docker-entrypoint.fpm.sh"));
+        assert!(!NGINX_FPM_CONF.is_empty());
+        assert!(!ENTRYPOINT_FPM.is_empty());
+    }
+
+    /// The swoole image must not launch the framework's own server: the whole
+    /// point is that Swoole IS the server. A `tina4 serve` CMD here would bind
+    /// the port with the built-in server and never start Swoole at all.
+    #[test]
+    fn the_swoole_image_starts_swoole_not_the_builtin_server() {
+        let cmd = cmd_line(DOCKERFILE_PHP_SWOOLE);
+        assert!(cmd.contains("server.php"), "swoole CMD must run the swoole entry point: {cmd}");
+        assert!(!cmd.contains("tina4"), "swoole CMD must not launch the built-in server: {cmd}");
+    }
+
+    /// nginx must be PID 1 in the fpm image so `docker stop` is a clean
+    /// shutdown rather than a 10s wait then SIGKILL.
+    #[test]
+    fn the_fpm_entrypoint_execs_nginx_into_pid_one() {
+        assert!(
+            ENTRYPOINT_FPM.contains("exec nginx"),
+            "nginx must be exec'd, not backgrounded, or signals never reach it"
+        );
+    }
+
+    /// The entrypoint runs as the container's ENTRYPOINT on an image whose
+    /// /bin/sh is dash. bash-isms there fail at container start, and the two
+    /// below fail SILENTLY: dash treats /dev/tcp as an ordinary missing path
+    /// and has no `pipefail`, so a readiness loop built on them falls straight
+    /// through and defeats its own purpose. This repo has shipped exactly that
+    /// bug before, in install-skills.sh.
+    #[test]
+    fn the_fpm_entrypoint_is_posix_sh() {
+        assert!(ENTRYPOINT_FPM.starts_with("#!/bin/sh"));
+        let code = shell_code_only(ENTRYPOINT_FPM);
+        assert!(!code.contains("pipefail"), "dash has no `set -o pipefail`");
+        assert!(!code.contains("/dev/tcp"), "/dev/tcp is a bash feature; dash silently skips it");
+        assert!(!code.contains("=("), "dash has no arrays");
+    }
+
+    /// nginx must hand unknown paths to index.php. Tina4 is a front-controller
+    /// framework: without try_files, every route but "/" returns nginx's own
+    /// 404 and the router never runs.
+    #[test]
+    fn the_fpm_nginx_config_routes_through_the_front_controller() {
+        assert!(NGINX_FPM_CONF.contains("try_files"));
+        assert!(NGINX_FPM_CONF.contains("index.php"));
+        assert!(NGINX_FPM_CONF.contains("fastcgi_pass"));
+    }
+
+    /// A misconfigured location here serves .env over HTTP, which leaks
+    /// TINA4_SECRET and every database credential the app has.
+    #[test]
+    fn the_fpm_nginx_config_refuses_dotfiles_and_vendor() {
+        assert!(NGINX_FPM_CONF.contains("location ~ /\\."), "dotfiles (.env, .git) must be denied");
+        assert!(NGINX_FPM_CONF.contains("vendor"), "the dependency tree must not be web-served");
+    }
+
+    /// A resident Swoole worker never discards process state between requests,
+    /// so debug mode's ever-growing static arrays are a guaranteed leak.
+    #[test]
+    fn the_swoole_image_pins_debug_off() {
+        assert!(DOCKERFILE_PHP_SWOOLE.contains("TINA4_DEBUG=false"));
+    }
+
+    /// A silently-missing extension would produce an image whose CMD dies at
+    /// container start, so the build must verify the extension loaded.
+    #[test]
+    fn the_swoole_image_fails_the_build_when_the_extension_is_absent() {
+        assert!(
+            DOCKERFILE_PHP_SWOOLE.contains("php -m | grep -qi '^openswoole$'"),
+            "the build must assert openswoole actually loaded"
+        );
+    }
+
+    /// The images whose server IS the framework's own, launched by the tina4
+    /// CLI. The PHP fpm and swoole variants are deliberately NOT here: their
+    /// whole purpose is that nginx+php-fpm or Swoole is the server instead, so
+    /// a `tina4 serve` CMD in those would bind the port with the built-in
+    /// server and the chosen runtime would never start. They keep their
+    /// guarantees through the runtime-agnostic tests below.
+    fn cli_launched_dockerfiles() -> [(&'static str, &'static str); 4] {
         [
             ("python", DOCKERFILE_PYTHON),
             ("php", DOCKERFILE_PHP),
             ("ruby", DOCKERFILE_RUBY),
             ("nodejs", DOCKERFILE_NODEJS),
         ]
+    }
+
+    /// Comment-stripped view of a shell script, for tests that must assert
+    /// about CODE rather than prose. Writing "dash has no `set -o pipefail`"
+    /// in a comment is not the same as USING pipefail, and a naive substring
+    /// check cannot tell the difference - it flagged this very file's own
+    /// explanatory comment.
+    fn shell_code_only(script: &str) -> String {
+        script
+            .lines()
+            .map(|l| match l.find('#') {
+                Some(i) => &l[..i],
+                None => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn cmd_line(dockerfile: &str) -> &str {
@@ -291,7 +521,7 @@ mod tests {
     /// impossible to repeat per-language.
     #[test]
     fn every_cmd_launches_through_the_tina4_cli() {
-        for (lang, body) in all_dockerfiles() {
+        for (lang, body) in cli_launched_dockerfiles() {
             let cmd = cmd_line(body);
             assert!(
                 cmd.contains("\"tina4\""),
@@ -352,11 +582,27 @@ mod tests {
     /// boots in dev mode (watchers, dev toolbar, no production HTTP server).
     #[test]
     fn every_cmd_requests_production() {
-        for (lang, body) in all_dockerfiles() {
+        for (lang, body) in cli_launched_dockerfiles() {
             let cmd = cmd_line(body);
             assert!(
                 cmd.contains("--production"),
                 "{lang}: CMD never requests production mode: {cmd}"
+            );
+        }
+    }
+
+    /// The runtime-agnostic half of the production guarantee, and the reason
+    /// scoping the test above is not a loophole. `--production` selects a
+    /// production HTTP SERVER, which is meaningless in an image where nginx or
+    /// Swoole already is the server. What must hold everywhere is that the
+    /// FRAMEWORK is not in dev mode - watchers, dev toolbar, the /__dev
+    /// dashboard and its unbounded static request log. Every image states it.
+    #[test]
+    fn every_image_pins_the_framework_out_of_dev_mode() {
+        for (lang, body) in all_dockerfiles() {
+            assert!(
+                body.contains("TINA4_DEBUG=false"),
+                "{lang}: image never pins TINA4_DEBUG=false, so it can boot in dev mode"
             );
         }
     }

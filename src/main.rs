@@ -174,6 +174,10 @@ enum Commands {
         /// Target environment: docker, systemd, nginx, cpanel
         #[arg()]
         target: String,
+        /// PHP runtime for `deploy docker`: cli (default), fpm, or swoole.
+        /// Ignored for the other languages and targets.
+        #[arg(long)]
+        runtime: Option<String>,
         /// Overwrite existing files instead of skipping them
         #[arg(long)]
         force: bool,
@@ -446,7 +450,7 @@ fn main() {
             delegate_command(vec!["build".into()]);
         }
 
-        Commands::Deploy { target, force } => deploy::run(&target, force),
+        Commands::Deploy { target, runtime, force } => deploy::run(&target, runtime.as_deref(), force),
 
         Commands::Env { sync, example, list, migrate, yes } => {
             if migrate {

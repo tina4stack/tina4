@@ -18,7 +18,10 @@ $destinations = switch ($target) {
 }
 $stage = Join-Path ([System.IO.Path]::GetTempPath()) ("tina4-skills-" + [guid]::NewGuid())
 
-$devRefs = @("auth-and-services.md", "data-and-orm.md", "deployment.md", "routes-and-api.md", "templates-and-frontend.md", "realtime.md")
+# Every file under references/, not most of them. ai-coder-rule-path.svg was
+# missing here and in the sh installer, so a SUCCESSFUL install still produced
+# an incomplete skill -- no error, nothing to notice.
+$devRefs = @("auth-and-services.md", "data-and-orm.md", "deployment.md", "routes-and-api.md", "templates-and-frontend.md", "realtime.md", "ai-coder-rule-path.svg")
 
 # Per-language developer skills come from their own framework repo; tina4-js and
 # tina4-maintainer are shared and served from tina4-python.

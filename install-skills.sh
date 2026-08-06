@@ -5,17 +5,29 @@
 #   curl -fsSL https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.sh | TINA4_SKILLS_TARGET=claude sh
 #   curl -fsSL https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.sh | TINA4_SKILLS_TARGET=codex sh
 # Use TINA4_SKILLS_TARGET=all only when both tools should receive the skills.
-set -euo pipefail
+#
+# POSIX sh ONLY -- no bashisms. Every example above pipes into `sh`, and on
+# Debian/Ubuntu that is dash. This script used `set -euo pipefail` and bash
+# arrays, so the DOCUMENTED command died on line 9 with
+# "set: Illegal option -o pipefail" and installed nothing. It worked on macOS,
+# where /bin/sh is bash in POSIX mode and accepts pipefail, which is exactly why
+# it survived: the break was invisible to anyone testing on a Mac.
+#
+# pipefail is not replaced with anything. Every download below uses `curl -f`,
+# so a failed fetch is a non-zero exit that `set -e` already catches.
+set -eu
 
 # Pin skills to a released tag, not a moving branch, so an install is reproducible.
 # Bump this when the skills change in a new release. Override with TINA4_SKILLS_REF.
 ref="${TINA4_SKILLS_REF:-3.13.77}"
 target="${TINA4_SKILLS_TARGET:-}"
 
+# Space separated, not an array: dash has no arrays. Neither path can contain a
+# space, because both are literals under $HOME.
 case "$target" in
-  claude) destinations=("$HOME/.claude/skills") ;;
-  codex)  destinations=("$HOME/.agents/skills") ;;
-  all)    destinations=("$HOME/.claude/skills" "$HOME/.agents/skills") ;;
+  claude) destinations="$HOME/.claude/skills" ;;
+  codex)  destinations="$HOME/.agents/skills" ;;
+  all)    destinations="$HOME/.claude/skills $HOME/.agents/skills" ;;
   *)
     echo "error: set TINA4_SKILLS_TARGET to claude, codex, or all" >&2
     exit 2
@@ -38,7 +50,7 @@ install_skill() {
 }
 
 publish_skills() {
-  for destination in "${destinations[@]}"; do
+  for destination in $destinations; do
     mkdir -p "$destination"
     for source in "$stage"/*; do
       skill="$(basename "$source")"
@@ -53,7 +65,10 @@ publish_skills() {
   done
 }
 
-DEV_REFS="auth-and-services.md data-and-orm.md deployment.md routes-and-api.md templates-and-frontend.md realtime.md"
+# Every file under references/, not most of them. ai-coder-rule-path.svg was
+# missing, so a SUCCESSFUL install still produced an incomplete skill -- the
+# quiet half of this bug, which no error would ever have reported.
+DEV_REFS="auth-and-services.md data-and-orm.md deployment.md routes-and-api.md templates-and-frontend.md realtime.md ai-coder-rule-path.svg"
 
 echo ""
 echo "  Tina4 Skills Installer"

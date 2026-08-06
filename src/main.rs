@@ -515,6 +515,23 @@ fn print_help(refresh: bool) {
 
 // ── Serve ────────────────────────────────────────────────────────
 
+/// The environment `--production` puts in front of the framework.
+///
+/// Returned rather than set, so it can be asserted without mutating the
+/// process: `handle_serve` takes over the process once it spawns the server,
+/// which leaves no seam to test through otherwise.
+fn production_env() -> [(&'static str, &'static str); 2] {
+    [
+        // No dev toolbar, no error overlay, no template recompilation.
+        ("TINA4_DEBUG", "false"),
+        // The framework's signal that the CLI meant production, as opposed to
+        // inferring it from TINA4_DEBUG being false (which a plain
+        // `tina4 serve` also produces on a project that sets it). Node forks a
+        // worker per CPU core on this.
+        ("TINA4_PRODUCTION", "true"),
+    ]
+}
+
 pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_production: bool, no_browser: bool) {
     // The CLI owns browser-opening. Decide OUR answer here, before any child is
     // spawned, then suppress the child's unconditionally.
@@ -660,7 +677,25 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
 
     // --production: install best production server if not available, force debug off
     if force_production {
-        std::env::set_var("TINA4_DEBUG", "false");
+        for (key, value) in production_env() {
+            std::env::set_var(key, value);
+        }
+        // TINA4_PRODUCTION is how a framework knows the CLI meant production,
+        // as opposed to merely inferring it from TINA4_DEBUG being false (which
+        // is also true for a plain `tina4 serve` on a project that sets it).
+        //
+        // Node reads it to decide whether to fork a worker per CPU core. Nothing
+        // set it, so `tina4 serve --production` ran ONE process on ONE core, and
+        // the cluster path was unreachable from the CLI - which is also why its
+        // never-worked bug went unnoticed for so long. Measured before this
+        // line existed: `--production` printed a plain banner; only
+        // `TINA4_PRODUCTION=true tina4 serve --production` printed
+        // "(cluster, 8 workers)".
+        //
+        // Python, PHP and Ruby do not read it, so this is a no-op for them
+        // today. It is set unconditionally rather than per-language so the
+        // meaning stays "the operator asked for production", not "Node needs a
+        // flag" - the next framework to want the distinction gets it free.
         println!(
             "{} Production mode — installing best server if needed",
             icon_play().green()
@@ -2107,6 +2142,37 @@ mod tests {
     #[test]
     fn dotenv_bool_returns_false_for_no_env_file() {
         assert!(!read_dotenv_bool_from("/does/not/exist/.env", "TINA4_NO_BROWSER"));
+    }
+
+    #[test]
+    fn production_turns_debug_off() {
+        let env = production_env();
+        assert!(
+            env.contains(&("TINA4_DEBUG", "false")),
+            "--production must turn debug off; a production server with the dev \
+             toolbar and error overlay on publishes its own stack traces"
+        );
+    }
+
+    #[test]
+    fn production_sets_tina4_production() {
+        // Node reads TINA4_PRODUCTION to decide whether to fork a worker per
+        // CPU core. Nothing set it, so `tina4 serve --production` ran ONE
+        // process on ONE core and the cluster path was unreachable from the
+        // CLI at all. Measured: without this the banner read
+        // "Server: http://localhost:7148"; with it, "(cluster, 8 workers)".
+        let env = production_env();
+        assert!(
+            env.contains(&("TINA4_PRODUCTION", "true")),
+            "--production must set TINA4_PRODUCTION, or Node never clusters"
+        );
+    }
+
+    #[test]
+    fn production_env_sets_nothing_else() {
+        // A guard on scope. Every variable here lands in every framework's
+        // process, so an addition is a cross-language decision, not a detail.
+        assert_eq!(production_env().len(), 2);
     }
 
     #[test]

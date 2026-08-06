@@ -599,10 +599,26 @@ fn scaffold_project(language: &str, path: &str) {
 fn scaffold_python(path: &str) {
     let project_name = project_name_from_path(path);
 
+    // app.py is BOTH the `tina4 serve` entry point and the ASGI target.
+    //
+    // It used to be `run()` at module level, which starts a server the moment
+    // anything imports it - so there was nothing an ASGI server could point at,
+    // and `uvicorn app:app` was impossible. That was a regression: tina4-python
+    // v0.2.71 shipped "Support added to run as normal ASGI application Tested
+    // on hypercorn, uvicorn, granian", and it worked precisely because the
+    // entry module EXPOSED an app without starting one.
+    //
+    // `asgi()` discovers src/routes and returns the ASGI 3 callable. Guarding
+    // run() behind __main__ keeps `tina4 serve` working, because it launches
+    // `python app.py --managed` and that sets __name__ to "__main__".
+    //
+    // Discovering here and again inside run() is safe: route registration is
+    // replace-in-place, so a second pass re-registers rather than duplicating
+    // (measured - one route stays one route after two discovers).
     write_file(
         path,
         "app.py",
-        "from tina4_python.core import run\n\nrun()\n",
+        "from tina4_python.core import run\nfrom tina4_python.core.server import asgi\n\n# The ASGI application. Point any ASGI server at it:\n#   uvicorn   app:app --workers 4\n#   hypercorn app:app --workers 4\n#   granian   --interface asgi app:app --workers 4\napp = asgi()\n\n# `tina4 serve` runs this file directly and takes this path.\nif __name__ == \"__main__\":\n    run()\n",
     );
 
     write_file(

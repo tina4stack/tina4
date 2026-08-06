@@ -1,6 +1,6 @@
 # Tina4 CLI
 
-Version 3.8.63 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 frameworks.
+Version 3.8.67 — Unified CLI for Python, PHP, Ruby, and Node.js Tina4 frameworks.
 
 ## Build & Test
 
@@ -65,6 +65,16 @@ tina4 metrics                    Report code-health top offenders (complexity, l
                                  offender so --fail-on warn goes red on it.
 tina4 scss                       Compile SCSS files
 tina4 ai                         Detect AI tools and install context
+tina4 deploy <target> [--runtime R]
+                                 Generate deployment scaffolding: docker, systemd,
+                                 nginx, cpanel. --runtime is PHP-only and picks the
+                                 docker image's server: cli (default, the framework's
+                                 own forking server), fpm (nginx + php-fpm, fresh
+                                 process state per request), or swoole (openswoole,
+                                 app stays resident). Each writes its own companion
+                                 files: server.php for swoole, nginx.fpm.conf +
+                                 docker-entrypoint.fpm.sh for fpm. --runtime on a
+                                 non-PHP project is REFUSED, not ignored.
 tina4 update                     Self-update the binary
 ```
 

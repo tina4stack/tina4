@@ -334,6 +334,31 @@ mod tests {
 
     // ── PHP runtime selection ─────────────────────────────────────────────
 
+    /// CLAUDE.md's version header must match Cargo.toml.
+    ///
+    /// This is the CLI's missing half of a gate the PHP framework already has
+    /// (VersionConsistencyTest). It was missing, and it had drifted by four
+    /// releases: Cargo.toml said 3.8.67 while CLAUDE.md still said 3.8.63.
+    /// CLAUDE.md is what every AI assistant reads first, so a stale version
+    /// there is a wrong answer repeated to every user who asks.
+    #[test]
+    fn claude_md_version_header_matches_the_crate() {
+        let claude_md = include_str!("../CLAUDE.md");
+        let header = claude_md
+            .lines()
+            .find(|l| l.starts_with("Version "))
+            .expect("CLAUDE.md must carry a `Version X.Y.Z` header");
+        let declared = header
+            .split_whitespace()
+            .nth(1)
+            .expect("the Version header must name a version");
+        assert_eq!(
+            declared,
+            env!("CARGO_PKG_VERSION"),
+            "CLAUDE.md header disagrees with Cargo.toml -- bump both with the release"
+        );
+    }
+
     #[test]
     fn php_runtime_parse_known() {
         assert!(matches!(PhpRuntime::parse("cli"), Some(PhpRuntime::Cli)));

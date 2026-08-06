@@ -43,6 +43,9 @@ RUN { \
       echo 'opcache.validate_timestamps=0'; \
     } > /usr/local/etc/php/conf.d/99-opcache.ini
 
+# NOTE: no pcntl here, deliberately. php-fpm supplies the worker pool, so the
+# framework's own forking and TINA4_SERVE_WORKERS are not used on this path -
+# index.php is invoked per request by fpm and never runs the accept loop.
 COPY --from=deps /app/vendor /app/vendor
 COPY . /app
 

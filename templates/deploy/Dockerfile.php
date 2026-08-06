@@ -19,10 +19,26 @@ RUN composer install --no-dev --optimize-autoloader --no-scripts
 FROM php:8.4-cli-alpine
 WORKDIR /app
 COPY --from=tina4cli /usr/local/bin/tina4 /usr/local/bin/tina4
-RUN install-php-extensions sqlite3 pdo_sqlite opcache 2>/dev/null \
+# pcntl is NOT optional here, and it is not in the base image.
+#
+# The built-in server needs it for BOTH of its concurrency modes: forking a
+# request so a slow handler cannot block the others, and TINA4_SERVE_WORKERS'
+# pre-forked pool. Without pcntl the server silently degrades to ONE process
+# handling everything serially - it still answers, so nothing looks broken,
+# and every concurrency setting you write in your .env quietly does nothing.
+#
+# Measured: on stock php:8.4-cli (posix present, pcntl absent) a benchmark of
+# fork-per-request, a 4-worker pool and a 16-worker pool produced ONE pid in
+# all three cases and identical throughput, because all three were the same
+# single-threaded server.
+#
+# The build FAILS if it does not load, rather than shipping that silence.
+RUN install-php-extensions sqlite3 pdo_sqlite opcache pcntl 2>/dev/null \
  || (apk add --no-cache --virtual .build sqlite-dev \
-     && docker-php-ext-install pdo_sqlite \
+     && docker-php-ext-install pdo_sqlite pcntl \
      && apk del .build)
+RUN php -m | grep -qi '^pcntl$' \
+ || { echo "pcntl failed to install - the server would run single-process"; exit 1; }
 COPY --from=deps /app/vendor /app/vendor
 COPY . /app
 ENV TINA4_OVERRIDE_CLIENT=true \

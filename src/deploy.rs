@@ -59,6 +59,29 @@ impl PhpRuntime {
     }
 }
 
+/// Runtime flavour for a Python `deploy docker`.
+///
+/// The default runs `tina4 serve --production`: one event loop, one process.
+/// `asgi` hands the application to a real ASGI server instead, so you get ITS
+/// process model - uvicorn workers, hypercorn's HTTP/2, granian's Rust loop.
+/// Tina4 exposes a plain ASGI 3 callable, so any compliant server works; the
+/// image pre-installs three and picks between them at run time.
+#[derive(Clone, Copy, PartialEq)]
+pub enum PythonRuntime {
+    Builtin,
+    Asgi,
+}
+
+impl PythonRuntime {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "builtin" | "default" | "cli" => Some(Self::Builtin),
+            "asgi" | "uvicorn" | "hypercorn" | "granian" => Some(Self::Asgi),
+            _ => None,
+        }
+    }
+}
+
 /// Public entry point — invoked by `tina4 deploy <target>`.
 pub fn run(target: &str, runtime: Option<&str>, force: bool) {
     let Some(target) = Target::parse(target) else {
@@ -83,19 +106,13 @@ pub fn run(target: &str, runtime: Option<&str>, force: bool) {
 
     // Resolve --runtime before any file is written, so a typo fails with a
     // named error instead of quietly producing the default image.
-    let php_runtime = match runtime {
-        None => PhpRuntime::Cli,
-        Some(raw) => {
-            if info.language != "php" {
-                eprintln!(
-                    "{} --runtime applies to PHP only; {} has one deployment runtime",
-                    icon_fail().red(),
-                    info.language
-                );
-                std::process::exit(2);
-            }
-            match PhpRuntime::parse(raw) {
-                Some(r) => r,
+    let mut php_runtime = PhpRuntime::Cli;
+    let mut python_runtime = PythonRuntime::Builtin;
+
+    if let Some(raw) = runtime {
+        match info.language.as_str() {
+            "php" => match PhpRuntime::parse(raw) {
+                Some(r) => php_runtime = r,
                 None => {
                     eprintln!(
                         "{} unknown PHP runtime: {}\n  valid runtimes: cli, fpm, swoole",
@@ -104,12 +121,31 @@ pub fn run(target: &str, runtime: Option<&str>, force: bool) {
                     );
                     std::process::exit(2);
                 }
+            },
+            "python" => match PythonRuntime::parse(raw) {
+                Some(r) => python_runtime = r,
+                None => {
+                    eprintln!(
+                        "{} unknown Python runtime: {}\n  valid runtimes: builtin, asgi",
+                        icon_fail().red(),
+                        raw
+                    );
+                    std::process::exit(2);
+                }
+            },
+            other => {
+                eprintln!(
+                    "{} --runtime applies to PHP and Python; {} has one deployment runtime",
+                    icon_fail().red(),
+                    other
+                );
+                std::process::exit(2);
             }
         }
-    };
+    }
 
     let written = match target {
-        Target::Docker => emit_docker(&info, php_runtime, force),
+        Target::Docker => emit_docker(&info, php_runtime, python_runtime, force),
         Target::Systemd => emit_systemd(&info, force),
         Target::Nginx => emit_nginx(&info, force),
         Target::Cpanel => emit_cpanel(&info, force),
@@ -135,9 +171,12 @@ pub fn run(target: &str, runtime: Option<&str>, force: bool) {
 
 // ── Targets ───────────────────────────────────────────────────────────
 
-fn emit_docker(info: &ProjectInfo, php_runtime: PhpRuntime, force: bool) -> Vec<String> {
+fn emit_docker(info: &ProjectInfo, php_runtime: PhpRuntime, python_runtime: PythonRuntime, force: bool) -> Vec<String> {
     let dockerfile = match info.language.as_str() {
-        "python"   => DOCKERFILE_PYTHON,
+        "python"   => match python_runtime {
+            PythonRuntime::Builtin => DOCKERFILE_PYTHON,
+            PythonRuntime::Asgi    => DOCKERFILE_PYTHON_ASGI,
+        },
         "php"      => match php_runtime {
             PhpRuntime::Cli    => DOCKERFILE_PHP,
             PhpRuntime::Fpm    => DOCKERFILE_PHP_FPM,
@@ -158,6 +197,15 @@ fn emit_docker(info: &ProjectInfo, php_runtime: PhpRuntime, force: bool) -> Vec<
     // Each PHP runtime needs its own companion files, and the Dockerfile COPYs
     // them: emitting the Dockerfile without them produces an image that fails
     // to build. They are written together or not at all.
+    if info.language == "python" && python_runtime == PythonRuntime::Asgi {
+        if write_if_absent("asgi.py", ASGI_PY, force) {
+            written.push("asgi.py".to_string());
+        }
+        if write_if_absent("docker-entrypoint.asgi.sh", ENTRYPOINT_ASGI, force) {
+            written.push("docker-entrypoint.asgi.sh".to_string());
+        }
+    }
+
     if info.language == "php" {
         match php_runtime {
             PhpRuntime::Cli => {}
@@ -274,6 +322,9 @@ fn print_next_steps(target: Target) {
 
 const DOCKERFILE_PYTHON: &str = include_str!("../templates/deploy/Dockerfile.python");
 const DOCKERFILE_PHP: &str = include_str!("../templates/deploy/Dockerfile.php");
+const DOCKERFILE_PYTHON_ASGI: &str = include_str!("../templates/deploy/Dockerfile.python.asgi");
+const ASGI_PY: &str = include_str!("../templates/deploy/asgi.py");
+const ENTRYPOINT_ASGI: &str = include_str!("../templates/deploy/docker-entrypoint.asgi.sh");
 const DOCKERFILE_PHP_FPM: &str = include_str!("../templates/deploy/Dockerfile.php.fpm");
 const DOCKERFILE_PHP_SWOOLE: &str = include_str!("../templates/deploy/Dockerfile.php.swoole");
 const SERVER_PHP_SWOOLE: &str = include_str!("../templates/deploy/server.php.swoole");
@@ -321,9 +372,10 @@ mod tests {
     // are pure string assertions over templates we own -- no dependency, no
     // double. The docker-build job in CI is the end-to-end partner to these.
 
-    fn all_dockerfiles() -> [(&'static str, &'static str); 6] {
+    fn all_dockerfiles() -> [(&'static str, &'static str); 7] {
         [
             ("python", DOCKERFILE_PYTHON),
+            ("python-asgi", DOCKERFILE_PYTHON_ASGI),
             ("php", DOCKERFILE_PHP),
             ("php-fpm", DOCKERFILE_PHP_FPM),
             ("php-swoole", DOCKERFILE_PHP_SWOOLE),
@@ -357,6 +409,81 @@ mod tests {
             env!("CARGO_PKG_VERSION"),
             "CLAUDE.md header disagrees with Cargo.toml -- bump both with the release"
         );
+    }
+
+    #[test]
+    fn python_runtime_parse_known() {
+        assert!(matches!(PythonRuntime::parse("builtin"), Some(PythonRuntime::Builtin)));
+        assert!(matches!(PythonRuntime::parse("ASGI"), Some(PythonRuntime::Asgi)));
+        // A server name is accepted as a synonym: someone who wants uvicorn
+        // types "uvicorn", not "asgi".
+        assert!(matches!(PythonRuntime::parse("uvicorn"), Some(PythonRuntime::Asgi)));
+        assert!(matches!(PythonRuntime::parse("hypercorn"), Some(PythonRuntime::Asgi)));
+        assert!(matches!(PythonRuntime::parse("granian"), Some(PythonRuntime::Asgi)));
+        assert!(PythonRuntime::parse("swoole").is_none());
+    }
+
+    /// The generated entry point must call the PUBLIC bootstrap.
+    ///
+    /// Pointing an ASGI server at `tina4_python.core.server:app` starts a
+    /// working application with NO ROUTES REGISTERED - measured: /hello answers
+    /// 404 through the bare app and 200 through asgi(). asgi() discovers first.
+    /// _auto_discover is private and has no business in a deployment file.
+    #[test]
+    fn the_asgi_entry_point_uses_the_public_bootstrap() {
+        assert!(
+            ASGI_PY.contains("from tina4_python.core.server import asgi"),
+            "asgi.py must import the public asgi() bootstrap"
+        );
+        assert!(
+            ASGI_PY.contains("app = asgi()"),
+            "asgi.py must expose `app` - every ASGI server addresses it as asgi:app"
+        );
+        assert!(
+            !ASGI_PY.contains("_auto_discover"),
+            "asgi.py must not call the private _auto_discover"
+        );
+    }
+
+    /// The ASGI launcher runs as the container entry point on python:*-slim,
+    /// where /bin/sh is dash. pipefail, arrays and /dev/tcp are absent there,
+    /// and the last two fail SILENTLY.
+    #[test]
+    fn the_asgi_entrypoint_is_posix_sh() {
+        assert!(ENTRYPOINT_ASGI.starts_with("#!/bin/sh"));
+        let code = shell_code_only(ENTRYPOINT_ASGI);
+        assert!(!code.contains("pipefail"), "dash has no `set -o pipefail`");
+        assert!(!code.contains("/dev/tcp"), "/dev/tcp is a bash feature; dash skips it silently");
+        assert!(!code.contains("=("), "dash has no arrays");
+    }
+
+    /// The server must become PID 1, or `docker stop` waits out the whole grace
+    /// period and then SIGKILLs - a hard cut instead of a clean drain.
+    #[test]
+    fn the_asgi_entrypoint_execs_the_server() {
+        for server in ["uvicorn", "hypercorn", "granian"] {
+            assert!(
+                ENTRYPOINT_ASGI.contains(&format!("exec {server}")),
+                "{server} must be exec'd so signals reach it"
+            );
+        }
+    }
+
+    /// An unknown server name must be refused, naming what IS supported.
+    /// Falling through to a default would start the wrong server silently.
+    #[test]
+    fn the_asgi_entrypoint_refuses_an_unknown_server() {
+        assert!(ENTRYPOINT_ASGI.contains("Unknown TINA4_ASGI_SERVER"));
+        assert!(ENTRYPOINT_ASGI.contains("Supported: uvicorn, hypercorn, granian"));
+    }
+
+    /// Both companion files must ship, because the Dockerfile COPYs them.
+    #[test]
+    fn the_asgi_image_copies_files_we_emit() {
+        assert!(DOCKERFILE_PYTHON_ASGI.contains("COPY asgi.py"));
+        assert!(DOCKERFILE_PYTHON_ASGI.contains("COPY docker-entrypoint.asgi.sh"));
+        assert!(!ASGI_PY.is_empty());
+        assert!(!ENTRYPOINT_ASGI.is_empty());
     }
 
     #[test]
@@ -515,7 +642,8 @@ mod tests {
     }
 
     /// The images whose server IS the framework's own, launched by the tina4
-    /// CLI. The PHP fpm and swoole variants are deliberately NOT here: their
+    /// CLI. The PHP fpm and swoole variants, and the Python ASGI variant, are
+    /// deliberately NOT here: their
     /// whole purpose is that nginx+php-fpm or Swoole is the server instead, so
     /// a `tina4 serve` CMD in those would bind the port with the built-in
     /// server and the chosen runtime would never start. They keep their

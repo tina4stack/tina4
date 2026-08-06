@@ -32,6 +32,7 @@ fn known_vars() -> Vec<(&'static str, &'static str, &'static str, &'static str)>
         ("TINA4_TEMPLATE_ROUTING", "on", "Automatic template-based routing", "Server"),
         ("TINA4_TEMPLATE_CACHE_TTL", "0", "Frond compiled-template cache TTL in seconds (0 = no caching)", "Server"),
         ("TINA4_HEALTH_PATH", "/__health", "Health-check endpoint path", "Server"),
+        ("TINA4_LOOP_LAG_WARN_MS", "250", "Node: warn when a handler occupies the event loop this long in ms (0 = off)", "Server"),
         ("TINA4_PUBLIC_DIR", "", "Override the static public directory (default: framework public dir)", "Server"),
         ("TINA4_ENV_FILE", ".env", "Path to the .env file to load", "Server"),
         ("TINA4_MAX_UPLOAD_SIZE", "10485760", "Maximum upload size in bytes (10MB)", "Server"),

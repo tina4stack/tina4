@@ -2078,14 +2078,32 @@ fn build_offenders(files: &[FileMetrics], functions: &[FunctionInfo]) -> Vec<Off
                 detail: format!("{} functions (max 20)", fm.functions),
             });
         }
-        if fm.maintainability < 40.0 {
+        // A low file-level MI is only a real maintainability signal when the
+        // code is genuinely complex. The MI formula is size-dominated (the
+        // 16.2*ln(SLOC) term), so a big-but-SIMPLE file scores near 0 purely
+        // for being long: MEASURED, 400 branchless functions over 1200 lines
+        // (avg CC 1.0) scored MI 8.4 and was raised as an ERROR. That says
+        // nothing `large_file` (loc > 500) doesn't already say, and a genuinely
+        // hot function is already caught by the per-function `complexity`
+        // offender. So without a complexity gate this rule just re-flags size,
+        // at error severity, on files whose functions are all trivial.
+        //
+        // Gate on avg per-function complexity: a file whose average function is
+        // at least moderately branchy (avg CC >= 5) AND has a low MI is hard to
+        // maintain in a way the size/hot-function rules miss. Below that the low
+        // MI is a size artifact and `large_file` owns it.
+        const LOW_MI_MIN_AVG_CC: f64 = 5.0;
+        if fm.maintainability < 40.0 && fm.avg_complexity >= LOW_MI_MIN_AVG_CC {
             items.push(Offender {
                 file: fm.path.clone(),
                 line: 1,
                 kind: "low_maintainability".to_string(),
                 severity: if fm.maintainability < 20.0 { "error" } else { "warn" }.to_string(),
                 score: 50.0 - fm.maintainability,
-                detail: format!("maintainability index {:.1} (min 40)", fm.maintainability),
+                detail: format!(
+                    "maintainability index {:.1} (min 40), avg complexity {:.1}",
+                    fm.maintainability, fm.avg_complexity
+                ),
             });
         }
         if !fm.has_tests {
@@ -3080,8 +3098,15 @@ pub fn sub(a: i32, b: i32) -> i32 {
     // ---- Offender rules (mirror metrics.py thresholds) -----------------------
 
     fn file_with(mi: f64, loc: usize, funcs: usize, has_tests: bool) -> FileMetrics {
+        // avg_complexity 8.0: a genuinely complex file, so the low-MI rule (now
+        // complexity-gated) still fires for the tests that assert it does.
+        file_with_cc(mi, loc, funcs, has_tests, 8.0)
+    }
+
+    fn file_with_cc(mi: f64, loc: usize, funcs: usize, has_tests: bool, avg_cc: f64) -> FileMetrics {
         FileMetrics {
-            path: "x.py".into(), loc, complexity: 0, avg_complexity: 0.0,
+            path: "x.py".into(), loc, complexity: (avg_cc * funcs as f64) as u32,
+            avg_complexity: avg_cc,
             functions: funcs, maintainability: mi, halstead_volume: 0.0, has_tests,
             dep_count: 0, coupling_efferent: 0, coupling_afferent: 0, instability: 0.0,
             parse_health: 1.0,
@@ -3101,6 +3126,34 @@ pub fn sub(a: i32, b: i32) -> i32 {
         // MI >= 40 produces no low_maintainability offender.
         let clean = build_offenders(&[file_with(55.0, 10, 1, true)], &[]);
         assert!(clean.iter().all(|o| o.kind != "low_maintainability"));
+    }
+
+    #[test]
+    fn low_maintainability_does_not_fire_on_a_big_but_simple_file() {
+        // The false positive this rule shipped with. A large file of trivial,
+        // branchless functions (avg CC 1.0) scores a low MI purely because the
+        // formula is size-dominated - MEASURED at MI 8.4 for 400 branchless
+        // functions over 1200 lines. That is size, not unmaintainability, and
+        // `large_file` already reports it. The low-MI ERROR was noise on top.
+        let big_simple = file_with_cc(8.0, 1200, 400, true, 1.0);
+        let offs = build_offenders(&[big_simple], &[]);
+        assert!(
+            offs.iter().all(|o| o.kind != "low_maintainability"),
+            "low_maintainability fired on a big-but-simple file (avg CC 1.0) - it is re-flagging size"
+        );
+        // ...but large_file still catches the real property (it IS large).
+        assert!(offs.iter().any(|o| o.kind == "large_file"));
+    }
+
+    #[test]
+    fn low_maintainability_still_fires_when_functions_are_complex() {
+        // The signal that must survive the gate: low MI AND genuinely complex
+        // functions (avg CC 8) is a real maintainability problem.
+        let complex = file_with_cc(15.0, 1200, 400, true, 8.0);
+        let offs = build_offenders(&[complex], &[]);
+        let mi = offs.iter().find(|o| o.kind == "low_maintainability");
+        assert!(mi.is_some(), "a low-MI file with complex functions must still flag");
+        assert_eq!(mi.unwrap().severity, "error");
     }
 
     #[test]

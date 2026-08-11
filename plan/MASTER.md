@@ -28,7 +28,7 @@ plan-driven scaffold-first + resource-naming fix (#14), and init-defaults-to-SQL
 
 | 13 | Fargate backends + Tina4-js edge delivery | [fargate-and-edge-deployment.md](fargate-and-edge-deployment.md) | Proposed — provider-neutral deployment manifest, Fargate adapter, and Cloudflare-first Tina4-js edge adapter |
 
-| 14 | Cursor skills + client `v3.8.69` release | [cursor-skills-installation.md](cursor-skills-installation.md) | In progress - Cursor target, multi-tool setup, signed client release |
+| 14 | Cursor skills + client `v3.8.69` release | [cursor-skills-installation.md](cursor-skills-installation.md) | Complete - menu-driven Claude/Codex/Cursor skills, automatic refresh, signed release |
 
 ## Rules of the method
 - One thread at a time; scope it in its plan file first, get a nod, then build.

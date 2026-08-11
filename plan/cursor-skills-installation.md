@@ -30,10 +30,10 @@ Prepare a signed `v3.8.69` client release after the already-published `v3.8.68`.
 - [x] Add real CLI tests for Cursor selection and update target detection
 - [x] Validate all five repository entrypoints and commit any remaining ones
 - [x] Bump the client version to `3.8.69`; run the release test suite and build
-- [ ] Commit and push the client changes
-- [ ] Create and push signed tag `v3.8.69`; wait for the draft-release build
-- [ ] Re-Authenticode-sign the Windows `.exe` and `install-skills.ps1`
-- [ ] Regenerate `SHA256SUMS`, verify every asset, and publish the release
+- [x] Commit and push the client changes
+- [x] Create and push tag `v3.8.69`; wait for the draft-release build
+- [x] Re-Authenticode-sign the Windows `.exe` and `install-skills.ps1`
+- [x] Regenerate `SHA256SUMS`, verify every asset, and publish the release
 
 ## Safety
 
@@ -53,3 +53,8 @@ Prepare a signed `v3.8.69` client release after the already-published `v3.8.68`.
 
 - `4baea8b` Ruby Cursor entrypoints pushed to `v3`.
 - `a74d6c2` Documentation updated and pushed to `main`.
+- `7e2968d` Client menu, automatic refresh, version bump, and tests pushed to `main`.
+- `b178ab6` Canonical PowerShell installer re-signed and pushed to `main`.
+- `v3.8.69` published: eight public assets checksum-verified; Windows executable has a valid Code Infinity EV signature.
+
+## Status: Complete

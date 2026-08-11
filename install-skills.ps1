@@ -8,7 +8,7 @@ $ErrorActionPreference = "Stop"
 
 # Pin skills to a released tag, not a moving branch, so an install is reproducible.
 # Bump this when the skills change in a new release. Override with TINA4_SKILLS_REF.
-$ref = if ($env:TINA4_SKILLS_REF) { $env:TINA4_SKILLS_REF } else { "3.13.77" }
+$ref = if ($env:TINA4_SKILLS_REF) { $env:TINA4_SKILLS_REF } else { "3.13.97" }
 $target = $env:TINA4_SKILLS_TARGET
 $destinations = switch ($target) {
   "claude" { @(Join-Path $HOME ".claude\skills") }
@@ -33,6 +33,7 @@ $installs = @(
   @{ repo = "tina4-python"; skill = "tina4-js";               refs = @("html-and-components.md", "signals-and-reactivity.md", "persistence.md", "rtc.md") }
   @{ repo = "tina4-python"; skill = "tina4-maintainer";       refs = @("cli-and-deployment.md", "frond-and-frontend.md", "routing-and-orm.md", "subsystems.md") }
 )
+$legacySkills = @("tina4-developer")
 
 Write-Host ""
 Write-Host "  Tina4 Skills Installer" -ForegroundColor Cyan
@@ -53,6 +54,13 @@ try {
 
   foreach ($destination in $destinations) {
     New-Item -ItemType Directory -Path $destination -Force | Out-Null
+    foreach ($legacySkill in $legacySkills) {
+      $legacyPath = Join-Path $destination $legacySkill
+      if (Test-Path -LiteralPath $legacyPath) {
+        Remove-Item -LiteralPath $legacyPath -Recurse -Force
+        Write-Host "  - removed legacy $legacySkill" -ForegroundColor DarkYellow
+      }
+    }
     foreach ($skill in Get-ChildItem -Path $stage -Directory) {
       $replacement = Join-Path $destination ("." + $skill.Name + ".tina4-new")
       $installed = Join-Path $destination $skill.Name

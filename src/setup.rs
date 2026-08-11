@@ -757,6 +757,26 @@ fn install_skills_global(ai: AiChoice) {
         AiChoice::Codex => "codex",
         AiChoice::None => return,
     };
+    install_skills_target(target);
+}
+
+/// Install skills without exposing installer implementation details to the
+/// user. `tina4 skills codex` is the normal refresh path; the hosted script
+/// still accepts environment variables for automation.
+pub fn install_skills(target: &str) -> bool {
+    match target {
+        "claude" | "codex" | "all" => install_skills_target(target),
+        _ => {
+            eprintln!(
+                "  {} Choose one of: tina4 skills claude, tina4 skills codex, or tina4 skills all.",
+                icon_warn().yellow()
+            );
+            false
+        }
+    }
+}
+
+fn install_skills_target(target: &str) -> bool {
     println!("  {} Installing tina4 AI skills for {}...", icon_play().green(), target);
     let ok = if console::is_windows() {
         run_status(
@@ -780,6 +800,7 @@ fn install_skills_global(ai: AiChoice) {
             "tina4 ai".cyan()
         );
     }
+    ok
 }
 
 fn ensure_codex() {

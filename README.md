@@ -99,17 +99,21 @@ tina4 serve
 
 ### AI skills
 
-Choose the coding tool that should receive the Tina4 skills; the installer never writes both locations unless you explicitly select `all`.
+Use the Tina4 client to install or refresh the skills. It chooses the correct
+location and current released skills version for you.
 
 ```bash
 # Claude Code / Claude Desktop
-curl -fsSL https://tina4.com/install-skills.sh | TINA4_SKILLS_TARGET=claude sh
+tina4 skills claude
 
 # Codex CLI, IDE extension, or desktop app
-curl -fsSL https://tina4.com/install-skills.sh | TINA4_SKILLS_TARGET=codex sh
+tina4 skills codex
+
+# Both tools
+tina4 skills all
 ```
 
-On Windows, set `$env:TINA4_SKILLS_TARGET` to `claude` or `codex` before running `install-skills.ps1`. `tina4 setup` offers the same choice and writes `AGENTS.md` for Codex projects.
+`tina4 setup` offers the same choice during first-time setup and writes `AGENTS.md` for Codex projects. The standalone installer remains available for CI and advanced automation.
 
 ## How it works
 

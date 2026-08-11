@@ -141,6 +141,12 @@ enum Commands {
         force: bool,
     },
 
+    /// Install the latest Tina4 AI skills for Claude, Codex, or both
+    Skills {
+        /// Target coding tool: claude, codex, or all
+        target: String,
+    },
+
     /// Stop using v2 and switch your Tina4 project to v3 structure
     #[command(name = "i-want-to-stop-using-v2-and-switch-to-v3")]
     IWantToStopUsingV2AndSwitchToV3,
@@ -427,6 +433,12 @@ fn main() {
                 if all { args.push("--all".into()); }
                 if force { args.push("--force".into()); }
                 delegate_command(args);
+            }
+        }
+
+        Commands::Skills { target } => {
+            if !setup::install_skills(&target) {
+                std::process::exit(2);
             }
         }
 
@@ -1595,6 +1607,7 @@ fn handle_update() {
 
     if latest_ver == CURRENT_VERSION {
         println!("{} CLI already up to date", icon_ok().green());
+        refresh_installed_skills();
         // Still check for framework package updates even if CLI is current
         update_framework_package();
         return;
@@ -1680,8 +1693,47 @@ fn handle_update() {
         latest_ver.cyan()
     );
 
+    refresh_installed_skills();
+
     // Also update the framework package in the current project
     update_framework_package();
+}
+
+/// Keep every installed Tina4 AI target current when the client is updated.
+/// We only refresh locations that already contain a Tina4 skill, so an update
+/// never enables a coding tool the developer did not choose.
+fn refresh_installed_skills() {
+    let home = match std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        Some(home) => std::path::PathBuf::from(home),
+        None => return,
+    };
+    let has_tina4_skill = |dir: std::path::PathBuf| {
+        [
+            "tina4-developer",
+            "tina4-developer-python",
+            "tina4-developer-php",
+            "tina4-developer-ruby",
+            "tina4-developer-nodejs",
+            "tina4-js",
+            "tina4-maintainer",
+        ]
+        .iter()
+        .any(|skill| dir.join(skill).join("SKILL.md").is_file())
+    };
+
+    let claude = has_tina4_skill(home.join(".claude").join("skills"));
+    let codex = has_tina4_skill(home.join(".agents").join("skills"));
+    let target = match (claude, codex) {
+        (true, true) => "all",
+        (true, false) => "claude",
+        (false, true) => "codex",
+        (false, false) => return,
+    };
+
+    println!("{} Refreshing Tina4 AI skills for {}...", icon_play().green(), target);
+    if !setup::install_skills(target) {
+        eprintln!("{} Tina4 skills refresh failed; the client update is still complete.", icon_warn().yellow());
+    }
 }
 
 /// Ask the user if they want to update the framework package too.

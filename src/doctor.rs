@@ -8,8 +8,8 @@ use std::process::Command;
 /// refresh command. Fetch-source and refresh-command are the SAME URL on purpose,
 /// so what doctor reports as "latest" is exactly what a refresh would install.
 const SKILLS_INSTALL_URL: &str = "https://tina4.com/install-skills.sh";
-const SKILLS_INSTALL_CMD: &str = "curl -fsSL https://tina4.com/install-skills.sh | TINA4_SKILLS_TARGET=claude sh";
-const CODEX_SKILLS_INSTALL_CMD: &str = "curl -fsSL https://tina4.com/install-skills.sh | TINA4_SKILLS_TARGET=codex sh";
+const SKILLS_INSTALL_CMD: &str = "tina4 skills claude";
+const CODEX_SKILLS_INSTALL_CMD: &str = "tina4 skills codex";
 
 struct ToolCheck {
     name: &'static str,
@@ -409,6 +409,10 @@ fn read_installed_skills_ref(skills_dir: &Path) -> Option<String> {
     if v.is_empty() { None } else { Some(v.to_string()) }
 }
 
+fn has_legacy_developer_skill(skills_dir: &Path) -> bool {
+    skills_dir.join("tina4-developer").join("SKILL.md").is_file()
+}
+
 /// Fetch the latest published skills ref from the same installer users refresh
 /// with, so "latest" always equals what a refresh would install. Best-effort:
 /// None on any curl/network failure (doctor then reports "offline", never fails).
@@ -486,6 +490,13 @@ fn check_skills_currency() {
         }
     }
 
+    if has_legacy_developer_skill(&skills_dir) {
+        println!(
+            "      {} legacy tina4-developer skill detected - {} removes it safely.",
+            icon_warn().yellow(), SKILLS_INSTALL_CMD.yellow()
+        );
+    }
+
     // Make the safety guarantee explicit and visible: refreshing skills only ever
     // writes ~/.claude/skills. Neither doctor nor the refresh touches a project's CLAUDE.md.
     println!(
@@ -546,6 +557,12 @@ fn check_codex_skills_currency() {
             );
             println!("  {} {} ({} skills present)", icon_info().blue(), tail.yellow(), present);
         }
+    }
+    if has_legacy_developer_skill(&skills_dir) {
+        println!(
+            "      {} legacy tina4-developer skill detected - {} removes it safely.",
+            icon_warn().yellow(), CODEX_SKILLS_INSTALL_CMD.yellow()
+        );
     }
     println!(
         "      {}",

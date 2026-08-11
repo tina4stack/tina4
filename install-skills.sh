@@ -52,6 +52,12 @@ install_skill() {
 publish_skills() {
   for destination in $destinations; do
     mkdir -p "$destination"
+    for legacy_skill in $LEGACY_SKILLS; do
+      if [ -e "$destination/$legacy_skill" ]; then
+        rm -rf "$destination/$legacy_skill"
+        echo "  - removed legacy $legacy_skill"
+      fi
+    done
     for source in "$stage"/*; do
       skill="$(basename "$source")"
       replacement="$destination/.${skill}.tina4-new"
@@ -69,6 +75,7 @@ publish_skills() {
 # missing, so a SUCCESSFUL install still produced an incomplete skill -- the
 # quiet half of this bug, which no error would ever have reported.
 DEV_REFS="auth-and-services.md data-and-orm.md deployment.md routes-and-api.md templates-and-frontend.md realtime.md ai-coder-rule-path.svg"
+LEGACY_SKILLS="tina4-developer"
 
 echo ""
 echo "  Tina4 Skills Installer"

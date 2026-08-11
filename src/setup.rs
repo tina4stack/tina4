@@ -17,6 +17,7 @@ enum AiChoice {
     ClaudeDesktop,
     ClaudeCode,
     Codex,
+    Cursor,
     None,
 }
 
@@ -198,6 +199,7 @@ fn run_first_install(
             AiChoice::ClaudeDesktop => ensure_claude_desktop(),
             AiChoice::ClaudeCode => ensure_claude_code(),
             AiChoice::Codex => ensure_codex(),
+            AiChoice::Cursor => {}
             AiChoice::None => {}
         }
         // Remember the environment so future `tina4 setup` runs are one-question
@@ -332,19 +334,20 @@ fn choose_language() -> String {
 }
 
 /// Which AI tool? — drives what we install and what we open at the end.
-/// We currently know Claude Desktop (chat app) and Claude Code (terminal).
 fn choose_ai() -> AiChoice {
     println!();
     println!("  Which AI tool do you want to build with?");
     println!("    1. {}  {}", "Claude Desktop".bold(), "(default) — the chat app; opens your project ready to build".dimmed());
     println!("    2. {}  {}", "Claude Code".bold(), "— AI in your terminal, opens a real coding session in your project".dimmed());
     println!("    3. {}  {}", "Codex".bold(), "— OpenAI coding agent in your terminal or desktop app".dimmed());
-    println!("    4. {}  {}", "Just my code editor".bold(), "— no AI".dimmed());
-    let choice = prompt("Choose 1-4", "1");
+    println!("    4. {}  {}", "Cursor".bold(), "— AI-native IDE; installs skills into ~/.cursor/skills".dimmed());
+    println!("    5. {}  {}", "Just my code editor".bold(), "— no AI".dimmed());
+    let choice = prompt("Choose 1-5", "1");
     match choice.trim() {
         "2" => AiChoice::ClaudeCode,
         "3" => AiChoice::Codex,
-        "4" => AiChoice::None,
+        "4" => AiChoice::Cursor,
+        "5" => AiChoice::None,
         _ => AiChoice::ClaudeDesktop,
     }
 }
@@ -387,12 +390,18 @@ fn print_plan(
             println!("    - install the {} runtime + tools through it", lang);
         }
         println!("    - install Git if missing");
-        println!("    - install the tina4 AI skills globally (~/.claude/skills)");
+        match ai {
+            AiChoice::ClaudeDesktop | AiChoice::ClaudeCode => {
+                println!("    - install the tina4 AI skills globally (~/.claude/skills)")
+            }
+            AiChoice::Codex => println!("    - install the tina4 AI skills globally (~/.agents/skills)"),
+            AiChoice::Cursor => println!("    - install the tina4 AI skills globally (~/.cursor/skills)"),
+            AiChoice::None => {}
+        }
         match ai {
             AiChoice::ClaudeDesktop => println!("    - install Claude Desktop"),
             AiChoice::ClaudeCode => println!("    - install Claude Code"),
-            AiChoice::Codex => println!("    - install Tina4 skills for Codex"),
-            AiChoice::None => {}
+            AiChoice::Codex | AiChoice::Cursor | AiChoice::None => {}
         }
     }
     println!("    - create your projects folder: {}", projects_dir.display());
@@ -402,6 +411,7 @@ fn print_plan(
         AiChoice::ClaudeDesktop => println!("    - open Claude Desktop"),
         AiChoice::ClaudeCode => println!("    - show how to start Claude Code in the project"),
         AiChoice::Codex => println!("    - write AGENTS.md for Codex"),
+        AiChoice::Cursor => println!("    - install Cursor skills globally (project uses CLAUDE.md)"),
         AiChoice::None => {}
     }
     println!();
@@ -518,6 +528,7 @@ fn elevated_answers(args: &SetupArgs) -> Option<(String, AiChoice, PathBuf, Stri
     let ai = match args.ai.as_deref()? {
         "code" => AiChoice::ClaudeCode,
         "codex" => AiChoice::Codex,
+        "cursor" => AiChoice::Cursor,
         "none" => AiChoice::None,
         _ => AiChoice::ClaudeDesktop,
     };
@@ -532,6 +543,7 @@ fn ai_env(ai: AiChoice) -> &'static str {
         AiChoice::ClaudeDesktop => "desktop",
         AiChoice::ClaudeCode => "code",
         AiChoice::Codex => "codex",
+        AiChoice::Cursor => "cursor",
         AiChoice::None => "none",
     }
 }
@@ -755,6 +767,7 @@ fn install_skills_global(ai: AiChoice) {
     let target = match ai {
         AiChoice::ClaudeDesktop | AiChoice::ClaudeCode => "claude",
         AiChoice::Codex => "codex",
+        AiChoice::Cursor => "cursor",
         AiChoice::None => return,
     };
     install_skills_target(target);
@@ -765,10 +778,10 @@ fn install_skills_global(ai: AiChoice) {
 /// still accepts environment variables for automation.
 pub fn install_skills(target: &str) -> bool {
     match target {
-        "claude" | "codex" | "all" => install_skills_target(target),
+        "claude" | "codex" | "cursor" | "all" => install_skills_target(target),
         _ => {
             eprintln!(
-                "  {} Choose one of: tina4 skills claude, tina4 skills codex, or tina4 skills all.",
+                "  {} Choose one of: tina4 skills claude, tina4 skills codex, tina4 skills cursor, or tina4 skills all.",
                 icon_warn().yellow()
             );
             false
@@ -883,6 +896,7 @@ fn write_project_claude_md(project_path: &Path, lang: &str, ai: AiChoice) {
         AiChoice::ClaudeCode => "You're working in **Claude Code** — you have this project's CLAUDE.md and (via .mcp.json) its live `/__dev/mcp` tools.",
         AiChoice::ClaudeDesktop => "You're working in **Claude Desktop**.",
         AiChoice::Codex => "You're working in **Codex**.",
+        AiChoice::Cursor => "You're working in **Cursor** — use the Tina4 skills in `~/.cursor/skills/` (and this project's CLAUDE.md).",
         AiChoice::None => "This project is set up for AI-assisted development.",
     };
 
@@ -1183,7 +1197,7 @@ fn whats_next(project_path: &Path, ai: AiChoice, elevated: bool) {
                 }
             }
         }
-        AiChoice::ClaudeDesktop | AiChoice::Codex | AiChoice::None => {
+        AiChoice::ClaudeDesktop | AiChoice::Codex | AiChoice::Cursor | AiChoice::None => {
             // Offer to launch it right now — cd into the project and
             // `tina4 serve`, which opens the browser on the running app.
             let ans = prompt("Start it now and open it in your browser?", "y");
@@ -1260,6 +1274,7 @@ fn ai_to_str(ai: AiChoice) -> &'static str {
         AiChoice::ClaudeDesktop => "claude-desktop",
         AiChoice::ClaudeCode => "claude-code",
         AiChoice::Codex => "codex",
+        AiChoice::Cursor => "cursor",
         AiChoice::None => "none",
     }
 }
@@ -1269,6 +1284,7 @@ fn ai_from_str(s: &str) -> AiChoice {
         "claude-desktop" => AiChoice::ClaudeDesktop,
         "claude-code" => AiChoice::ClaudeCode,
         "codex" => AiChoice::Codex,
+        "cursor" => AiChoice::Cursor,
         _ => AiChoice::None,
     }
 }
@@ -1278,6 +1294,7 @@ fn ai_label(ai: AiChoice) -> &'static str {
         AiChoice::ClaudeDesktop => "Claude Desktop",
         AiChoice::ClaudeCode => "Claude Code",
         AiChoice::Codex => "Codex",
+        AiChoice::Cursor => "Cursor",
         AiChoice::None => "code editor only",
     }
 }

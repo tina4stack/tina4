@@ -4,7 +4,8 @@
 # Choose a target explicitly:
 #   curl -fsSL https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.sh | TINA4_SKILLS_TARGET=claude sh
 #   curl -fsSL https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.sh | TINA4_SKILLS_TARGET=codex sh
-# Use TINA4_SKILLS_TARGET=all only when both tools should receive the skills.
+#   curl -fsSL https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.sh | TINA4_SKILLS_TARGET=cursor sh
+# Use TINA4_SKILLS_TARGET=all only when every supported tool should receive the skills.
 #
 # POSIX sh ONLY -- no bashisms. Every example above pipes into `sh`, and on
 # Debian/Ubuntu that is dash. This script used `set -euo pipefail` and bash
@@ -27,9 +28,10 @@ target="${TINA4_SKILLS_TARGET:-}"
 case "$target" in
   claude) destinations="$HOME/.claude/skills" ;;
   codex)  destinations="$HOME/.agents/skills" ;;
-  all)    destinations="$HOME/.claude/skills $HOME/.agents/skills" ;;
+  cursor) destinations="$HOME/.cursor/skills" ;;
+  all)    destinations="$HOME/.claude/skills $HOME/.agents/skills $HOME/.cursor/skills" ;;
   *)
-    echo "error: set TINA4_SKILLS_TARGET to claude, codex, or all" >&2
+    echo "error: set TINA4_SKILLS_TARGET to claude, codex, cursor, or all" >&2
     exit 2
     ;;
 esac

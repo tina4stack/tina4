@@ -141,9 +141,9 @@ enum Commands {
         force: bool,
     },
 
-    /// Install the latest Tina4 AI skills for Claude, Codex, or both
+    /// Install the latest Tina4 AI skills for Claude, Codex, Cursor, or all
     Skills {
-        /// Target coding tool: claude, codex, or all
+        /// Target coding tool: claude, codex, cursor, or all
         target: String,
     },
 
@@ -1723,11 +1723,36 @@ fn refresh_installed_skills() {
 
     let claude = has_tina4_skill(home.join(".claude").join("skills"));
     let codex = has_tina4_skill(home.join(".agents").join("skills"));
-    let target = match (claude, codex) {
-        (true, true) => "all",
-        (true, false) => "claude",
-        (false, true) => "codex",
-        (false, false) => return,
+    let cursor = has_tina4_skill(home.join(".cursor").join("skills"));
+
+    let mut targets: Vec<&str> = Vec::new();
+    if claude {
+        targets.push("claude");
+    }
+    if codex {
+        targets.push("codex");
+    }
+    if cursor {
+        targets.push("cursor");
+    }
+    if targets.is_empty() {
+        return;
+    }
+
+    let target = if targets.len() == 3 {
+        "all"
+    } else if targets.len() == 1 {
+        targets[0]
+    } else {
+        // Two of three: refresh each present target so we never enable a tool
+        // the developer did not choose.
+        for t in &targets {
+            println!("{} Refreshing Tina4 AI skills for {}...", icon_play().green(), t);
+            if !setup::install_skills(t) {
+                eprintln!("{} Tina4 skills refresh failed for {}; the client update is still complete.", icon_warn().yellow(), t);
+            }
+        }
+        return;
     };
 
     println!("{} Refreshing Tina4 AI skills for {}...", icon_play().green(), target);

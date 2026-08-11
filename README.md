@@ -109,11 +109,14 @@ tina4 skills claude
 # Codex CLI, IDE extension, or desktop app
 tina4 skills codex
 
-# Both tools
+# Cursor
+tina4 skills cursor
+
+# Every supported tool
 tina4 skills all
 ```
 
-`tina4 setup` offers the same choice during first-time setup and writes `AGENTS.md` for Codex projects. The standalone installer remains available for CI and advanced automation.
+`tina4 setup` offers the same choice during first-time setup and writes `AGENTS.md` for Codex projects. Framework repos also ship Cursor entrypoints under `.cursor/skills` (mirroring `.agents/skills` for Codex). The standalone installer remains available for CI and advanced automation.
 
 ## How it works
 

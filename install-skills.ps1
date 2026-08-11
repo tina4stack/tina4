@@ -3,7 +3,8 @@
 # Choose a target explicitly:
 #   $env:TINA4_SKILLS_TARGET = "claude"; irm https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.ps1 | iex
 #   $env:TINA4_SKILLS_TARGET = "codex"; irm https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.ps1 | iex
-# Use TINA4_SKILLS_TARGET=all only when both tools should receive the skills.
+#   $env:TINA4_SKILLS_TARGET = "cursor"; irm https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.ps1 | iex
+# Use TINA4_SKILLS_TARGET=all only when every supported tool should receive the skills.
 $ErrorActionPreference = "Stop"
 
 # Pin skills to a released tag, not a moving branch, so an install is reproducible.
@@ -13,8 +14,9 @@ $target = $env:TINA4_SKILLS_TARGET
 $destinations = switch ($target) {
   "claude" { @(Join-Path $HOME ".claude\skills") }
   "codex"  { @(Join-Path $HOME ".agents\skills") }
-  "all"    { @(Join-Path $HOME ".claude\skills"; Join-Path $HOME ".agents\skills") }
-  default { throw "Set TINA4_SKILLS_TARGET to claude, codex, or all." }
+  "cursor" { @(Join-Path $HOME ".cursor\skills") }
+  "all"    { @(Join-Path $HOME ".claude\skills"; Join-Path $HOME ".agents\skills"; Join-Path $HOME ".cursor\skills") }
+  default { throw "Set TINA4_SKILLS_TARGET to claude, codex, cursor, or all." }
 }
 $stage = Join-Path ([System.IO.Path]::GetTempPath()) ("tina4-skills-" + [guid]::NewGuid())
 

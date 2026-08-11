@@ -177,12 +177,15 @@ binary via `which::which("claude")` and — because on Windows `claude` is a
   check to defeat overlayfs / polling-mode spurious events.
 - SCSS compilation via grass crate (zero-dep, no sass/node required)
 - **AI-skills currency check** (`doctor.rs`): `install-skills.sh`/`.ps1` record the
-  ref they installed in a GLOBAL marker `~/.claude/skills/.tina4-skills-ref`;
-  `tina4 doctor` reads that marker, fetches the current pinned ref from the same
+  ref they installed in a GLOBAL marker under each target
+  (`~/.claude/skills`, `~/.agents/skills`, `~/.cursor/skills` → `.tina4-skills-ref`);
+  `tina4 doctor` reads those markers, fetches the current pinned ref from the same
   installer (`https://tina4.com/install-skills.sh`, so "latest" equals what a
-  refresh installs), and reports current / update-available / offline / not-recorded.
-  The path is read-only (curl for the ref, no HTTP-client dep) and — like the
-  installer — only ever touches `~/.claude/skills`; it never writes a project CLAUDE.md.
+  refresh installs), and reports Claude / Codex / Cursor separately
+  (current / update-available / offline / not-recorded). Targets:
+  `tina4 skills claude|codex|cursor|all`. The path is read-only (curl for the ref,
+  no HTTP-client dep) and a refresh only ever writes the chosen home skills dir —
+  never a project's CLAUDE.md, AGENTS.md, or repo-local `.cursor/skills` entrypoints.
   The classifier + ref parser are pure and unit-tested.
 - Port auto-increment if default port is in use
 - Cross-platform: macOS, Linux, Windows (ANSI fallbacks for cmd.exe)

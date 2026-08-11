@@ -26,6 +26,10 @@ plan-driven scaffold-first + resource-naming fix (#14), and init-defaults-to-SQL
 | 11 | Proof-only MCP: remote AI builds locally, source never leaves | [mcp-proof-only-remote-build.md](mcp-proof-only-remote-build.md) | 🟡 Slice 0 done + merged to `main` (validated w/ curl + local Ollama; backend+frontend build tools); tunnel/consent/registration TBD |
 | 12 | Reason on a local/hosted model (checksum, override, fallback) | [reasoning-slot-override.md](reasoning-slot-override.md), [long-context-checksum.md](long-context-checksum.md) | ✅ Complete — `TINA4_LOCAL_MODEL_*` points the reasoning slot at a local/hosted model (chat.tina4.com `general`), fallback to mcp `long_context` (#12); planner/debug stay on the strong model (#13); `long_context` checksum caching appends deltas not the whole corpus (#11); trailing-text parse tolerance (#13). Verified live in the dev-admin |
 
+| 13 | Fargate backends + Tina4-js edge delivery | [fargate-and-edge-deployment.md](fargate-and-edge-deployment.md) | Proposed — provider-neutral deployment manifest, Fargate adapter, and Cloudflare-first Tina4-js edge adapter |
+
+| 14 | Cursor skills + client `v3.8.69` release | [cursor-skills-installation.md](cursor-skills-installation.md) | In progress - Cursor target, multi-tool setup, signed client release |
+
 ## Rules of the method
 - One thread at a time; scope it in its plan file first, get a nod, then build.
 - Tests first, real (no mocks), positive + negative — before the code.

@@ -95,26 +95,21 @@ tina4 serve
 | `tina4 books` | Download the Tina4 book into the current directory |
 | `tina4 docs` | Download framework-specific documentation into `.tina4-docs/` |
 | `tina4 i-want-to-stop-using-v2-and-switch-to-v3` | Migrate a v2 project to the v3 structure |
-| `tina4 update` | Self-update the tina4 binary and remove old v2 CLI binaries |
+| `tina4 update` / `tina4 upgrade` | Self-update the client and refresh installed Tina4 AI skills |
 
 ### AI skills
 
-Use the Tina4 client to install or refresh the skills. It chooses the correct
-location and current released skills version for you.
+Use the Tina4 client to install or refresh skills. It shows a menu for Claude,
+Codex, Cursor, or all three, and chooses the correct location and current
+released skills version for you.
 
 ```bash
-# Claude Code / Claude Desktop
-tina4 skills claude
-
-# Codex CLI, IDE extension, or desktop app
-tina4 skills codex
-
-# Cursor
-tina4 skills cursor
-
-# Every supported tool
-tina4 skills all
+# Choose interactively (recommended)
+tina4 skills
 ```
+
+For automation, `tina4 skills claude`, `tina4 skills codex`,
+`tina4 skills cursor`, and `tina4 skills all` remain available.
 
 `tina4 setup` offers the same choice during first-time setup and writes `AGENTS.md` for Codex projects. Framework repos also ship Cursor entrypoints under `.cursor/skills` (mirroring `.agents/skills` for Codex). The standalone installer remains available for CI and advanced automation.
 

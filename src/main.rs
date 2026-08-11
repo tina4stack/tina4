@@ -143,15 +143,16 @@ enum Commands {
 
     /// Install the latest Tina4 AI skills for Claude, Codex, Cursor, or all
     Skills {
-        /// Target coding tool: claude, codex, cursor, or all
-        target: String,
+        /// Target coding tool: claude, codex, cursor, or all. Omit for a menu.
+        target: Option<String>,
     },
 
     /// Stop using v2 and switch your Tina4 project to v3 structure
     #[command(name = "i-want-to-stop-using-v2-and-switch-to-v3")]
     IWantToStopUsingV2AndSwitchToV3,
 
-    /// Self-update the tina4 binary
+    /// Self-update the tina4 binary and refresh installed Tina4 AI skills
+    #[command(alias = "upgrade")]
     Update,
 
     /// Download the Tina4 book into the current directory
@@ -437,7 +438,11 @@ fn main() {
         }
 
         Commands::Skills { target } => {
-            if !setup::install_skills(&target) {
+            let ok = match target {
+                Some(target) => setup::install_skills(&target),
+                None => setup::install_skills_interactive(),
+            };
+            if !ok {
                 std::process::exit(2);
             }
         }
@@ -1699,6 +1704,34 @@ fn handle_update() {
     update_framework_package();
 }
 
+const TINA4_SKILL_NAMES: &[&str] = &[
+    "tina4-developer",
+    "tina4-developer-python",
+    "tina4-developer-php",
+    "tina4-developer-ruby",
+    "tina4-developer-nodejs",
+    "tina4-js",
+    "tina4-maintainer",
+];
+
+/// Return every AI target that already contains a Tina4 skill. This makes an
+/// update additive only for the developer's existing tool choices.
+fn installed_skills_targets(home: &std::path::Path) -> Vec<&'static str> {
+    let has_tina4_skill = |dir: &std::path::Path| {
+        TINA4_SKILL_NAMES
+            .iter()
+            .any(|skill| dir.join(skill).join("SKILL.md").is_file())
+    };
+    [
+        ("claude", home.join(".claude").join("skills")),
+        ("codex", home.join(".agents").join("skills")),
+        ("cursor", home.join(".cursor").join("skills")),
+    ]
+    .into_iter()
+    .filter_map(|(target, dir)| has_tina4_skill(&dir).then_some(target))
+    .collect()
+}
+
 /// Keep every installed Tina4 AI target current when the client is updated.
 /// We only refresh locations that already contain a Tina4 skill, so an update
 /// never enables a coding tool the developer did not choose.
@@ -1707,34 +1740,7 @@ fn refresh_installed_skills() {
         Some(home) => std::path::PathBuf::from(home),
         None => return,
     };
-    let has_tina4_skill = |dir: std::path::PathBuf| {
-        [
-            "tina4-developer",
-            "tina4-developer-python",
-            "tina4-developer-php",
-            "tina4-developer-ruby",
-            "tina4-developer-nodejs",
-            "tina4-js",
-            "tina4-maintainer",
-        ]
-        .iter()
-        .any(|skill| dir.join(skill).join("SKILL.md").is_file())
-    };
-
-    let claude = has_tina4_skill(home.join(".claude").join("skills"));
-    let codex = has_tina4_skill(home.join(".agents").join("skills"));
-    let cursor = has_tina4_skill(home.join(".cursor").join("skills"));
-
-    let mut targets: Vec<&str> = Vec::new();
-    if claude {
-        targets.push("claude");
-    }
-    if codex {
-        targets.push("codex");
-    }
-    if cursor {
-        targets.push("cursor");
-    }
+    let targets = installed_skills_targets(&home);
     if targets.is_empty() {
         return;
     }
@@ -2258,5 +2264,28 @@ mod tests {
             assert!(read_dotenv_bool_from(p, "TINA4_NO_BROWSER"));
             assert!(!read_dotenv_bool_from(p, "TINA4_DEBUG"));
         });
+    }
+
+    #[test]
+    fn installed_skills_refreshes_only_existing_targets() {
+        let root = std::env::temp_dir().join(format!(
+            "tina4-installed-skills-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for (directory, skill) in [
+            (".claude/skills", "tina4-js"),
+            (".cursor/skills", "tina4-developer"),
+        ] {
+            let path = root.join(directory).join(skill);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("SKILL.md"), "# Tina4\n").unwrap();
+        }
+
+        assert_eq!(installed_skills_targets(&root), vec!["claude", "cursor"]);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

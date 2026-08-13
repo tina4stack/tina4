@@ -147,6 +147,67 @@ pub fn has_personal_token(project_dir: &Path) -> bool {
     personal_token(project_dir).is_some()
 }
 
+/// True when `candidate` is the shared FREE-TOKEN currently in effect. Used to
+/// gate the dev-email attribution header — we only tell the server WHO is on
+/// the shared trial, never leak the email alongside a personal/registered token.
+pub fn is_free_token(candidate: &str) -> bool {
+    free_token().as_deref() == Some(candidate.trim())
+}
+
+/// HTTP header carrying the developer's identity for shared-FREE-TOKEN calls,
+/// so the server can rate-limit per person and invite them to register.
+pub const DEV_EMAIL_HEADER: &str = "X-Tina4-Dev-Email";
+
+/// Cached dev-email resolution — a `git config user.email` subprocess should
+/// run at most once per agent process, not per grounding call.
+static DEV_EMAIL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Pure choice of the dev email from its two candidates (env override wins,
+/// then the git-config value), so the resolution is unit-testable without a
+/// real git subprocess or global env. Blank/whitespace → treated as absent.
+fn dev_email_from(env_override: Option<&str>, git_value: Option<&str>) -> Option<String> {
+    for candidate in [env_override, git_value] {
+        if let Some(v) = candidate {
+            let v = v.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// The developer's email for FREE-TOKEN attribution: `TINA4_DEV_EMAIL` env
+/// override, else `git config user.email` (the GitHub commit email). `None`
+/// when neither exists — the header is simply omitted then. Resolved once and
+/// cached; the agent serves a single project, so this is effectively a constant.
+pub fn dev_email() -> Option<String> {
+    DEV_EMAIL
+        .get_or_init(|| {
+            let env_override = std::env::var("TINA4_DEV_EMAIL").ok();
+            let git_value = std::process::Command::new("git")
+                .args(["config", "user.email"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+            dev_email_from(env_override.as_deref(), git_value.as_deref())
+        })
+        .clone()
+}
+
+/// Attach the dev-email attribution header to a request — but ONLY when `token`
+/// is the shared FREE-TOKEN and we have an email. On a personal/registered
+/// token this is a no-op, so a registered developer's email is never sent.
+fn with_dev_email(req: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
+    if is_free_token(token) {
+        if let Some(email) = dev_email() {
+            return req.header(DEV_EMAIL_HEADER, email);
+        }
+    }
+    req
+}
+
 /// Read a single `KEY=VALUE` from the project `.env`. Deliberately tiny — the
 /// agent only needs one key, so we don't pull in a dotenv dependency (zero-dep
 /// discipline). Ignores comments and surrounding quotes/whitespace.
@@ -236,15 +297,12 @@ pub async fn tina4_context(project_dir: &Path, instruction: &str, language: &str
         }
     });
 
-    let resp = match http_client()
+    let req = http_client()
         .post(endpoint())
         .header("Authorization", format!("Bearer {tok}"))
         // Streamable-HTTP servers may answer with JSON or an SSE frame; accept both.
-        .header("Accept", "application/json, text/event-stream")
-        .json(&req_body)
-        .send()
-        .await
-    {
+        .header("Accept", "application/json, text/event-stream");
+    let resp = match with_dev_email(req, &tok).json(&req_body).send().await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("[mcp] tina4_context send failed: {e}");
@@ -340,14 +398,11 @@ pub async fn long_context_call(
         .build()
         .ok()?;
 
-    let resp = match client
+    let req = client
         .post(&url)
         .header("Authorization", format!("Bearer {token}"))
-        .header("Accept", "application/json, text/event-stream")
-        .json(&req_body)
-        .send()
-        .await
-    {
+        .header("Accept", "application/json, text/event-stream");
+    let resp = match with_dev_email(req, token).json(&req_body).send().await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("[mcp] long_context send failed: {e}");
@@ -395,14 +450,11 @@ pub async fn tina4_chat_call(base_url: &str, token: &str, messages: serde_json::
         .build()
         .ok()?;
 
-    let resp = match client
+    let req = client
         .post(&url)
         .header("Authorization", format!("Bearer {token}"))
-        .header("Accept", "application/json, text/event-stream")
-        .json(&req_body)
-        .send()
-        .await
-    {
+        .header("Accept", "application/json, text/event-stream");
+    let resp = match with_dev_email(req, token).json(&req_body).send().await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("[mcp] tina4_chat send failed: {e}");
@@ -777,5 +829,80 @@ mod tests {
         let _ = fs::remove_file(dir.join(".env"));
         assert!(!has_personal_token(&dir));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── Dev-email attribution (FREE-TOKEN only) ───────────────────────
+
+    #[test]
+    fn is_free_token_matches_the_literal_only() {
+        // With no TINA4_FREE_TOKEN override, the free token is the literal.
+        assert!(is_free_token("FREE-TOKEN"));
+        assert!(is_free_token("  FREE-TOKEN  ")); // trimmed
+        assert!(!is_free_token("t4_a_personal_token"));
+        assert!(!is_free_token(""));
+    }
+
+    #[test]
+    fn dev_email_prefers_env_override_then_git() {
+        assert_eq!(dev_email_from(Some("me@dev.io"), Some("git@x.io")).as_deref(), Some("me@dev.io"));
+    }
+
+    #[test]
+    fn dev_email_falls_back_to_git_config() {
+        assert_eq!(dev_email_from(None, Some("git@x.io")).as_deref(), Some("git@x.io"));
+    }
+
+    #[test]
+    fn dev_email_blank_candidates_are_absent() {
+        // No email anywhere, or only whitespace → header is omitted (None).
+        assert_eq!(dev_email_from(None, None), None);
+        assert_eq!(dev_email_from(Some("  "), Some("")), None);
+    }
+
+    /// Real localhost round-trip: capture the raw HTTP request long_context_call
+    /// emits and assert the X-Tina4-Dev-Email header is present on the shared
+    /// FREE-TOKEN and ABSENT on a personal token. No mock — a real TcpListener
+    /// reads real bytes reqwest put on the wire.
+    #[tokio::test]
+    async fn dev_email_header_rides_only_the_free_token() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        // Only TINA4_DEV_EMAIL is set (no other test reads it); the free token
+        // stays the literal default so we don't disturb is_free_token's test.
+        unsafe { std::env::set_var("TINA4_DEV_EMAIL", "dev@tina4.test"); }
+
+        async fn capture_request(token: &str) -> String {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let mut buf = vec![0u8; 8192];
+                let n = sock.read(&mut buf).await.unwrap();
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                req
+            });
+            let base = format!("http://{addr}");
+            let _ = long_context_call(&base, token, "q?", "ctx", "").await;
+            server.await.unwrap()
+        }
+
+        let free_req = capture_request("FREE-TOKEN").await;
+        assert!(
+            free_req.to_lowercase().contains("x-tina4-dev-email: dev@tina4.test"),
+            "free-token request must carry the dev-email header, got:\n{free_req}"
+        );
+
+        let personal_req = capture_request("t4_a_personal_token").await;
+        assert!(
+            !personal_req.to_lowercase().contains("x-tina4-dev-email"),
+            "personal-token request must NOT carry the dev-email header, got:\n{personal_req}"
+        );
     }
 }

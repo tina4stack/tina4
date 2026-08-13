@@ -59,10 +59,53 @@ fn endpoint() -> String {
     format!("{}/mcp", base_url().trim_end_matches('/'))
 }
 
-/// Resolve the Bearer token: process env first, then the project `.env`
+/// The shared **FREE-TOKEN** trial credential. Sent by default when the
+/// developer has set no personal `TINA4_MCP_TOKEN`, so the dev-admin coder and
+/// grounding work *before* signup — the whole point of the trial. Andre
+/// activates the literal `FREE-TOKEN` as a **rate-limited** credential on
+/// tina4.com's auth (mcp.tina4.com, and chat.tina4.com/general for the hosted
+/// reasoning model). Overridable at deploy via `TINA4_FREE_TOKEN` to rotate it
+/// without a rebuild. Set to `""` to disable the free rung entirely.
+const FREE_TOKEN: &str = "FREE-TOKEN";
+
+/// The env var a developer sets to use their OWN mcp.tina4.com Bearer token.
+/// (Re-exported name kept as `TOKEN_VAR` above for back-compat.)
+pub const FREE_TOKEN_VAR: &str = "TINA4_FREE_TOKEN";
+
+/// Which credential the supervisor resolved for mcp.tina4.com grounding — drives
+/// the dev-admin status line and the "register for your own" signup nudge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenSource {
+    /// The developer's own token (process env or project `.env`).
+    Personal,
+    /// The shared FREE-TOKEN trial credential — nudge them to register.
+    Free,
+    /// No credential at all (free rung disabled AND no personal token).
+    None,
+}
+
+/// The FREE-TOKEN value: `TINA4_FREE_TOKEN` env override, else the compiled
+/// constant. Split from the env read so the resolution is unit-testable without
+/// mutating the global process environment (see `free_token_from`).
+fn free_token_from(env_override: Option<&str>) -> Option<String> {
+    let v = env_override
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| FREE_TOKEN.to_string());
+    let v = v.trim();
+    if v.is_empty() { None } else { Some(v.to_string()) }
+}
+
+/// The FREE-TOKEN value in effect (env override → compiled constant → None).
+pub fn free_token() -> Option<String> {
+    free_token_from(std::env::var(FREE_TOKEN_VAR).ok().as_deref())
+}
+
+/// The developer's OWN token: process env first, then the project `.env`
 /// fallback. Blank values are treated as absent so an empty `TINA4_MCP_TOKEN=`
-/// line doesn't mask a real token set in the environment.
-pub fn token(project_dir: &Path) -> Option<String> {
+/// line doesn't mask a real token set in the environment. `None` means the
+/// developer has not configured their own — which is what triggers the free
+/// trial fallback and the signup nudge.
+pub fn personal_token(project_dir: &Path) -> Option<String> {
     if let Ok(t) = std::env::var(TOKEN_VAR) {
         let t = t.trim();
         if !t.is_empty() {
@@ -72,10 +115,36 @@ pub fn token(project_dir: &Path) -> Option<String> {
     read_env_file_value(project_dir, TOKEN_VAR)
 }
 
-/// True when a token is configured (env or `.env`). Drives the dev-admin
-/// "configured ✓ / not set" status without exposing the token itself.
-pub fn is_configured(project_dir: &Path) -> bool {
-    token(project_dir).is_some()
+/// Pure resolution of (token, source) from the personal + free candidates.
+/// No env, no filesystem — the whole resolution order lives here so it can be
+/// exhaustively unit-tested (a pure function over its inputs, not a mock).
+fn resolve(personal: Option<String>, free: Option<String>) -> (Option<String>, TokenSource) {
+    if let Some(p) = personal.filter(|s| !s.trim().is_empty()) {
+        return (Some(p), TokenSource::Personal);
+    }
+    match free.filter(|s| !s.trim().is_empty()) {
+        Some(f) => (Some(f), TokenSource::Free),
+        None => (None, TokenSource::None),
+    }
+}
+
+/// Resolve the Bearer token to send: the developer's own if set, else the
+/// shared FREE-TOKEN trial credential. `None` only when the free rung is
+/// disabled AND no personal token exists.
+pub fn token(project_dir: &Path) -> Option<String> {
+    resolve(personal_token(project_dir), free_token()).0
+}
+
+/// Which credential `token()` resolved to (Personal | Free | None).
+pub fn token_source(project_dir: &Path) -> TokenSource {
+    resolve(personal_token(project_dir), free_token()).1
+}
+
+/// True when the developer configured their OWN token (not the free trial).
+/// Drives the dev-admin "Configured ✓ / Free trial" status — the free token
+/// being present must NOT read as "the developer is set up".
+pub fn has_personal_token(project_dir: &Path) -> bool {
+    personal_token(project_dir).is_some()
 }
 
 /// Read a single `KEY=VALUE` from the project `.env`. Deliberately tiny — the
@@ -631,6 +700,82 @@ mod tests {
         let body = fs::read_to_string(dir.join(".env")).unwrap();
         assert!(body.contains("FOO=bar"));
         assert!(body.contains("TINA4_MCP_TOKEN=newtoken"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── FREE-TOKEN trial resolution ───────────────────────────────────
+    // The resolution ORDER lives in the pure `resolve`/`free_token_from`
+    // helpers, so these exercise the real logic without mutating the global
+    // process environment (which would race the parallel test runner).
+
+    #[test]
+    fn resolve_prefers_personal_over_free() {
+        let (tok, src) = resolve(Some("mine".into()), Some("FREE-TOKEN".into()));
+        assert_eq!(tok.as_deref(), Some("mine"));
+        assert_eq!(src, TokenSource::Personal);
+    }
+
+    #[test]
+    fn resolve_falls_back_to_free_when_no_personal() {
+        let (tok, src) = resolve(None, Some("FREE-TOKEN".into()));
+        assert_eq!(tok.as_deref(), Some("FREE-TOKEN"));
+        assert_eq!(src, TokenSource::Free);
+    }
+
+    #[test]
+    fn resolve_blank_personal_is_ignored_falls_to_free() {
+        // An empty `TINA4_MCP_TOKEN=` line must not mask the free trial.
+        let (tok, src) = resolve(Some("   ".into()), Some("FREE-TOKEN".into()));
+        assert_eq!(tok.as_deref(), Some("FREE-TOKEN"));
+        assert_eq!(src, TokenSource::Free);
+    }
+
+    #[test]
+    fn resolve_none_when_free_disabled_and_no_personal() {
+        let (tok, src) = resolve(None, None);
+        assert_eq!(tok, None);
+        assert_eq!(src, TokenSource::None);
+    }
+
+    #[test]
+    fn free_token_defaults_to_the_literal_constant() {
+        // Out of the box (no TINA4_FREE_TOKEN override) → the shipped FREE-TOKEN.
+        assert_eq!(free_token_from(None).as_deref(), Some("FREE-TOKEN"));
+    }
+
+    #[test]
+    fn free_token_env_override_wins() {
+        assert_eq!(free_token_from(Some("t4_rotated")).as_deref(), Some("t4_rotated"));
+    }
+
+    #[test]
+    fn free_token_blank_override_disables_the_free_rung() {
+        // Deploying with TINA4_FREE_TOKEN="" turns the trial off (→ None).
+        assert_eq!(free_token_from(Some("   ")), None);
+    }
+
+    #[test]
+    fn personal_token_reads_from_env_file_when_no_process_env() {
+        // Hermetic: no process env set for the key → resolves from .env, and
+        // that counts as a personal (not free) credential.
+        let dir = std::env::temp_dir().join(format!("tina4_mcp_pers_{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        fs::write(dir.join(".env"), "TINA4_MCP_TOKEN=t4_dev_own\n").unwrap();
+        assert_eq!(personal_token(&dir).as_deref(), Some("t4_dev_own"));
+        // With a personal token present, resolve() must pick it over free.
+        let (tok, src) = resolve(personal_token(&dir), Some("FREE-TOKEN".into()));
+        assert_eq!(tok.as_deref(), Some("t4_dev_own"));
+        assert_eq!(src, TokenSource::Personal);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn has_personal_token_is_false_on_a_bare_project() {
+        // No .env, no personal token → free trial territory (nudge to register).
+        let dir = std::env::temp_dir().join(format!("tina4_mcp_bare_{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let _ = fs::remove_file(dir.join(".env"));
+        assert!(!has_personal_token(&dir));
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -3665,14 +3665,28 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                 let _ = stream.write_all(resp.as_bytes()).await;
             } else if first_line.starts_with("GET /mcp/status") {
                 // Framework-grounding MCP status for the dev-admin token panel.
-                // Never returns the token — only whether it's configured and,
-                // for confirmation, its last 4 chars.
-                let configured = crate::mcp_context::is_configured(&project_dir);
-                let last4 = crate::mcp_context::token(&project_dir)
-                    .map(|t| t.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect::<String>())
-                    .unwrap_or_default();
+                // Never returns the token — only which credential is in use
+                // (personal / free trial / none) and, for a personal token,
+                // its last 4 chars for confirmation.
+                let source = crate::mcp_context::token_source(&project_dir);
+                let configured = matches!(source, crate::mcp_context::TokenSource::Personal);
+                // Only surface last4 for the developer's OWN token — never leak
+                // the shared free credential's tail into every trial UI.
+                let last4 = if configured {
+                    crate::mcp_context::personal_token(&project_dir)
+                        .map(|t| t.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect::<String>())
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                let source_str = match source {
+                    crate::mcp_context::TokenSource::Personal => "personal",
+                    crate::mcp_context::TokenSource::Free => "free",
+                    crate::mcp_context::TokenSource::None => "none",
+                };
                 let payload = serde_json::json!({
                     "configured": configured,
+                    "source": source_str,
                     "last4": last4,
                     "url": std::env::var("TINA4_MCP_URL").unwrap_or_else(|_| "https://mcp.tina4.com".into()),
                 });

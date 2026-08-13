@@ -2828,6 +2828,14 @@ pub async fn llm_call(
         } else {
             req = req.header("Authorization", format!("Bearer {}", settings.api_key));
         }
+        // FREE-TOKEN attribution: when this call rides the shared free token,
+        // tell the server WHO is on the trial (git email) so it can meter per
+        // person and invite them to register. Never sent with a personal token.
+        if crate::mcp_context::is_free_token(&settings.api_key) {
+            if let Some(email) = crate::mcp_context::dev_email() {
+                req = req.header(crate::mcp_context::DEV_EMAIL_HEADER, email);
+            }
+        }
     }
 
     let resp = req.send().await.map_err(|e| format!("Request failed: {}", e))?;
@@ -3665,15 +3673,38 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                 let _ = stream.write_all(resp.as_bytes()).await;
             } else if first_line.starts_with("GET /mcp/status") {
                 // Framework-grounding MCP status for the dev-admin token panel.
-                // Never returns the token — only whether it's configured and,
-                // for confirmation, its last 4 chars.
-                let configured = crate::mcp_context::is_configured(&project_dir);
-                let last4 = crate::mcp_context::token(&project_dir)
-                    .map(|t| t.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect::<String>())
-                    .unwrap_or_default();
+                // Never returns the token — only which credential is in use
+                // (personal / free trial / none) and, for a personal token,
+                // its last 4 chars for confirmation.
+                let source = crate::mcp_context::token_source(&project_dir);
+                let configured = matches!(source, crate::mcp_context::TokenSource::Personal);
+                // Only surface last4 for the developer's OWN token — never leak
+                // the shared free credential's tail into every trial UI.
+                let last4 = if configured {
+                    crate::mcp_context::personal_token(&project_dir)
+                        .map(|t| t.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect::<String>())
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                let source_str = match source {
+                    crate::mcp_context::TokenSource::Personal => "personal",
+                    crate::mcp_context::TokenSource::Free => "free",
+                    crate::mcp_context::TokenSource::None => "none",
+                };
+                // On the free trial, surface WHICH email identifies the trial to
+                // the server (git email) so the panel can show it — transparency
+                // about what rides the shared token. Empty when we have none.
+                let dev_email = if matches!(source, crate::mcp_context::TokenSource::Free) {
+                    crate::mcp_context::dev_email().unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 let payload = serde_json::json!({
                     "configured": configured,
+                    "source": source_str,
                     "last4": last4,
+                    "dev_email": dev_email,
                     "url": std::env::var("TINA4_MCP_URL").unwrap_or_else(|_| "https://mcp.tina4.com".into()),
                 });
                 let body = serde_json::to_string(&payload).unwrap_or_default();

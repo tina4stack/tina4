@@ -44,9 +44,12 @@ install_skill() {
   repo="$1"; skill="$2"; shift 2
   base="https://raw.githubusercontent.com/tina4stack/${repo}/${ref}/.claude/skills"
   mkdir -p "$stage/$skill/references"
-  curl -fsSL "$base/$skill/SKILL.md" -o "$stage/$skill/SKILL.md"
+  # raw.githubusercontent.com returns an intermittent 503 under load; one failed
+  # fetch out of ~30 aborted the whole install. curl treats 503 as a transient
+  # error and retries it, so a single blip no longer kills `tina4 ai`.
+  curl -fsSL --retry 5 --retry-delay 2 "$base/$skill/SKILL.md" -o "$stage/$skill/SKILL.md"
   for reference in "$@"; do
-    curl -fsSL "$base/$skill/references/$reference" -o "$stage/$skill/references/$reference"
+    curl -fsSL --retry 5 --retry-delay 2 "$base/$skill/references/$reference" -o "$stage/$skill/references/$reference"
   done
   echo "  + $skill  ($repo)"
 }

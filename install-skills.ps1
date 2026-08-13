@@ -47,9 +47,11 @@ try {
     $base = "https://raw.githubusercontent.com/tina4stack/$($i.repo)/$ref/.claude/skills"
     $refdir = Join-Path $stage "$($i.skill)\references"
     New-Item -ItemType Directory -Path $refdir -Force | Out-Null
-    Invoke-WebRequest -Uri "$base/$($i.skill)/SKILL.md" -OutFile (Join-Path $stage "$($i.skill)\SKILL.md")
+    # raw.githubusercontent.com returns an intermittent 503 under load; retry it so
+    # one blip out of ~30 fetches no longer aborts the whole install.
+    Invoke-WebRequest -Uri "$base/$($i.skill)/SKILL.md" -OutFile (Join-Path $stage "$($i.skill)\SKILL.md") -MaximumRetryCount 5 -RetryIntervalSec 2
     foreach ($reference in $i.refs) {
-      Invoke-WebRequest -Uri "$base/$($i.skill)/references/$reference" -OutFile (Join-Path $refdir $reference)
+      Invoke-WebRequest -Uri "$base/$($i.skill)/references/$reference" -OutFile (Join-Path $refdir $reference) -MaximumRetryCount 5 -RetryIntervalSec 2
     }
     Write-Host "  + $($i.skill)  ($($i.repo))" -ForegroundColor Green
   }

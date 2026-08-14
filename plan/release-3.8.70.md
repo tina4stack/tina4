@@ -27,6 +27,6 @@
 - [x] Dev-admin deployed before the CLI release containing its FREE-TOKEN dependency
 
 ## Commits
-- (pending)
+- 7eb23f3  release: prepare Tina4 CLI 3.8.70
 
 ## Status: In Progress

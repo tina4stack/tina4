@@ -26,6 +26,6 @@
 - [x] `.tina4/chat/settings.json` and request settings bypass FREE-TOKEN resolution
 
 ## Commits
-- (pending)
+- bffc5aa  fix(agent): hydrate MCP token for planner settings
 
 ## Status: In Progress

@@ -9,8 +9,9 @@
 - [x] Add unit tests for OpenAI and Anthropic SSE delta parsing and reasoning content
 - [x] Bump CLI version to 3.8.73 (Cargo.toml + CLAUDE.md)
 - [x] Run full Rust test suite (`cargo test`)
-- [ ] Commit changes, tag `v3.8.73`, and push to trigger CI
-- [ ] Sign Windows binary on macOS (`sign-mac.sh v3.8.73`) and publish release
+- [x] Commit changes, tag `v3.8.73`, and push to trigger CI
+- [x] GitHub Actions workflow completed: published crate `tina4` 3.8.73, CLI container image, and draft release assets for all 7 platforms
+- [ ] Sign Windows binary on macOS (`sign-mac.sh v3.8.73`) and publish release (awaits SimplySign Desktop 2FA session)
 
 ## Tests (real, positive + negative)
 - [x] `parse_openai_sse_line_splits_thinking_and_content` (DeepSeek reasoning_content, thinking, content, done, comments)

@@ -7,7 +7,7 @@
 - [x] Add a failing regression for blank persisted MCP credentials
 - [x] Hydrate every Tina4 MCP model slot before agent selection
 - [x] Verify supervisor, planner fallback, coder, and direct execution settings
-- [ ] Release and sign corrective CLI v3.8.71
+- [x] Release and sign corrective CLI v3.8.71
 
 ## Parity
 | Surface | Status |
@@ -27,5 +27,6 @@
 
 ## Commits
 - bffc5aa  fix(agent): hydrate MCP token for planner settings
+- 660a4fc  docs(plan): record planner FREE-TOKEN fix
 
-## Status: In Progress
+## Status: Complete

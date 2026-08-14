@@ -11,13 +11,14 @@ Linux, and Windows PowerShell 5.1 without requiring a new Tina4 client release.
 - [x] Make the tina4-js skill trigger on `tina4js` and `Tina4 JS` spellings
 - [x] Preserve staged, all-or-nothing publication
 - [x] Sign the canonical PowerShell installer
-- [ ] Push the canonical installer and documentation mirror
+- [x] Push the canonical installer and documentation mirror
+- [x] Tag the immutable skills installer as bare `3.13.100`
 
 ## Platforms
 | Contract | macOS/Linux | Windows PowerShell 5.1 |
 |---|---|---|
-| Retry transient 503 | ✅ | ⚠️ Native CI pending |
-| Fall back from GitHub Raw | ✅ | ⚠️ Native CI pending |
+| Retry transient 503 | ✅ | ✅ |
+| Fall back from GitHub Raw | ✅ | ✅ |
 | Atomic installation | ✅ | ✅ |
 
 The exact signed PowerShell installer passes retry and fallback contracts under
@@ -28,8 +29,8 @@ publication gate in GitHub Actions.
 - [x] Real local HTTP server returns 503, then succeeds
 - [x] Real local HTTP server keeps the primary down and the fallback succeeds
 - [x] Six skills, all references, and the version marker are installed
-- [ ] Windows CI executes the real script using `powershell.exe`
-- [ ] Live lab installation succeeds through `tina4.com`
+- [x] Windows CI executes the real script using `powershell.exe`
+- [x] Live lab installation succeeds through `tina4.com`
 
 ## Bugs
 - [x] SKILLS-PS51-UNSUPPORTED-RETRY-PARAMETERS
@@ -37,6 +38,11 @@ publication gate in GitHub Actions.
 - [x] SKILLS-RAW-SINGLE-SOURCE
 
 ## Commits
-- pending
+- Canonical installers and CI: `tina4@a0bc36d`
+- Release helper: `tina4@802236f`
+- tina4.com bootstrap launchers: `tina4-documentation@cb2662a`
 
-## Status: In Progress
+## Status: Complete
+
+Final public verification installed all six skills into Claude, Codex, and Cursor
+homes on the lab as root. Every destination recorded marker `3.13.100`.

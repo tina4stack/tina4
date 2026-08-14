@@ -2661,6 +2661,140 @@ async fn llm_call_with_fallback(
     }
 }
 
+/// Streaming variant of `llm_call_cached` for the tina4dev SSE UI.
+/// `emit(event, text)` is called with `"thinking"` then `"token"` as Bonsai
+/// produces them. Other providers fall through to the buffered path.
+async fn llm_call_cached_stream<E, Fut>(
+    settings: &ModelSettings,
+    system_prompt: &str,
+    messages: &[LlmMessage],
+    max_tokens: u32,
+    temperature: f32,
+    cache_key: &str,
+    mut emit: E,
+) -> Result<String, String>
+where
+    E: FnMut(&str, &str) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let is_long_context = settings.provider == "tina4-mcp" && settings.model == "long_context";
+    if !is_long_context {
+        return llm_call(settings, system_prompt, messages, max_tokens, temperature).await;
+    }
+    if cache_key.is_empty() {
+        let question = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+        let mut context = String::new();
+        if !system_prompt.is_empty() {
+            context.push_str(system_prompt);
+            context.push_str("\n\n");
+        }
+        for m in messages {
+            context.push_str(&format!("[{}]\n{}\n\n", m.role, m.content));
+        }
+        return match crate::mcp_context::long_context_call_stream(
+            &settings.url, &settings.api_key, &question, &context, "",
+            |frame| {
+                let (kind, text) = match &frame {
+                    crate::mcp_context::LcSseFrame::Thinking(t) => ("thinking", t.as_str()),
+                    crate::mcp_context::LcSseFrame::Content(t) => ("token", t.as_str()),
+                    _ => ("", ""),
+                };
+                emit(kind, text)
+            },
+        ).await {
+            Some((answer, _)) => Ok(answer),
+            None => Err("long_context unavailable (mcp.tina4.com) — set TINA4_MCP_TOKEN in the dev-admin grounding panel / .env, or set ANTHROPIC_API_KEY".into()),
+        };
+    }
+
+    let question = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    let (plan, checksum_in) = {
+        let guard = long_context_cache().lock().unwrap();
+        let cached = guard.get(cache_key);
+        let plan = plan_long_context_send(
+            cached.map(|c| (c.sent_len, c.prefix_hash)),
+            system_prompt,
+            messages,
+        );
+        let checksum_in = if matches!(plan, LongContextSend::Full) {
+            String::new()
+        } else {
+            cached.map(|c| c.checksum.clone()).unwrap_or_default()
+        };
+        (plan, checksum_in)
+    };
+    let context = match plan {
+        LongContextSend::Full => build_long_context(system_prompt, messages),
+        LongContextSend::Append(from) => build_long_context("", &messages[from..]),
+        LongContextSend::Requery => String::new(),
+    };
+    match crate::mcp_context::long_context_call_stream(
+        &settings.url, &settings.api_key, &question, &context, &checksum_in,
+        |frame| {
+            let (kind, text) = match &frame {
+                crate::mcp_context::LcSseFrame::Thinking(t) => ("thinking", t.as_str()),
+                crate::mcp_context::LcSseFrame::Content(t) => ("token", t.as_str()),
+                _ => ("", ""),
+            };
+            emit(kind, text)
+        },
+    ).await {
+        Some((answer, new_checksum)) => {
+            if !new_checksum.is_empty() {
+                let mut guard = long_context_cache().lock().unwrap();
+                guard.insert(
+                    cache_key.to_string(),
+                    LongContextChain {
+                        checksum: new_checksum,
+                        sent_len: messages.len(),
+                        prefix_hash: long_context_prefix_hash(system_prompt, messages),
+                    },
+                );
+            }
+            Ok(answer)
+        }
+        None => Err("long_context unavailable (mcp.tina4.com) — set TINA4_MCP_TOKEN in the dev-admin grounding panel / .env, or set ANTHROPIC_API_KEY".into()),
+    }
+}
+
+async fn llm_call_with_fallback_stream<E, Fut>(
+    primary: &ModelSettings,
+    fallback: Option<&ModelSettings>,
+    system_prompt: &str,
+    messages: &[LlmMessage],
+    max_tokens: u32,
+    temperature: f32,
+    cache_key: &str,
+    emit: E,
+) -> Result<String, String>
+where
+    E: FnMut(&str, &str) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    match llm_call_cached_stream(primary, system_prompt, messages, max_tokens, temperature, cache_key, emit).await {
+        Ok(answer) => Ok(answer),
+        Err(e) => match fallback {
+            Some(fb) => {
+                eprintln!("  [reasoning] {} failed: {e} — falling back to {}", primary.model, fb.model);
+                reasoning_one_call(fb, system_prompt, messages, max_tokens, temperature, cache_key)
+                    .await
+                    .map_err(|e2| format!("{e} (fallback {} also failed: {e2})", fb.model))
+            }
+            None => Err(e),
+        },
+    }
+}
+
 /// Make an LLM call (blocking, non-streaming).
 pub async fn llm_call(
     settings: &ModelSettings,
@@ -4104,12 +4238,49 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                 // one-shot; the coder emits code and wants the full prompt) stay
                 // on the uncached path.
                 let reasoning_key = format!("{}:reasoning", chat_req.thread_id.as_deref().unwrap_or("-"));
-                let supervisor_reply = match llm_call_with_fallback(&settings.thinking, reasoning_fallback_for(&settings.thinking, &settings), supervisor_prompt, &msgs, 2048, 0.3, &reasoning_key).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let escaped = e.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
-                        sse_event(&mut stream, "error", &format!("{{\"message\":\"{}\"}}", escaped)).await;
-                        return;
+                let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+                let work = llm_call_with_fallback_stream(
+                    &settings.thinking,
+                    reasoning_fallback_for(&settings.thinking, &settings),
+                    supervisor_prompt,
+                    &msgs,
+                    2048,
+                    0.3,
+                    &reasoning_key,
+                    move |kind, text| {
+                        if !kind.is_empty() && !text.is_empty() {
+                            let _ = delta_tx.send((kind.to_string(), text.to_string()));
+                        }
+                        std::future::ready(())
+                    },
+                );
+                tokio::pin!(work);
+                let mut deltas_open = true;
+                let supervisor_reply = loop {
+                    tokio::select! {
+                        ev = delta_rx.recv(), if deltas_open => {
+                            match ev {
+                                Some((kind, text)) => {
+                                    let payload = serde_json::json!({"content": text}).to_string();
+                                    sse_event(&mut stream, &kind, &payload).await;
+                                }
+                                None => deltas_open = false,
+                            }
+                        }
+                        result = &mut work => {
+                            while let Ok((kind, text)) = delta_rx.try_recv() {
+                                let payload = serde_json::json!({"content": text}).to_string();
+                                sse_event(&mut stream, &kind, &payload).await;
+                            }
+                            match result {
+                                Ok(r) => break r,
+                                Err(e) => {
+                                    let escaped = e.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+                                    sse_event(&mut stream, "error", &format!("{{\"message\":\"{}\"}}", escaped)).await;
+                                    return;
+                                }
+                            }
+                        }
                     }
                 };
 

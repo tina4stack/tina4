@@ -39,7 +39,8 @@ const MCP_TIMEOUT_SECS: u64 = 12;
 /// the grounding timeout. A slow reasoning turn is still preferable to falling
 /// back to the smaller thinking model, but we cap it so a wedged call can't hang
 /// the agent forever (the caller degrades to the thinking model on timeout).
-const LONG_CONTEXT_TIMEOUT_SECS: u64 = 300;
+/// Matches MCP LONGCTX_TIMEOUT (900) / ingress 1200s.
+const LONG_CONTEXT_TIMEOUT_SECS: u64 = 900;
 
 /// The env var that holds the Bearer token.
 pub const TOKEN_VAR: &str = "TINA4_MCP_TOKEN";
@@ -421,6 +422,160 @@ pub async fn long_context_call(
     }
 }
 
+/// One frame from ctx-qa / `/long_context/stream` SSE.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LcSseFrame {
+    Thinking(String),
+    Content(String),
+    Checksum(String),
+    Answer(String),
+}
+
+/// Parse one SSE `event` + `data` payload from the long_context stream.
+pub(crate) fn parse_lc_sse_frame(event: &str, data: &str) -> Option<LcSseFrame> {
+    let data = data.trim();
+    if data.is_empty() || data == "[DONE]" {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(data).ok()?;
+    match event {
+        "meta" => v.get("checksum")
+            .and_then(|c| c.as_str())
+            .filter(|s| s.starts_with("cx_"))
+            .map(|s| LcSseFrame::Checksum(s.to_string())),
+        "result" => v.get("answer")
+            .and_then(|a| a.as_str())
+            .map(|s| LcSseFrame::Answer(s.to_string())),
+        "error" => None,
+        _ => {
+            let delta = v.pointer("/choices/0/delta")?;
+            if let Some(t) = delta
+                .get("thinking")
+                .or_else(|| delta.get("reasoning_content"))
+                .or_else(|| delta.get("reasoning"))
+                .and_then(|x| x.as_str())
+            {
+                if !t.is_empty() {
+                    return Some(LcSseFrame::Thinking(t.to_string()));
+                }
+            }
+            delta
+                .get("content")
+                .and_then(|c| c.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| LcSseFrame::Content(s.to_string()))
+        }
+    }
+}
+
+/// Same as `long_context_call`, but consumes `/long_context/stream` and invokes
+/// `on_delta` as thinking/content tokens arrive. Final `(answer, checksum)` is
+/// still returned for supervisor parsing + the checksum cache.
+pub async fn long_context_call_stream<F, Fut>(
+    base_url: &str,
+    token: &str,
+    question: &str,
+    context: &str,
+    checksum: &str,
+    mut on_delta: F,
+) -> Option<(String, String)>
+where
+    F: FnMut(LcSseFrame) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    if token.trim().is_empty() || question.trim().is_empty() {
+        return None;
+    }
+    let url = format!("{}/long_context/stream", base_url.trim_end_matches('/'));
+    let mut body = serde_json::Map::new();
+    body.insert("question".into(), json!(question));
+    if !context.is_empty() {
+        body.insert("context".into(), json!(context));
+    }
+    if !checksum.is_empty() {
+        body.insert("checksum".into(), json!(checksum));
+    }
+    body.insert("store".into(), json!(true));
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(LONG_CONTEXT_TIMEOUT_SECS))
+        .build()
+        .ok()?;
+    let req = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "text/event-stream");
+    let mut resp = match with_dev_email(req, token).json(&body).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[mcp] long_context stream send failed: {e}");
+            return None;
+        }
+    };
+    if !resp.status().is_success() {
+        eprintln!("[mcp] long_context stream returned {}", resp.status());
+        return None;
+    }
+
+    let mut buf = String::new();
+    let mut assembled = String::new();
+    let mut checksum_out = String::new();
+    let mut answer_from_result: Option<String> = None;
+    let mut event_name = String::new();
+
+    loop {
+        let chunk = match resp.chunk().await {
+            Ok(Some(c)) => c,
+            Ok(None) => break,
+            Err(e) => {
+                eprintln!("[mcp] long_context stream read failed: {e}");
+                break;
+            }
+        };
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(idx) = buf.find("\n\n") {
+            let frame = buf[..idx].to_string();
+            buf = buf[idx + 2..].to_string();
+            event_name.clear();
+            let mut data = String::new();
+            for line in frame.lines() {
+                let line = line.trim_end();
+                if let Some(rest) = line.strip_prefix("event:") {
+                    event_name = rest.trim().to_string();
+                } else if let Some(rest) = line.strip_prefix("data:") {
+                    if !data.is_empty() {
+                        data.push('\n');
+                    }
+                    data.push_str(rest.trim_start());
+                }
+            }
+            let ev = if event_name.is_empty() { "message" } else { event_name.as_str() };
+            if let Some(parsed) = parse_lc_sse_frame(ev, &data) {
+                match &parsed {
+                    LcSseFrame::Content(t) => {
+                        assembled.push_str(t);
+                        on_delta(parsed).await;
+                    }
+                    LcSseFrame::Thinking(_) => on_delta(parsed).await,
+                    LcSseFrame::Checksum(cs) => checksum_out = cs.clone(),
+                    LcSseFrame::Answer(a) => answer_from_result = Some(a.clone()),
+                }
+            }
+        }
+    }
+
+    let raw = answer_from_result.unwrap_or(assembled);
+    let (answer, cs) = split_checksum(&raw);
+    if checksum_out.is_empty() {
+        checksum_out = cs.unwrap_or_default();
+    }
+    if answer.trim().is_empty() {
+        None
+    } else {
+        Some((answer, checksum_out))
+    }
+}
+
 /// Query the mcp.tina4.com **`tina4_chat`** tool — the fine-tuned Tina4 coder.
 /// Unlike `long_context` (a general Q&A model that summarizes code onto one
 /// line), this is code-oriented and Tina4-aware, so it reliably emits the
@@ -638,6 +793,36 @@ mod tests {
         let (answer, cs) = split_checksum(raw);
         assert!(answer.ends_with("Now the real answer."));
         assert_eq!(cs.as_deref(), Some("cx_final0001"));
+    }
+
+    #[test]
+    fn parse_lc_sse_splits_thinking_and_content() {
+        let think = parse_lc_sse_frame(
+            "message",
+            r#"{"choices":[{"delta":{"reasoning_content":"Let me think"}}]}"#,
+        );
+        assert_eq!(think, Some(LcSseFrame::Thinking("Let me think".into())));
+        let content = parse_lc_sse_frame(
+            "message",
+            r#"{"choices":[{"delta":{"content":"Hello"}}]}"#,
+        );
+        assert_eq!(content, Some(LcSseFrame::Content("Hello".into())));
+        let tagged = parse_lc_sse_frame(
+            "message",
+            r#"{"choices":[{"delta":{"thinking":"hmm","content":""}}]}"#,
+        );
+        assert_eq!(tagged, Some(LcSseFrame::Thinking("hmm".into())));
+        let cs = parse_lc_sse_frame("meta", r#"{"checksum":"cx_abc123","sources":[]}"#);
+        assert_eq!(cs, Some(LcSseFrame::Checksum("cx_abc123".into())));
+        let ans = parse_lc_sse_frame("result", r#"{"answer":"PONG","thinking":"…"}"#);
+        assert_eq!(ans, Some(LcSseFrame::Answer("PONG".into())));
+        assert_eq!(parse_lc_sse_frame("message", "[DONE]"), None);
+        // A dict-shaped tool result must NOT be treated as content — that's the
+        // "I'm processing your request..." supervisor-parse trap.
+        assert_eq!(
+            parse_lc_sse_frame("message", r#"{"answer":"hi","thinking":"x"}"#),
+            None
+        );
     }
 
     /// Real wire round-trip against mcp.tina4.com. `#[ignore]`d so the normal

@@ -284,8 +284,8 @@ struct LlmOptions {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LlmMessage {
-    role: String,
-    content: String,
+    pub role: String,
+    pub content: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -295,7 +295,21 @@ struct LlmResponse {
 
 #[derive(Debug, Deserialize)]
 struct LlmChoice {
-    message: LlmMessage,
+    message: LlmChoiceMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct LlmChoiceMessage {
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
+    #[serde(default)]
+    pub reasoning: Option<String>,
+    #[serde(default)]
+    pub thinking: Option<String>,
 }
 
 // ── Anthropic-specific request/response ──
@@ -343,6 +357,8 @@ struct AnthropicRequest {
     temperature: f32,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     system: Vec<AnthropicSystemBlock>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2661,9 +2677,310 @@ async fn llm_call_with_fallback(
     }
 }
 
+/// Parsed delta from an OpenAI-compatible SSE chunk (`data: ...`).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct OpenAiSseDelta {
+    pub thinking: Option<String>,
+    pub content: Option<String>,
+}
+
+/// Parse a single line from an OpenAI-compatible SSE stream (`data: ...`).
+pub fn parse_openai_sse_line(line: &str) -> Option<OpenAiSseDelta> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with(':') {
+        return None;
+    }
+    let data = line.strip_prefix("data:")?.trim();
+    if data.is_empty() || data == "[DONE]" {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(data).ok()?;
+    let delta = v.pointer("/choices/0/delta")?;
+
+    let thinking = delta
+        .get("thinking")
+        .or_else(|| delta.get("reasoning_content"))
+        .or_else(|| delta.get("reasoning"))
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let content = delta
+        .get("content")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    if thinking.is_some() || content.is_some() {
+        Some(OpenAiSseDelta { thinking, content })
+    } else {
+        None
+    }
+}
+
+/// Parsed delta from an Anthropic SSE chunk (`data: ...`).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AnthropicSseDelta {
+    pub thinking: Option<String>,
+    pub content: Option<String>,
+}
+
+/// Parse a single line from an Anthropic SSE stream (`data: ...`).
+pub fn parse_anthropic_sse_line(line: &str) -> Option<AnthropicSseDelta> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with(':') {
+        return None;
+    }
+    let data = line.strip_prefix("data:")?.trim();
+    if data.is_empty() || data == "[DONE]" {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(data).ok()?;
+    let ev_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    if ev_type == "content_block_delta" {
+        let delta = v.get("delta")?;
+        let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if delta_type == "thinking_delta" {
+            let thinking = delta.get("thinking")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            if thinking.is_some() {
+                return Some(AnthropicSseDelta { thinking, content: None });
+            }
+        } else if delta_type == "text_delta" {
+            let content = delta.get("text")
+                .and_then(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
+            if content.is_some() {
+                return Some(AnthropicSseDelta { thinking: None, content });
+            }
+        }
+    }
+    None
+}
+
+/// Streaming call to an OpenAI-compatible endpoint with thinking / content deltas.
+async fn openai_call_stream<E, Fut>(
+    settings: &ModelSettings,
+    system_prompt: &str,
+    messages: &[LlmMessage],
+    max_tokens: u32,
+    temperature: f32,
+    mut emit: E,
+) -> Result<String, String>
+where
+    E: FnMut(&str, &str) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(900))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+
+    let model_name = if settings.model.is_empty() {
+        let base = settings.url.trim_end_matches('/');
+        match fetch_first_model(base).await {
+            Some(m) => m,
+            None => return Err("No models available on the server. Check the URL.".into()),
+        }
+    } else {
+        settings.model.clone()
+    };
+
+    let base_url = settings.url.trim_end_matches('/');
+    let api_url = if base_url.contains("/v1/") || base_url.contains("/api/") {
+        if base_url.ends_with("/chat/completions") {
+            base_url.to_string()
+        } else {
+            format!("{}/chat/completions", base_url)
+        }
+    } else {
+        format!("{}/v1/chat/completions", base_url)
+    };
+
+    let mut all_messages = Vec::new();
+    if !system_prompt.is_empty() {
+        all_messages.push(LlmMessage {
+            role: "system".into(),
+            content: system_prompt.into(),
+        });
+    }
+    all_messages.extend_from_slice(messages);
+
+    let options = if settings.provider == "custom" || settings.provider == "tina4" {
+        Some(LlmOptions { num_ctx: 32768 })
+    } else {
+        None
+    };
+
+    let body = LlmRequest {
+        model: model_name,
+        messages: all_messages,
+        max_tokens,
+        temperature,
+        stream: Some(true),
+        options,
+    };
+
+    let mut req = client.post(&api_url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream")
+        .json(&body);
+
+    if !settings.api_key.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", settings.api_key));
+        if crate::mcp_context::is_free_token(&settings.api_key) {
+            if let Some(email) = crate::mcp_context::dev_email() {
+                req = req.header(crate::mcp_context::DEV_EMAIL_HEADER, email);
+            }
+        }
+    }
+
+    let mut resp = req.send().await.map_err(|e| format!("Stream request failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let err_text = resp.text().await.unwrap_or_default();
+        return Err(format!("LLM API error {}: {}", status, &err_text[..err_text.len().min(500)]));
+    }
+
+    let mut buf = String::new();
+    let mut assembled = String::new();
+
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(idx) = buf.find('\n') {
+            let line = buf[..idx].to_string();
+            buf = buf[idx + 1..].to_string();
+            if let Some(delta) = parse_openai_sse_line(&line) {
+                if let Some(t) = delta.thinking {
+                    emit("thinking", &t).await;
+                }
+                if let Some(c) = delta.content {
+                    assembled.push_str(&c);
+                    emit("token", &c).await;
+                }
+            }
+        }
+    }
+
+    if assembled.is_empty() {
+        llm_call(settings, system_prompt, messages, max_tokens, temperature).await
+    } else {
+        Ok(assembled)
+    }
+}
+
+/// Streaming call to an Anthropic endpoint with thinking / text deltas.
+async fn anthropic_call_stream<E, Fut>(
+    settings: &ModelSettings,
+    system_prompt: &str,
+    messages: &[LlmMessage],
+    max_tokens: u32,
+    temperature: f32,
+    mut emit: E,
+) -> Result<String, String>
+where
+    E: FnMut(&str, &str) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(900))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
+
+    let model_name = if settings.model.is_empty() {
+        "claude-sonnet-4-5".to_string()
+    } else {
+        settings.model.clone()
+    };
+
+    let base_url = settings.url.trim_end_matches('/');
+    let api_url = format!("{}/v1/messages", base_url);
+
+    let (extracted_system, filtered_messages): (Vec<String>, Vec<LlmMessage>) =
+        messages.iter().fold((Vec::new(), Vec::new()), |(mut sys, mut msgs), m| {
+            if m.role == "system" {
+                sys.push(m.content.clone());
+            } else {
+                msgs.push(m.clone());
+            }
+            (sys, msgs)
+        });
+
+    let mut system: Vec<AnthropicSystemBlock> = Vec::new();
+    if !system_prompt.is_empty() {
+        system.push(AnthropicSystemBlock {
+            ty: "text",
+            text: system_prompt.to_string(),
+            cache_control: Some(CacheControl { ty: "ephemeral" }),
+        });
+    }
+    for s in extracted_system {
+        system.push(AnthropicSystemBlock {
+            ty: "text",
+            text: s,
+            cache_control: None,
+        });
+    }
+
+    let body = AnthropicRequest {
+        model: model_name,
+        messages: filtered_messages,
+        max_tokens,
+        temperature,
+        system,
+        stream: Some(true),
+    };
+
+    let mut req = client.post(&api_url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream")
+        .header("anthropic-version", "2023-06-01")
+        .json(&body);
+
+    if !settings.api_key.is_empty() {
+        req = req.header("x-api-key", &settings.api_key);
+    }
+
+    let mut resp = req.send().await.map_err(|e| format!("Anthropic stream request failed: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        let err_text = resp.text().await.unwrap_or_default();
+        return Err(format!("Anthropic API error {}: {}", status, &err_text[..err_text.len().min(500)]));
+    }
+
+    let mut buf = String::new();
+    let mut assembled = String::new();
+
+    while let Ok(Some(chunk)) = resp.chunk().await {
+        buf.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(idx) = buf.find('\n') {
+            let line = buf[..idx].to_string();
+            buf = buf[idx + 1..].to_string();
+            if let Some(delta) = parse_anthropic_sse_line(&line) {
+                if let Some(t) = delta.thinking {
+                    emit("thinking", &t).await;
+                }
+                if let Some(c) = delta.content {
+                    assembled.push_str(&c);
+                    emit("token", &c).await;
+                }
+            }
+        }
+    }
+
+    if assembled.is_empty() {
+        llm_call(settings, system_prompt, messages, max_tokens, temperature).await
+    } else {
+        Ok(assembled)
+    }
+}
+
 /// Streaming variant of `llm_call_cached` for the tina4dev SSE UI.
-/// `emit(event, text)` is called with `"thinking"` then `"token"` as Bonsai
-/// produces them. Other providers fall through to the buffered path.
+/// `emit(event, text)` is called with `"thinking"` then `"token"` as Bonsai / reasoning models
+/// produce them.
 async fn llm_call_cached_stream<E, Fut>(
     settings: &ModelSettings,
     system_prompt: &str,
@@ -2678,26 +2995,66 @@ where
     Fut: std::future::Future<Output = ()>,
 {
     let is_long_context = settings.provider == "tina4-mcp" && settings.model == "long_context";
-    if !is_long_context {
-        return llm_call(settings, system_prompt, messages, max_tokens, temperature).await;
-    }
-    if cache_key.is_empty() {
+    if is_long_context {
+        if cache_key.is_empty() {
+            let question = messages
+                .iter()
+                .rev()
+                .find(|m| m.role == "user")
+                .map(|m| m.content.clone())
+                .unwrap_or_default();
+            let mut context = String::new();
+            if !system_prompt.is_empty() {
+                context.push_str(system_prompt);
+                context.push_str("\n\n");
+            }
+            for m in messages {
+                context.push_str(&format!("[{}]\n{}\n\n", m.role, m.content));
+            }
+            return match crate::mcp_context::long_context_call_stream(
+                &settings.url, &settings.api_key, &question, &context, "",
+                |frame| {
+                    let (kind, text) = match &frame {
+                        crate::mcp_context::LcSseFrame::Thinking(t) => ("thinking", t.as_str()),
+                        crate::mcp_context::LcSseFrame::Content(t) => ("token", t.as_str()),
+                        _ => ("", ""),
+                    };
+                    emit(kind, text)
+                },
+            ).await {
+                Some((answer, _)) => Ok(answer),
+                None => Err("long_context unavailable (mcp.tina4.com) — set TINA4_MCP_TOKEN in the dev-admin grounding panel / .env, or set ANTHROPIC_API_KEY".into()),
+            };
+        }
+
         let question = messages
             .iter()
             .rev()
             .find(|m| m.role == "user")
             .map(|m| m.content.clone())
             .unwrap_or_default();
-        let mut context = String::new();
-        if !system_prompt.is_empty() {
-            context.push_str(system_prompt);
-            context.push_str("\n\n");
-        }
-        for m in messages {
-            context.push_str(&format!("[{}]\n{}\n\n", m.role, m.content));
-        }
-        return match crate::mcp_context::long_context_call_stream(
-            &settings.url, &settings.api_key, &question, &context, "",
+        let (plan, checksum_in) = {
+            let guard = long_context_cache().lock().unwrap();
+            let cached = guard.get(cache_key);
+            let plan = plan_long_context_send(
+                cached.map(|c| (c.sent_len, c.prefix_hash)),
+                system_prompt,
+                messages,
+            );
+            let checksum_in = if matches!(plan, LongContextSend::Full) {
+                String::new()
+            } else {
+                cached.map(|c| c.checksum.clone()).unwrap_or_default()
+            };
+            (plan, checksum_in)
+        };
+        let context = match plan {
+            LongContextSend::Full => build_long_context(system_prompt, messages),
+            LongContextSend::Append(from) => build_long_context("", &messages[from..]),
+            LongContextSend::Requery => String::new(),
+        };
+        match crate::mcp_context::long_context_call_stream(
+            &settings.url, &settings.api_key, &question, &context, &checksum_in,
             |frame| {
                 let (kind, text) = match &frame {
                     crate::mcp_context::LcSseFrame::Thinking(t) => ("thinking", t.as_str()),
@@ -2707,63 +3064,28 @@ where
                 emit(kind, text)
             },
         ).await {
-            Some((answer, _)) => Ok(answer),
-            None => Err("long_context unavailable (mcp.tina4.com) — set TINA4_MCP_TOKEN in the dev-admin grounding panel / .env, or set ANTHROPIC_API_KEY".into()),
-        };
-    }
-
-    let question = messages
-        .iter()
-        .rev()
-        .find(|m| m.role == "user")
-        .map(|m| m.content.clone())
-        .unwrap_or_default();
-    let (plan, checksum_in) = {
-        let guard = long_context_cache().lock().unwrap();
-        let cached = guard.get(cache_key);
-        let plan = plan_long_context_send(
-            cached.map(|c| (c.sent_len, c.prefix_hash)),
-            system_prompt,
-            messages,
-        );
-        let checksum_in = if matches!(plan, LongContextSend::Full) {
-            String::new()
-        } else {
-            cached.map(|c| c.checksum.clone()).unwrap_or_default()
-        };
-        (plan, checksum_in)
-    };
-    let context = match plan {
-        LongContextSend::Full => build_long_context(system_prompt, messages),
-        LongContextSend::Append(from) => build_long_context("", &messages[from..]),
-        LongContextSend::Requery => String::new(),
-    };
-    match crate::mcp_context::long_context_call_stream(
-        &settings.url, &settings.api_key, &question, &context, &checksum_in,
-        |frame| {
-            let (kind, text) = match &frame {
-                crate::mcp_context::LcSseFrame::Thinking(t) => ("thinking", t.as_str()),
-                crate::mcp_context::LcSseFrame::Content(t) => ("token", t.as_str()),
-                _ => ("", ""),
-            };
-            emit(kind, text)
-        },
-    ).await {
-        Some((answer, new_checksum)) => {
-            if !new_checksum.is_empty() {
-                let mut guard = long_context_cache().lock().unwrap();
-                guard.insert(
-                    cache_key.to_string(),
-                    LongContextChain {
-                        checksum: new_checksum,
-                        sent_len: messages.len(),
-                        prefix_hash: long_context_prefix_hash(system_prompt, messages),
-                    },
-                );
+            Some((answer, new_checksum)) => {
+                if !new_checksum.is_empty() {
+                    let mut guard = long_context_cache().lock().unwrap();
+                    guard.insert(
+                        cache_key.to_string(),
+                        LongContextChain {
+                            checksum: new_checksum,
+                            sent_len: messages.len(),
+                            prefix_hash: long_context_prefix_hash(system_prompt, messages),
+                        },
+                    );
+                }
+                Ok(answer)
             }
-            Ok(answer)
+            None => Err("long_context unavailable (mcp.tina4.com) — set TINA4_MCP_TOKEN in the dev-admin grounding panel / .env, or set ANTHROPIC_API_KEY".into()),
         }
-        None => Err("long_context unavailable (mcp.tina4.com) — set TINA4_MCP_TOKEN in the dev-admin grounding panel / .env, or set ANTHROPIC_API_KEY".into()),
+    } else if settings.provider == "openai" || settings.provider == "custom" || settings.provider == "tina4" {
+        openai_call_stream(settings, system_prompt, messages, max_tokens, temperature, emit).await
+    } else if settings.provider == "anthropic" {
+        anthropic_call_stream(settings, system_prompt, messages, max_tokens, temperature, emit).await
+    } else {
+        llm_call(settings, system_prompt, messages, max_tokens, temperature).await
     }
 }
 
@@ -2775,18 +3097,18 @@ async fn llm_call_with_fallback_stream<E, Fut>(
     max_tokens: u32,
     temperature: f32,
     cache_key: &str,
-    emit: E,
+    mut emit: E,
 ) -> Result<String, String>
 where
     E: FnMut(&str, &str) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
-    match llm_call_cached_stream(primary, system_prompt, messages, max_tokens, temperature, cache_key, emit).await {
+    match llm_call_cached_stream(primary, system_prompt, messages, max_tokens, temperature, cache_key, &mut emit).await {
         Ok(answer) => Ok(answer),
         Err(e) => match fallback {
             Some(fb) => {
                 eprintln!("  [reasoning] {} failed: {e} — falling back to {}", primary.model, fb.model);
-                reasoning_one_call(fb, system_prompt, messages, max_tokens, temperature, cache_key)
+                llm_call_cached_stream(fb, system_prompt, messages, max_tokens, temperature, cache_key, emit)
                     .await
                     .map_err(|e2| format!("{e} (fallback {} also failed: {e2})", fb.model))
             }
@@ -2954,6 +3276,7 @@ pub async fn llm_call(
             max_tokens,
             temperature,
             system,
+            stream: None,
         };
         req = req.json(&body);
     } else {
@@ -3036,9 +3359,21 @@ pub async fn llm_call(
     } else {
         let parsed: LlmResponse = serde_json::from_str(&text)
             .map_err(|e| format!("Parse failed: {} — body: {}", e, &text[..text.len().min(500)]))?;
-        parsed.choices.first()
-            .map(|c| c.message.content.clone())
-            .ok_or_else(|| "No response content".into())
+        let choice = parsed.choices.first().ok_or_else(|| "No choices returned by LLM".to_string())?;
+        if let Some(ref c) = choice.message.content {
+            if !c.is_empty() {
+                return Ok(c.clone());
+            }
+        }
+        if let Some(r) = choice.message.reasoning_content.as_deref()
+            .or(choice.message.thinking.as_deref())
+            .or(choice.message.reasoning.as_deref())
+        {
+            if !r.is_empty() {
+                return Ok(r.to_string());
+            }
+        }
+        choice.message.content.clone().ok_or_else(|| "No response content".into())
     }
 }
 
@@ -4334,7 +4669,46 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                         );
                         let planner_msgs = vec![LlmMessage { role: "user".into(), content: planner_msg }];
 
-                        match llm_call_with_fallback(&planner_model, reasoning_fallback_for(&planner_model, &settings), planner_prompt, &planner_msgs, 4096, 0.2, "").await {
+                        let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+                        let work = llm_call_with_fallback_stream(
+                            &planner_model,
+                            reasoning_fallback_for(&planner_model, &settings),
+                            planner_prompt,
+                            &planner_msgs,
+                            4096,
+                            0.2,
+                            "",
+                            move |kind, text| {
+                                if !kind.is_empty() && !text.is_empty() {
+                                    let _ = delta_tx.send((kind.to_string(), text.to_string()));
+                                }
+                                std::future::ready(())
+                            },
+                        );
+                        tokio::pin!(work);
+                        let mut deltas_open = true;
+                        let planner_res = loop {
+                            tokio::select! {
+                                ev = delta_rx.recv(), if deltas_open => {
+                                    match ev {
+                                        Some((kind, text)) => {
+                                            let payload = serde_json::json!({"content": text, "agent": "planner"}).to_string();
+                                            sse_event(&mut stream, &kind, &payload).await;
+                                        }
+                                        None => deltas_open = false,
+                                    }
+                                }
+                                result = &mut work => {
+                                    while let Ok((kind, text)) = delta_rx.try_recv() {
+                                        let payload = serde_json::json!({"content": text, "agent": "planner"}).to_string();
+                                        sse_event(&mut stream, &kind, &payload).await;
+                                    }
+                                    break result;
+                                }
+                            }
+                        };
+
+                        match planner_res {
                             Ok(plan_content) => {
                                 // Save plan to plan/ — canonical user-visible
                                 // location across all Tina4 frameworks. Was
@@ -4903,7 +5277,46 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                         let debug_model = strong_reasoning_model(resolve_model("debug", &agents, &settings), &settings);
                         let debug_msgs = vec![LlmMessage { role: "user".into(), content: format!("Analyze this error and suggest a fix:\n\n{}", err_msg) }];
 
-                        match llm_call_with_fallback(&debug_model, reasoning_fallback_for(&debug_model, &settings), debug_prompt, &debug_msgs, 4096, 0.2, "").await {
+                        let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+                        let work = llm_call_with_fallback_stream(
+                            &debug_model,
+                            reasoning_fallback_for(&debug_model, &settings),
+                            debug_prompt,
+                            &debug_msgs,
+                            4096,
+                            0.2,
+                            "",
+                            move |kind, text| {
+                                if !kind.is_empty() && !text.is_empty() {
+                                    let _ = delta_tx.send((kind.to_string(), text.to_string()));
+                                }
+                                std::future::ready(())
+                            },
+                        );
+                        tokio::pin!(work);
+                        let mut deltas_open = true;
+                        let debug_res = loop {
+                            tokio::select! {
+                                ev = delta_rx.recv(), if deltas_open => {
+                                    match ev {
+                                        Some((kind, text)) => {
+                                            let payload = serde_json::json!({"content": text, "agent": "debug"}).to_string();
+                                            sse_event(&mut stream, &kind, &payload).await;
+                                        }
+                                        None => deltas_open = false,
+                                    }
+                                }
+                                result = &mut work => {
+                                    while let Ok((kind, text)) = delta_rx.try_recv() {
+                                        let payload = serde_json::json!({"content": text, "agent": "debug"}).to_string();
+                                        sse_event(&mut stream, &kind, &payload).await;
+                                    }
+                                    break result;
+                                }
+                            }
+                        };
+
+                        match debug_res {
                             Ok(analysis) => {
                                 let escaped = analysis.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
                                 sse_event(&mut stream, "message", &format!("{{\"content\":\"{}\",\"agent\":\"debug\"}}", escaped)).await;
@@ -8071,6 +8484,7 @@ print('hi')
                 text: "You are a test agent.".into(),
                 cache_control: Some(CacheControl { ty: "ephemeral" }),
             }],
+            stream: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(json.contains(r#""type":"text""#), "system block missing type:text: {}", json);
@@ -8093,6 +8507,7 @@ print('hi')
             max_tokens: 16,
             temperature: 0.0,
             system: Vec::new(),
+            stream: None,
         };
         let json = serde_json::to_string(&body).unwrap();
         assert!(!json.contains("system"), "empty system field leaked into JSON: {}", json);
@@ -8921,6 +9336,72 @@ async def get_order(request, response):\n    pass\n";
             ("email".to_string(), "string".to_string()),
             ("name".to_string(), "string".to_string()),
         ]);
+    }
+
+    #[test]
+    fn parse_openai_sse_line_splits_thinking_and_content() {
+        // DeepSeek / Bonsai style reasoning_content
+        let delta1 = parse_openai_sse_line(r#"data: {"choices":[{"delta":{"reasoning_content":"thinking step 1"}}]}"#);
+        assert_eq!(delta1, Some(OpenAiSseDelta {
+            thinking: Some("thinking step 1".into()),
+            content: None,
+        }));
+
+        // Explicit thinking key
+        let delta2 = parse_openai_sse_line(r#"data: {"choices":[{"delta":{"thinking":"thinking step 2"}}]}"#);
+        assert_eq!(delta2, Some(OpenAiSseDelta {
+            thinking: Some("thinking step 2".into()),
+            content: None,
+        }));
+
+        // Content token
+        let delta3 = parse_openai_sse_line(r#"data: {"choices":[{"delta":{"content":"hello world"}}]}"#);
+        assert_eq!(delta3, Some(OpenAiSseDelta {
+            thinking: None,
+            content: Some("hello world".into()),
+        }));
+
+        // Both thinking and content (rare but supported)
+        let delta4 = parse_openai_sse_line(r#"data: {"choices":[{"delta":{"thinking":"thought","content":"answer"}}]}"#);
+        assert_eq!(delta4, Some(OpenAiSseDelta {
+            thinking: Some("thought".into()),
+            content: Some("answer".into()),
+        }));
+
+        // [DONE] marker
+        assert_eq!(parse_openai_sse_line("data: [DONE]"), None);
+
+        // SSE comment
+        assert_eq!(parse_openai_sse_line(": keep-alive"), None);
+
+        // Empty line
+        assert_eq!(parse_openai_sse_line(""), None);
+    }
+
+    #[test]
+    fn parse_anthropic_sse_line_splits_thinking_and_text() {
+        let delta1 = parse_anthropic_sse_line(r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"let me think"}}"#);
+        assert_eq!(delta1, Some(AnthropicSseDelta {
+            thinking: Some("let me think".into()),
+            content: None,
+        }));
+
+        let delta2 = parse_anthropic_sse_line(r#"data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"here is the answer"}}"#);
+        assert_eq!(delta2, Some(AnthropicSseDelta {
+            thinking: None,
+            content: Some("here is the answer".into()),
+        }));
+
+        assert_eq!(parse_anthropic_sse_line(r#"data: {"type":"message_stop"}"#), None);
+    }
+
+    #[test]
+    fn llm_response_parses_null_content_with_reasoning() {
+        let json = r#"{"choices":[{"message":{"role":"assistant","content":null,"reasoning_content":"I thought about it"}}]}"#;
+        let parsed: LlmResponse = serde_json::from_str(json).unwrap();
+        let choice = &parsed.choices[0];
+        assert_eq!(choice.message.content, None);
+        assert_eq!(choice.message.reasoning_content.as_deref(), Some("I thought about it"));
     }
 
     #[test]

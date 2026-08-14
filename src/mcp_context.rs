@@ -166,12 +166,10 @@ static DEV_EMAIL: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new
 /// then the git-config value), so the resolution is unit-testable without a
 /// real git subprocess or global env. Blank/whitespace → treated as absent.
 fn dev_email_from(env_override: Option<&str>, git_value: Option<&str>) -> Option<String> {
-    for candidate in [env_override, git_value] {
-        if let Some(v) = candidate {
-            let v = v.trim();
-            if !v.is_empty() {
-                return Some(v.to_string());
-            }
+    for v in [env_override, git_value].into_iter().flatten() {
+        let v = v.trim();
+        if !v.is_empty() {
+            return Some(v.to_string());
         }
     }
     None

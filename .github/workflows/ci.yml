@@ -15,3 +15,32 @@ jobs:
       - run: cargo check
       - run: cargo test
       - run: cargo clippy -- -D warnings
+
+  skills-installer:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            kind: shell
+          - os: windows-latest
+            kind: powershell
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exercise installer retries and fallback
+        run: python tests/skills_installer_http.py ${{ matrix.kind }}
+      - name: Verify canonical PowerShell installer signature
+        if: matrix.kind == 'powershell'
+        shell: powershell
+        run: |
+          $local = Get-AuthenticodeSignature .\install-skills.ps1
+          if ($local.Status -ne 'Valid') {
+            throw "Checked-out installer signature is $($local.Status): $($local.StatusMessage)"
+          }
+
+          $raw = Join-Path $env:RUNNER_TEMP 'install-skills-raw.ps1'
+          Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/tina4stack/tina4/$env:GITHUB_SHA/install-skills.ps1" -OutFile $raw
+          $hosted = Get-AuthenticodeSignature $raw
+          if ($hosted.Status -ne 'Valid') {
+            throw "GitHub Raw installer signature is $($hosted.Status): $($hosted.StatusMessage)"
+          }

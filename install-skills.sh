@@ -20,16 +20,21 @@ set -eu
 
 # Pin skills to a released tag, not a moving branch, so an install is reproducible.
 # Bump this when the skills change in a new release. Override with TINA4_SKILLS_REF.
-ref="${TINA4_SKILLS_REF:-3.13.99}"
+ref="${TINA4_SKILLS_REF:-3.13.100}"
 target="${TINA4_SKILLS_TARGET:-}"
+skill_home="${TINA4_SKILLS_HOME:-$HOME}"
+primary_root="${TINA4_SKILLS_PRIMARY_ROOT:-https://raw.githubusercontent.com/tina4stack}"
+mirror_root="${TINA4_SKILLS_MIRROR_ROOT:-https://cdn.jsdelivr.net/gh/tina4stack}"
+retry_count="${TINA4_SKILLS_RETRY_COUNT:-3}"
+retry_delay="${TINA4_SKILLS_RETRY_DELAY:-2}"
 
 # Space separated, not an array: dash has no arrays. Neither path can contain a
 # space, because both are literals under $HOME.
 case "$target" in
-  claude) destinations="$HOME/.claude/skills" ;;
-  codex)  destinations="$HOME/.agents/skills" ;;
-  cursor) destinations="$HOME/.cursor/skills" ;;
-  all)    destinations="$HOME/.claude/skills $HOME/.agents/skills $HOME/.cursor/skills" ;;
+  claude) destinations="$skill_home/.claude/skills" ;;
+  codex)  destinations="$skill_home/.agents/skills" ;;
+  cursor) destinations="$skill_home/.cursor/skills" ;;
+  all)    destinations="$skill_home/.claude/skills $skill_home/.agents/skills $skill_home/.cursor/skills" ;;
   *)
     echo "error: set TINA4_SKILLS_TARGET to claude, codex, cursor, or all" >&2
     exit 2
@@ -39,17 +44,31 @@ esac
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
 
+# download_file <destination> <primary-url> <fallback-url>
+download_file() {
+  destination="$1"; shift
+  for url in "$@"; do
+    if curl -fsSL --retry "$retry_count" --retry-delay "$retry_delay" "$url" -o "$destination"; then
+      return 0
+    fi
+    rm -f "$destination"
+    echo "  ! download failed, trying next source: $url" >&2
+  done
+  echo "error: every download source failed for $destination" >&2
+  return 1
+}
+
 # install_skill <repo> <skill> <reference.md ...>
 install_skill() {
   repo="$1"; skill="$2"; shift 2
-  base="https://raw.githubusercontent.com/tina4stack/${repo}/${ref}/.claude/skills"
+  base="${primary_root}/${repo}/${ref}/.claude/skills"
+  mirror="${mirror_root}/${repo}@${ref}/.claude/skills"
   mkdir -p "$stage/$skill/references"
-  # raw.githubusercontent.com returns an intermittent 503 under load; one failed
-  # fetch out of ~30 aborted the whole install. curl treats 503 as a transient
-  # error and retries it, so a single blip no longer kills `tina4 ai`.
-  curl -fsSL --retry 3 --retry-delay 2 "$base/$skill/SKILL.md" -o "$stage/$skill/SKILL.md"
+  download_file "$stage/$skill/SKILL.md" \
+    "$base/$skill/SKILL.md" "$mirror/$skill/SKILL.md"
   for reference in "$@"; do
-    curl -fsSL --retry 3 --retry-delay 2 "$base/$skill/references/$reference" -o "$stage/$skill/references/$reference"
+    download_file "$stage/$skill/references/$reference" \
+      "$base/$skill/references/$reference" "$mirror/$skill/references/$reference"
   done
   echo "  + $skill  ($repo)"
 }

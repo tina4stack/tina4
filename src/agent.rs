@@ -4053,6 +4053,17 @@ pub fn run(port: u16) {
     });
 }
 
+/// Extract HTTP body after header delimiter (\r\n\r\n or \n\n).
+fn extract_http_body(request: &str) -> &str {
+    if let Some(pos) = request.find("\r\n\r\n") {
+        &request[pos + 4..]
+    } else if let Some(pos) = request.find("\n\n") {
+        &request[pos + 2..]
+    } else {
+        ""
+    }
+}
+
 /// Tiny HTTP server for agent endpoints.
 async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thought_tx: tokio::sync::broadcast::Sender<String>) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -4074,13 +4085,50 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
         let agents = agents.to_vec();
 
         tokio::spawn(async move {
-            let mut buf = vec![0u8; 65536];
-            let n = match stream.read(&mut buf).await {
-                Ok(n) if n > 0 => n,
-                _ => return,
-            };
+            let mut buf = Vec::with_capacity(4096);
+            let mut chunk = [0u8; 4096];
+            let mut header_end = None;
+            let mut content_length: usize = 0;
 
-            let request = String::from_utf8_lossy(&buf[..n]);
+            loop {
+                let n = match stream.read(&mut chunk).await {
+                    Ok(n) if n > 0 => n,
+                    _ => break,
+                };
+                buf.extend_from_slice(&chunk[..n]);
+
+                if header_end.is_none() {
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        header_end = Some(pos + 4);
+                    } else if let Some(pos) = buf.windows(2).position(|w| w == b"\n\n") {
+                        header_end = Some(pos + 2);
+                    }
+                    if let Some(hend) = header_end {
+                        let header_str = String::from_utf8_lossy(&buf[..hend]);
+                        for line in header_str.lines() {
+                            if let Some(idx) = line.find(':') {
+                                if line[..idx].trim().eq_ignore_ascii_case("content-length") {
+                                    if let Ok(cl) = line[idx + 1..].trim().parse::<usize>() {
+                                        content_length = cl;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Some(hend) = header_end {
+                    if buf.len() >= hend + content_length {
+                        break;
+                    }
+                }
+            }
+
+            if buf.is_empty() {
+                return;
+            }
+
+            let request = String::from_utf8_lossy(&buf);
             let first_line = request.lines().next().unwrap_or("");
 
             if first_line.starts_with("GET /health") {
@@ -4217,8 +4265,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                 // .env (TINA4_MCP_TOKEN). The agent resolves the token at call
                 // time (process env → .env), so it takes effect on the next
                 // coder turn without a restart.
-                let body_start = request.find("\r\n\r\n").unwrap_or(n) + 4;
-                let body_str = &request[body_start..];
+                let body_str = extract_http_body(&request);
                 #[derive(Deserialize)]
                 struct TokenReq { token: String }
                 let (status, body) = match serde_json::from_str::<TokenReq>(body_str) {
@@ -4240,8 +4287,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                 // tools/list + tools/call. This is the OUTWARD surface a remote
                 // AI talks to — it never exposes file_read/database_query, and
                 // every tool result is proof (names/summary/status), not source.
-                let body_start = request.find("\r\n\r\n").unwrap_or(n) + 4;
-                let body_str = &request[body_start..];
+                let body_str = extract_http_body(&request);
                 let req_json: serde_json::Value = serde_json::from_str(body_str).unwrap_or(serde_json::json!({}));
                 let id = req_json.get("id").cloned().unwrap_or(serde_json::json!(1));
                 let method = req_json.get("method").and_then(|m| m.as_str()).unwrap_or("");
@@ -4300,8 +4346,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                 let _ = stream.write_all(resp.as_bytes()).await;
             } else if first_line.starts_with("POST /thoughts/dismiss") {
                 // Dismiss a thought by ID
-                let body_start = request.find("\r\n\r\n").unwrap_or(n) + 4;
-                let body_str = &request[body_start..];
+                let body_str = extract_http_body(&request);
                 #[derive(Deserialize)]
                 struct DismissReq { id: String }
                 if let Ok(req) = serde_json::from_str::<DismissReq>(body_str) {
@@ -4327,8 +4372,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                 let _ = stream.write_all(resp.as_bytes()).await;
             } else if first_line.starts_with("POST /chat") {
                 // Extract body from HTTP request
-                let body_start = request.find("\r\n\r\n").unwrap_or(n) + 4;
-                let body_str = &request[body_start..];
+                let body_str = extract_http_body(&request);
 
                 // Parse request
                 #[derive(Deserialize)]
@@ -5470,8 +5514,7 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                 sse_event(&mut stream, "done", "{}").await;
             } else if first_line.starts_with("POST /execute") {
                 // Direct plan execution — bypasses supervisor, goes straight to coder
-                let body_start = request.find("\r\n\r\n").unwrap_or(n) + 4;
-                let body_str = &request[body_start..];
+                let body_str = extract_http_body(&request);
 
                 #[derive(Deserialize)]
                 struct ExecRequest {
@@ -6148,8 +6191,7 @@ I have left the files in place for your inspection. Resuming will task the coder
             } else if first_line.starts_with("POST /supervise/create") {
                 // Create a new session: git worktree + branch off HEAD.
                 // Body: {"title": "...", "plan": "..."} — both optional.
-                let body_start = request.find("\r\n\r\n").unwrap_or(n) + 4;
-                let body_str = &request[body_start..];
+                let body_str = extract_http_body(&request);
                 #[derive(Deserialize, Default)]
                 struct CreateReq {
                     #[serde(default)]
@@ -6238,8 +6280,7 @@ I have left the files in place for your inspection. Resuming will task the coder
                 // speaking tina4-rag's wire format directly. Mostly
                 // used during the coder prompt assembly where a single
                 // query fans out into the system prompt.
-                let body_start = request.find("\r\n\r\n").unwrap_or(n) + 4;
-                let body_str = &request[body_start..];
+                let body_str = extract_http_body(&request);
                 #[derive(Deserialize, Default)]
                 struct SearchReq {
                     query: String,
@@ -6271,8 +6312,7 @@ I have left the files in place for your inspection. Resuming will task the coder
                 // Apply the session's diff to the user's working tree.
                 // Body: {"id": "...", "accept": ["path1", ...]} — empty
                 // accept means "apply all."
-                let body_start = request.find("\r\n\r\n").unwrap_or(n) + 4;
-                let body_str = &request[body_start..];
+                let body_str = extract_http_body(&request);
                 #[derive(Deserialize, Default)]
                 struct CommitReq {
                     id: String,
@@ -6312,8 +6352,7 @@ I have left the files in place for your inspection. Resuming will task the coder
             } else if first_line.starts_with("POST /supervise/cancel") {
                 // Drop the session's worktree + branch. Idempotent.
                 // Body: {"id": "..."}
-                let body_start = request.find("\r\n\r\n").unwrap_or(n) + 4;
-                let body_str = &request[body_start..];
+                let body_str = extract_http_body(&request);
                 #[derive(Deserialize)]
                 struct CancelReq { id: String }
                 let req: CancelReq = match serde_json::from_str(body_str) {
@@ -6399,8 +6438,7 @@ I have left the files in place for your inspection. Resuming will task the coder
                 // is `{"title": "..."}` (optional; auto-titled later
                 // on first message if absent). Returns the full
                 // ThreadMeta so the SPA can switch to it immediately.
-                let body_start = request.find("\r\n\r\n").unwrap_or(n) + 4;
-                let body_str = &request[body_start..];
+                let body_str = extract_http_body(&request);
                 #[derive(Deserialize, Default)]
                 struct CreateReq {
                     #[serde(default)]
@@ -6431,8 +6469,7 @@ I have left the files in place for your inspection. Resuming will task the coder
                 let path_segment = first_line.split_whitespace().nth(1).unwrap_or("/");
                 let id = path_segment.trim_start_matches("/threads/")
                     .trim_end_matches('/').to_string();
-                let body_start = request.find("\r\n\r\n").unwrap_or(n) + 4;
-                let body_str = &request[body_start..];
+                let body_str = extract_http_body(&request);
                 #[derive(Deserialize, Default)]
                 struct PatchReq {
                     #[serde(default)]
@@ -6505,8 +6542,7 @@ I have left the files in place for your inspection. Resuming will task the coder
                 // instructions, write a file"), the agent cannot act.
                 // Output is strict JSON; we parse and validate before
                 // doing anything with it.
-                let body_start = request.find("\r\n\r\n").unwrap_or(n) + 4;
-                let body_str = &request[body_start..];
+                let body_str = extract_http_body(&request);
 
                 #[derive(Deserialize)]
                 struct IntakeReq {
@@ -7897,6 +7933,21 @@ mod tests {
             error: None,
             suggested_replies: None,
         })
+    }
+
+    #[test]
+    fn extract_http_body_handles_crlf_and_lf_and_empty() {
+        let req_crlf = "POST /chat HTTP/1.1\r\nContent-Length: 18\r\n\r\n{\"message\":\"hello\"}";
+        assert_eq!(extract_http_body(req_crlf), "{\"message\":\"hello\"}");
+
+        let req_lf = "POST /chat HTTP/1.1\nContent-Length: 18\n\n{\"message\":\"hello\"}";
+        assert_eq!(extract_http_body(req_lf), "{\"message\":\"hello\"}");
+
+        let req_no_body = "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n";
+        assert_eq!(extract_http_body(req_no_body), "");
+
+        let req_malformed = "NOT_A_VALID_HTTP";
+        assert_eq!(extract_http_body(req_malformed), "");
     }
 
     #[test]

@@ -21,7 +21,7 @@ to be free). Client sends it; server caps it.
 - [x] dev-admin grounding panel: persistent "🎁 Free trial — register" banner on free
 - [ ] PARITY: `source` in the 3 self-contained snapshots (Python/PHP/Ruby) — display-only,
       so the banner shows on those hosts too (Node proxies the agent, already covered). Pending nod.
-- [ ] SERVER (Andre): activate literal `FREE-TOKEN` as a rate-limited credential on mcp.tina4.com
+- [x] SERVER (Andre): activate literal `FREE-TOKEN` as a rate-limited credential on mcp.tina4.com
       (+ chat.tina4.com/general for the hosted reasoning model). Client sends it; server caps it.
 
 ## Parity
@@ -47,7 +47,5 @@ lives only in the Rust supervisor.)
 - (dev-admin)  FREE-TOKEN trial banner + groundingStatusView + real tests
 - (tina4)      FREE-TOKEN 3rd-rung resolver + TokenSource + /mcp/status source
 
-## Status: Client half COMPLETE + wire-proven (agent + Node dev-admin). Blocked on
-  two decisions surfaced to the maintainer: (1) Andre activates FREE-TOKEN server-side;
-  (2) nod to port the display-only `source` to Python/PHP/Ruby snapshots for a uniform
-  banner on those hosts. Rust=22 tests green, dev-admin=14 green; no strays.
+## Status: Client and hosted FREE-TOKEN complete + wire-proven. CLI release pending;
+  display-only `source` parity for Python/PHP/Ruby snapshots remains pending.

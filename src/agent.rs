@@ -997,8 +997,10 @@ pub fn load_agents(project_dir: &Path) -> Vec<Agent> {
 ///     (image_gen stays on Tina4 Cloud — Anthropic doesn't generate images).
 ///   - otherwise → Tina4 Cloud endpoints (zero-config local model server).
 ///
-/// A settings.json on disk always wins, so saving via the dev admin UI
-/// overrides the env-var default cleanly.
+/// A settings.json on disk wins for model selection, but blank `tina4-mcp`
+/// credentials are hydrated from the project token resolver. Credentials are
+/// runtime state, not model configuration: an old settings file must not mask
+/// the FREE-TOKEN fallback or a token pasted into the grounding panel.
 /// Point the reasoning (`thinking`) slot at a LOCAL OpenAI-compatible model when
 /// `TINA4_LOCAL_MODEL_URL` is set, stashing the prior slot as `reasoning_fallback`
 /// (unless `TINA4_LOCAL_MODEL_FALLBACK=0`). Applied at every `load_chat_settings`
@@ -1079,6 +1081,34 @@ fn strong_reasoning_model(resolved: ModelSettings, settings: &ChatSettings) -> M
     }
 }
 
+/// Fill blank Tina4 MCP credentials across every agent slot. Explicit keys are
+/// preserved so request/settings overrides still work; non-MCP providers are
+/// never touched. Split from filesystem resolution to keep the policy a pure,
+/// exhaustively testable transform.
+fn hydrate_mcp_credentials(mut settings: ChatSettings, token: Option<&str>) -> ChatSettings {
+    let Some(token) = token.map(str::trim).filter(|token| !token.is_empty()) else {
+        return settings;
+    };
+    let hydrate = |model: &mut ModelSettings| {
+        if model.provider == "tina4-mcp" && model.api_key.trim().is_empty() {
+            model.api_key = token.to_string();
+        }
+    };
+    hydrate(&mut settings.thinking);
+    hydrate(&mut settings.vision);
+    hydrate(&mut settings.coder);
+    hydrate(&mut settings.image_gen);
+    if let Some(fallback) = settings.reasoning_fallback.as_mut() {
+        hydrate(fallback);
+    }
+    settings
+}
+
+fn hydrate_project_mcp_credentials(settings: ChatSettings, project_dir: &Path) -> ChatSettings {
+    let token = crate::mcp_context::token(project_dir);
+    hydrate_mcp_credentials(settings, token.as_deref())
+}
+
 pub fn load_chat_settings(project_dir: &Path) -> ChatSettings {
     // The coder runs on `long_context`. The fine-tuned `tina4_chat` has a small
     // window — measured live, a prompt over ~9KB comes back as an availability
@@ -1101,7 +1131,7 @@ pub fn load_chat_settings(project_dir: &Path) -> ChatSettings {
             if settings.coder.provider.is_empty() {
                 settings.coder = coder;
             }
-            return apply_local_reasoning_override(settings);
+            return apply_local_reasoning_override(hydrate_project_mcp_credentials(settings, project_dir));
         }
     }
 
@@ -3869,7 +3899,10 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                     }
                 };
 
-                let settings = chat_req.settings.unwrap_or_else(|| load_chat_settings(&project_dir));
+                let settings = match chat_req.settings {
+                    Some(settings) => hydrate_project_mcp_credentials(settings, &project_dir),
+                    None => load_chat_settings(&project_dir),
+                };
 
                 // SECURITY: refuse if this thread_id maps to a feedback
                 // ticket. Feedback threads are read-only — they exist
@@ -4884,7 +4917,10 @@ async fn serve_agent_http(port: u16, project_dir: &Path, agents: &[Agent], _thou
                     }
                 };
 
-                let settings = exec_req.settings.unwrap_or_else(|| load_chat_settings(&project_dir));
+                let settings = match exec_req.settings {
+                    Some(settings) => hydrate_project_mcp_credentials(settings, &project_dir),
+                    None => load_chat_settings(&project_dir),
+                };
 
                 // SSE headers
                 let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\nX-Accel-Buffering: no\r\n\r\n";
@@ -7795,6 +7831,33 @@ print('hi')
         assert_eq!(strong_reasoning_model(s.thinking.clone(), &s).model, "general");
     }
 
+    #[test]
+    fn blank_mcp_credentials_are_hydrated_for_every_agent_slot() {
+        let mcp = || ModelSettings {
+            provider: "tina4-mcp".into(), model: "long_context".into(),
+            url: "https://mcp.tina4.com".into(), api_key: String::new(),
+        };
+        let mut settings = ChatSettings {
+            thinking: mcp(),
+            vision: ModelSettings {
+                provider: "anthropic".into(), model: "claude".into(),
+                url: "https://api.anthropic.com".into(), api_key: String::new(),
+            },
+            coder: mcp(),
+            image_gen: mcp(),
+            reasoning_fallback: Some(mcp()),
+        };
+        settings.coder.api_key = "personal-explicit".into();
+
+        let hydrated = hydrate_mcp_credentials(settings, Some("FREE-TOKEN"));
+
+        assert_eq!(hydrated.thinking.api_key, "FREE-TOKEN");
+        assert_eq!(hydrated.coder.api_key, "personal-explicit");
+        assert_eq!(hydrated.image_gen.api_key, "FREE-TOKEN");
+        assert_eq!(hydrated.reasoning_fallback.unwrap().api_key, "FREE-TOKEN");
+        assert!(hydrated.vision.api_key.is_empty(), "non-MCP provider must stay untouched");
+    }
+
     fn empty_chat_settings() -> ChatSettings {
         ChatSettings {
             thinking: ModelSettings::default_test(),
@@ -8709,4 +8772,3 @@ mod smoke_recent_failures {
         eprintln!("=== {} bytes ===", out.len());
     }
 }
-

@@ -46,6 +46,12 @@
 
 ## Commits
 
-- Pending.
+- `9f804da` — native engine, CLI flags, fixtures, and formula calibration.
+- `9b430c2` — Python adapter and dashboard asset.
+- `ea287588` — PHP adapter and dashboard asset.
+- `e549d47` — Ruby adapter and dashboard asset.
+- `e6c7897` — Node.js adapter, dashboard asset, and handoff assertions.
+- `90b89e3` — dev-admin source and distributable consumer.
+- `9835396` — ADR-0055, Feature 121, contract fixture, matrix, and evaluation.
 
-## Status: Local implementation and verification complete; Linux lab verification pending
+## Status: Complete; feature branches pushed and Linux root lab gate green

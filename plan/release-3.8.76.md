@@ -41,7 +41,7 @@
 
 ## Commits
 
-- Pending.
+- `0e01f13` — bump 3.8.76, add release notes, and fix Unix broken-pipe behavior with a mutation-proven regression.
 
 ## Status: In Progress
 

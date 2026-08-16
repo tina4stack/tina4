@@ -53,5 +53,6 @@
 - `e6c7897` — Node.js adapter, dashboard asset, and handoff assertions.
 - `90b89e3` — dev-admin source and distributable consumer.
 - `9835396` — ADR-0055, Feature 121, contract fixture, matrix, and evaluation.
+- `41d8870` / `a2b3c1f` — record the green Linux root lab gate.
 
-## Status: Complete; feature branches pushed and Linux root lab gate green
+## Status: Complete; active release lines updated and Linux root lab gate green

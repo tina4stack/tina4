@@ -3089,6 +3089,10 @@ where
     }
 }
 
+// The streaming call mirrors the non-streaming provider/fallback contract and
+// additionally carries one event callback. Keeping those inputs explicit makes
+// provider selection and retry ownership visible at each call site.
+#[allow(clippy::too_many_arguments)]
 async fn llm_call_with_fallback_stream<E, Fut>(
     primary: &ModelSettings,
     fallback: Option<&ModelSettings>,

@@ -20,7 +20,7 @@ set -eu
 
 # Pin skills to a released tag, not a moving branch, so an install is reproducible.
 # Bump this when the skills change in a new release. Override with TINA4_SKILLS_REF.
-ref="${TINA4_SKILLS_REF:-3.13.100}"
+ref="${TINA4_SKILLS_REF:-3.13.102}"
 target="${TINA4_SKILLS_TARGET:-}"
 skill_home="${TINA4_SKILLS_HOME:-$HOME}"
 primary_root="${TINA4_SKILLS_PRIMARY_ROOT:-https://raw.githubusercontent.com/tina4stack}"

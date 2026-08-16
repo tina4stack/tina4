@@ -9,41 +9,44 @@
 - [x] Confirm the live SimplySign token, certificate alias, timestamp service, and signing tools.
 - [x] Bump client metadata and add release notes.
 - [x] Run the full local release gate at the exact release commit.
-- [ ] Merge the release branch into `main`, tag `v3.8.76`, and push.
-- [ ] Wait for the complete CI draft and supply-chain gate.
-- [ ] EV-sign the Windows binary, regenerate checksums, and publish.
-- [ ] Verify every public asset, Authenticode signature, checksum, crate, and container image.
+- [x] Merge the release branch into `main`, tag `v3.8.76`, and push.
+- [x] Wait for the complete CI draft and supply-chain gate.
+- [x] EV-sign the Windows binary, regenerate checksums, and publish.
+- [x] Verify every public asset, Authenticode signature, checksum, crate, and container image.
 
 ## Parity
 
 | Artifact | amd64 | arm64 | Signed/attested |
 | --- | --- | --- | --- |
-| Linux glibc | ❌ BUILD | ❌ BUILD | ❌ BUILD |
-| Linux musl | ❌ BUILD | ❌ BUILD | ❌ BUILD |
-| macOS | ❌ BUILD | ❌ BUILD | ❌ BUILD |
-| Windows | ❌ BUILD | n/a | ❌ BUILD |
-| GHCR image | ❌ BUILD | ❌ BUILD | ❌ BUILD |
+| Linux glibc | ✅ | ✅ | ✅ GitHub provenance |
+| Linux musl | ✅ | ✅ | ✅ GitHub provenance |
+| macOS | ✅ | ✅ | ✅ GitHub provenance |
+| Windows | ✅ | n/a | ✅ Code Infinity EV + timestamp |
+| GHCR image | ✅ | ✅ | ✅ OCI attestations |
 
 ## Tests
 
 - [x] `cargo test` passes at release HEAD: 318 passed, 6 environment-dependent ignored.
 - [x] `cargo clippy --bin tina4 -- -D warnings` passes.
 - [x] `cargo build --release --locked` and `tina4 --version` pass.
-- [ ] CI cargo-deny, seven binary builds, smoke tests, crate publish, and image publish pass.
-- [ ] Published `SHA256SUMS` verifies all seven binaries.
-- [ ] Windows binary verifies as signed by Code Infinity with a valid timestamp.
+- [x] CI cargo-deny, seven binary builds, smoke tests, crate publish, and image publish pass.
+- [x] Published `SHA256SUMS` verifies all seven binaries.
+- [x] Windows binary verifies as signed by Code Infinity with a valid timestamp.
 
 ## Bugs
 
 - [x] No open organization issue blocks the native metrics/signing release.
 - [x] CLI-BROKEN-PIPE: restored normal Unix `SIGPIPE` termination; the regression failed before the fix and passes after it.
-- [ ] Any release-pipeline failure found during the cut is fixed before publication.
+- [x] No release-pipeline failure remained at publication.
 
 ## Commits
 
 - `0e01f13` — bump 3.8.76, add release notes, and fix Unix broken-pipe behavior with a mutation-proven regression.
+- `1439559` — record the green local release gate at the tagged release commit.
 
-## Status: In Progress
+## Status: Complete
+
+Published: <https://github.com/tina4stack/tina4/releases/tag/v3.8.76>
 
 ## Release notes
 

@@ -919,7 +919,7 @@ fn scaffold_tina4js(path: &str) {
     "test": "vitest run"
   }},
   "dependencies": {{
-    "tina4js": "^1.5.1"
+    "tina4js": "^1.5.2"
   }},
   "devDependencies": {{
     "vite": "^8.2.0",
@@ -1477,5 +1477,21 @@ mod tests {
             );
             let _ = fs::remove_dir_all(&dir);
         }
+    }
+
+    #[test]
+    fn tina4js_scaffold_uses_the_current_framework_release() {
+        let dir = std::env::temp_dir().join(format!("tina4_init_js_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        scaffold_project("tina4js", dir.to_str().unwrap());
+        let package_json = fs::read_to_string(dir.join("package.json")).expect("package.json");
+
+        assert!(
+            package_json.contains("\"tina4js\": \"^1.5.2\""),
+            "new projects must use the current tina4-js release:\n{package_json}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }

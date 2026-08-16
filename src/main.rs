@@ -246,6 +246,14 @@ enum Commands {
 }
 
 fn main() {
+    #[cfg(unix)]
+    // Rust ignores SIGPIPE, which turns a normal early-closing pipeline
+    // (`tina4 metrics --json | head`) into a noisy Broken-pipe panic. Restore
+    // the Unix CLI convention before any output is written.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     console::enable_ansi();
 
     // Top-level help is the ONLY place the manifest is consumed: render clap's

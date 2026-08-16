@@ -16,10 +16,9 @@
 // cannot parse Delphi 10.3+ inline loop variables, which puts 51.5% of the real
 // tina4delphi corpus inside a parse-error region; see `pascal_is_not_claimed`.
 //
-// tina4: ADR-0002 — formulas + thresholds mirror the Python master reference
-// tina4-python/tina4_python/dev_admin/metrics.py EXACTLY, so the existing
-// `--fail-on` gate thresholds carry over unchanged. The parity is locked by
-// `parity_matches_python_master` below, which invokes the real metrics.py.
+// tina4: ADR-0002 — formulas + thresholds originated in the retired Python
+// engine. The scope-neutral formula calibration below preserves that baseline;
+// callable allocation is locked independently across all five languages.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -30,7 +29,7 @@ use tree_sitter::{Node, Parser};
 
 // ── Languages ──────────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Lang {
     Python,
     Php,
@@ -88,7 +87,7 @@ pub(crate) struct FileMetrics {
     // computed for the MI; serialising it costs nothing and closes the gap
     // left when coupling_afferent/instability were added without it.
     pub halstead_volume: f64, // rounded to 2 dp
-    pub has_tests: bool,
+    pub has_referencing_test: bool,
 
     // ── Coupling ─────────────────────────────────────────────────────────────
     // `dep_count` is EVERY import the file writes, stdlib and third-party
@@ -724,8 +723,9 @@ fn is_rust_wildcard_arm(node: Node, src: &[u8]) -> bool {
 /// True for a node that opens a new measurement scope: a nested function (it is
 /// reported as a function in its own right) or a class body (its methods are).
 /// Mirrors metrics.py, which skips FunctionDef / AsyncFunctionDef / ClassDef.
-fn is_scope_boundary(kind: &str, lang: Lang) -> bool {
-    if is_function_node(kind, lang) {
+fn is_scope_boundary(node: Node, lang: Lang) -> bool {
+    let kind = node.kind();
+    if node.is_named() && is_function_node(kind, lang) {
         return true;
     }
     match lang {
@@ -746,16 +746,15 @@ fn is_scope_boundary(kind: &str, lang: Lang) -> bool {
 /// IIFE wrapper or a registrar defining twenty inner handlers absorbed the whole
 /// file's complexity and topped the offenders list, hiding the real hot spots.
 ///
-/// A Python lambda is NOT a scope boundary - lambdas are never listed as
-/// functions, so their decisions would vanish. TypeScript arrow functions ARE
-/// listed, so they are boundaries.
+/// Every callable is a scope boundary. A branch belongs to the callable that
+/// executes it, regardless of which supported language spells that callable.
 fn count_own_decisions(node: Node, lang: Lang, src: &[u8]) -> u32 {
     let mut total = is_decision(node, lang, src);
     let mut c = node.walk();
     if c.goto_first_child() {
         loop {
             let child = c.node();
-            if !is_scope_boundary(child.kind(), lang) {
+            if !is_scope_boundary(child, lang) {
                 total += count_own_decisions(child, lang, src);
             }
             if !c.goto_next_sibling() {
@@ -770,12 +769,15 @@ fn count_own_decisions(node: Node, lang: Lang, src: &[u8]) -> u32 {
 
 fn is_function_node(kind: &str, lang: Lang) -> bool {
     match lang {
-        Lang::Python => kind == "function_definition",
-        Lang::Php => matches!(kind, "function_definition" | "method_declaration"),
-        Lang::Ruby => matches!(kind, "method" | "singleton_method"),
-        // tina4-js is arrow-function heavy; count them so their complexity is
-        // attributed (Python excludes only trivial one-line lambdas — arrows are
-        // full function bodies, so they earn a slot).
+        Lang::Python => matches!(kind, "function_definition" | "lambda"),
+        Lang::Php => matches!(
+            kind,
+            "function_definition" | "method_declaration" | "anonymous_function" | "arrow_function"
+        ),
+        // Ruby's lambda node wraps a block/do_block node. Counting that body is
+        // enough and avoids reporting the same lambda twice. Ordinary iterator
+        // blocks use the same nodes and are callables too.
+        Lang::Ruby => matches!(kind, "method" | "singleton_method" | "block" | "do_block"),
         Lang::Ts => matches!(
             kind,
             "function_declaration"
@@ -784,19 +786,11 @@ fn is_function_node(kind: &str, lang: Lang) -> bool {
                 | "function_expression"
                 | "arrow_function"
         ),
-        // `closure_expression` is deliberately NOT here. A Rust closure is the
-        // analogue of a Python lambda, not of a TypeScript arrow: the language is
-        // saturated with one-line iterator adapters (`.map(|x| x + 1)`), and
-        // listing each as a function would bury the real hot spots under hundreds
-        // of CC-1 entries and drag every avg_complexity down. Like a lambda, a
-        // closure's decisions stay charged to the function that writes it, which
-        // is why `is_scope_boundary` does not stop at one either.
-        //
         // `function_signature_item` (a bodyless trait method) IS counted, on the
         // precedent PHP already sets: tree-sitter-php reports an interface's
         // bodyless `public function sig();` as a `method_declaration`, and the
         // engine has always counted it.
-        Lang::Rust => matches!(kind, "function_item" | "function_signature_item"),
+        Lang::Rust => matches!(kind, "function_item" | "function_signature_item" | "closure_expression"),
     }
 }
 
@@ -827,7 +821,7 @@ fn is_class_node(kind: &str, lang: Lang) -> bool {
 /// test that references it by name was reported UNTESTED and raised a false
 /// offender. PHP already counted `interface_declaration` here.
 fn is_type_decl_node(kind: &str, lang: Lang) -> bool {
-    if is_class_node(kind, lang) {
+    if is_class_node(kind, lang) && !(lang == Lang::Ruby && kind == "module") {
         return true;
     }
     match lang {
@@ -897,7 +891,7 @@ fn function_display_name(node: Node, lang: Lang, src: &[u8]) -> String {
 }
 
 fn collect_functions<'a>(node: Node<'a>, lang: Lang, src: &[u8], out: &mut Vec<(Node<'a>, u32)>) {
-    if is_function_node(node.kind(), lang) {
+    if node.is_named() && is_function_node(node.kind(), lang) {
         out.push((node, count_own_decisions(node, lang, src) + 1));
     }
     let mut c = node.walk();
@@ -1011,6 +1005,17 @@ fn extract_import_specs(root: Node, lang: Lang, src: &[u8]) -> Vec<String> {
                     }
                 } else if let Some(s) = first_string_literal(node, src) {
                     specs.push(s);
+                }
+            }
+            Lang::Ts if kind == "call_expression" => {
+                let function = node
+                    .child_by_field_name("function")
+                    .and_then(|function| function.utf8_text(src).ok())
+                    .unwrap_or("");
+                if matches!(function, "import" | "require") {
+                    if let Some(specifier) = first_string_literal(node, src) {
+                        specs.push(specifier);
+                    }
                 }
             }
             // `use Tina4\Frond;` and `use Tina4\{A, B};` nest the path one level
@@ -1416,7 +1421,7 @@ pub(crate) fn analyze_source(
         functions: num_functions,
         maintainability: mi,
         halstead_volume: round_dp(vol, 2),
-        has_tests,
+        has_referencing_test: has_tests,
         // dep_count is every import as written; the coupling triple is filled in
         // by the second pass in analyze_targets, which alone knows every file.
         dep_count: specs.len(),
@@ -1446,16 +1451,9 @@ pub(crate) fn analyze_source(
 // their variable names, in same-kind literal values, or in whitespace and
 // indentation collide, which is the point.
 //
-// It is NOT full Type-2 in the Roy/Cordy sense, and the doc used to say it was.
-// Their Type-2 is verbatim "identical fragments except for variations in
-// identifiers, literals, types, layout and COMMENTS", and comments are the one
-// it fails: comment nodes are hashed like any other, so adding a comment changes
-// the shape. Measured MISS in all five languages - Python `#` and docstring,
-// Rust `//` and `///`, PHP `/** */`, TS jsdoc, Ruby `#`. Locked by
-// `comments_are_hashed_so_this_is_not_full_type_2` so the claim cannot drift
-// back. Fixing it is a real option (skip `is_extra()` nodes) but it changes
-// which clones the engine reports, which is a `--fail-on` contract change and
-// belongs in its own discussed change - not smuggled in as a doc correction.
+// It implements Type-2 comment tolerance by removing comment/extra nodes from
+// both the hash and node count. Python docstrings remain significant because
+// they are executable string expressions, not parser comments.
 //
 // Type-3 (gapped) and Type-4 (semantic) clones are NOT detected at all; that
 // needs sub-tree differencing, and a report that silently claimed to cover them
@@ -1566,6 +1564,12 @@ fn collect_fragments(
     file: u32,
     out: &mut Vec<CloneFragment>,
 ) -> (u64, u32, bool) {
+    if node.is_error() || node.is_missing() {
+        return (shape_hash_of(node.kind(), &[]), 1, false);
+    }
+    if node.is_extra() || node.kind().contains("comment") {
+        return (0, 0, true);
+    }
     let mut child_hashes: Vec<u64> = Vec::new();
     let mut count: u32 = 1;
     let mut parsed_cleanly = !node.is_error() && !node.is_missing();
@@ -1573,8 +1577,10 @@ fn collect_fragments(
     if c.goto_first_child() {
         loop {
             let (h, n, clean) = collect_fragments(c.node(), file, out);
-            child_hashes.push(h);
-            count += n;
+            if n > 0 {
+                child_hashes.push(h);
+                count += n;
+            }
             parsed_cleanly &= clean;
             if !c.goto_next_sibling() {
                 break;
@@ -1697,6 +1703,89 @@ fn is_generated_asset(path: &Path) -> bool {
         || name.ends_with(".map")
 }
 
+/// Test/spec and declaration source is useful evidence, but it is not the
+/// production code whose maintainability the default report promises to score.
+fn is_default_non_production_source(path: &Path) -> bool {
+    let normalised = path.to_string_lossy().replace('\\', "/").to_ascii_lowercase();
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+    let in_test_dir = normalised
+        .split('/')
+        .any(|part| matches!(part, "test" | "tests" | "spec" | "__tests__"));
+    in_test_dir
+        || name.ends_with(".d.ts")
+        || name.ends_with(".d.mts")
+        || name.ends_with(".d.cts")
+        || name == "conftest.py"
+        || (name.starts_with("test_") && matches!(path.extension().and_then(|e| e.to_str()), Some("py") | Some("pyw")))
+        || name.ends_with("_test.py")
+        || name.ends_with("_test.rb")
+        || name.ends_with("_spec.rb")
+        || name.ends_with("test.php")
+        || [".test.ts", ".test.tsx", ".test.js", ".test.jsx", ".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix))
+}
+
+/// Small owned glob matcher for CLI exclusions. `*` stays inside one path
+/// segment, `**` crosses directories, and `?` matches one non-separator byte.
+/// Paths and patterns are normalised to `/`, so the rule is portable.
+fn path_matches_glob(path: &str, pattern: &str) -> bool {
+    fn matches_bytes(path: &[u8], pattern: &[u8], memo: &mut HashMap<(usize, usize), bool>, p: usize, g: usize) -> bool {
+        if let Some(result) = memo.get(&(p, g)) {
+            return *result;
+        }
+        let result = if g == pattern.len() {
+            p == path.len()
+        } else if pattern[g] == b'*' {
+            let double = g + 1 < pattern.len() && pattern[g + 1] == b'*';
+            if double {
+                let mut next = g + 2;
+                while next < pattern.len() && pattern[next] == b'*' {
+                    next += 1;
+                }
+                if next < pattern.len() && pattern[next] == b'/' {
+                    matches_bytes(path, pattern, memo, p, next + 1)
+                        || (p < path.len() && matches_bytes(path, pattern, memo, p + 1, g))
+                } else {
+                    matches_bytes(path, pattern, memo, p, next)
+                        || (p < path.len() && matches_bytes(path, pattern, memo, p + 1, g))
+                }
+            } else {
+                matches_bytes(path, pattern, memo, p, g + 1)
+                    || (p < path.len() && path[p] != b'/' && matches_bytes(path, pattern, memo, p + 1, g))
+            }
+        } else if pattern[g] == b'?' {
+            p < path.len() && path[p] != b'/' && matches_bytes(path, pattern, memo, p + 1, g + 1)
+        } else {
+            p < path.len() && path[p] == pattern[g] && matches_bytes(path, pattern, memo, p + 1, g + 1)
+        };
+        memo.insert((p, g), result);
+        result
+    }
+
+    let path = path.replace('\\', "/");
+    let pattern = pattern.replace('\\', "/");
+    let pattern = pattern.trim_start_matches("./");
+    if pattern.is_empty() {
+        return false;
+    }
+    let candidates: Vec<&str> = if pattern.contains('/') {
+        std::iter::once(path.as_str())
+            .chain(path.match_indices('/').map(|(index, _)| &path[index + 1..]))
+            .collect()
+    } else {
+        path.split('/').collect()
+    };
+    candidates.into_iter().any(|candidate| {
+        matches_bytes(candidate.as_bytes(), pattern.as_bytes(), &mut HashMap::new(), 0, 0)
+    })
+}
+
+fn excluded_by_user(path: &Path, exclusions: &[String]) -> bool {
+    let display = path.to_string_lossy();
+    exclusions.iter().any(|pattern| path_matches_glob(&display, pattern))
+}
+
 /// Minified-by-content catch-all for a bundle that is not named like one.
 /// A hand-written source file does not average hundreds of characters per line.
 fn looks_minified(source: &str) -> bool {
@@ -1729,7 +1818,12 @@ fn is_generated_docs_dir(dir: &Path) -> bool {
         .any(|marker| dir.join(marker).is_file())
 }
 
-fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) {
+fn walk_dir(
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    exclusions: &[String],
+    include_non_production: bool,
+) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     let mut items: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
     items.sort();
@@ -1742,8 +1836,17 @@ fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) {
             if is_generated_docs_dir(&path) {
                 continue;
             }
-            walk_dir(&path, files);
-        } else if Lang::from_path(&path).is_some() && !is_generated_asset(&path) {
+            if excluded_by_user(&path, exclusions)
+                || (!include_non_production && is_default_non_production_source(&path))
+            {
+                continue;
+            }
+            walk_dir(&path, files, exclusions, include_non_production);
+        } else if Lang::from_path(&path).is_some()
+            && !is_generated_asset(&path)
+            && !excluded_by_user(&path, exclusions)
+            && (include_non_production || !is_default_non_production_source(&path))
+        {
             files.push(path);
         }
     }
@@ -1751,7 +1854,11 @@ fn walk_dir(dir: &Path, files: &mut Vec<PathBuf>) {
 
 /// Resolve the scan root(s). With `--path` honour it (file or dir). Otherwise
 /// default to cwd auto-detecting `src/`, then `packages/*/src`, then `.`.
-fn resolve_targets(path_flag: Option<&str>) -> Result<(Vec<PathBuf>, String), String> {
+fn resolve_targets(
+    path_flag: Option<&str>,
+    exclusions: &[String],
+    include_non_production: bool,
+) -> Result<(Vec<PathBuf>, String), String> {
     let mut files = Vec::new();
     if let Some(p) = path_flag {
         let pb = PathBuf::from(p);
@@ -1759,10 +1866,17 @@ fn resolve_targets(path_flag: Option<&str>) -> Result<(Vec<PathBuf>, String), St
             if Lang::from_path(&pb).is_none() {
                 return Err(format!("unsupported file type: {p}"));
             }
-            return Ok((vec![pb], p.to_string()));
+            let files = if excluded_by_user(&pb, exclusions)
+                || (!include_non_production && is_default_non_production_source(&pb))
+            {
+                Vec::new()
+            } else {
+                vec![pb]
+            };
+            return Ok((files, p.to_string()));
         }
         if pb.is_dir() {
-            walk_dir(&pb, &mut files);
+            walk_dir(&pb, &mut files, exclusions, include_non_production);
             return Ok((files, p.to_string()));
         }
         return Err(format!("Directory not found: {p}"));
@@ -1770,7 +1884,7 @@ fn resolve_targets(path_flag: Option<&str>) -> Result<(Vec<PathBuf>, String), St
 
     let src = PathBuf::from("src");
     if src.is_dir() {
-        walk_dir(&src, &mut files);
+        walk_dir(&src, &mut files, exclusions, include_non_production);
         if !files.is_empty() {
             return Ok((files, "src".to_string()));
         }
@@ -1783,7 +1897,7 @@ fn resolve_targets(path_flag: Option<&str>) -> Result<(Vec<PathBuf>, String), St
             for pkg in pkg_dirs {
                 let pkg_src = pkg.join("src");
                 if pkg_src.is_dir() {
-                    walk_dir(&pkg_src, &mut files);
+                    walk_dir(&pkg_src, &mut files, exclusions, include_non_production);
                 }
             }
         }
@@ -1791,7 +1905,7 @@ fn resolve_targets(path_flag: Option<&str>) -> Result<(Vec<PathBuf>, String), St
             return Ok((files, "packages/*/src".to_string()));
         }
     }
-    walk_dir(Path::new("."), &mut files);
+    walk_dir(Path::new("."), &mut files, exclusions, include_non_production);
     Ok((files, ".".to_string()))
 }
 
@@ -1811,14 +1925,53 @@ fn rel_display(file: &Path, root: &str) -> String {
 // (untested is `info`). Signals: a dedicated test file named for the module, or a
 // test file that mentions the module stem on an import/require/use line.
 
+#[derive(Default)]
 struct TestIndex {
     file_names: HashSet<String>,
     contents: Vec<String>,
+    import_subjects: HashMap<Lang, HashSet<String>>,
+}
+
+fn normalise_reference_subject(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+impl TestIndex {
+    fn add(&mut self, file: &Path, content: String) {
+        if let Some(name) = file.file_name().and_then(|name| name.to_str()) {
+            self.file_names.insert(name.to_ascii_lowercase());
+        }
+        if let Some(lang) = Lang::from_path(file) {
+            let mut parser = Parser::new();
+            if parser.set_language(&lang.tree_sitter_language()).is_ok() {
+                if let Some(tree) = parser.parse(&content, None) {
+                    let subjects = self.import_subjects.entry(lang).or_default();
+                    for specifier in extract_import_specs(tree.root_node(), lang, content.as_bytes()) {
+                        let without_extension = [
+                            ".tsx", ".ts", ".jsx", ".js", ".mjs", ".cjs", ".py", ".php", ".rb", ".rs",
+                        ]
+                        .iter()
+                        .find_map(|extension| specifier.strip_suffix(extension))
+                        .unwrap_or(&specifier);
+                        let subject = without_extension
+                            .rsplit(['/', '\\', '.', ':'])
+                            .find(|part| !part.is_empty())
+                            .unwrap_or("");
+                        subjects.insert(normalise_reference_subject(subject));
+                    }
+                }
+            }
+        }
+        self.contents.push(content);
+    }
 }
 
 fn build_test_index(root: &str) -> TestIndex {
-    let mut file_names = HashSet::new();
-    let mut contents = Vec::new();
+    let mut index = TestIndex::default();
     let base = {
         let p = Path::new(root);
         if p.is_file() { p.parent().map(PathBuf::from).unwrap_or_else(|| PathBuf::from(".")) } else { p.to_path_buf() }
@@ -1838,27 +1991,25 @@ fn build_test_index(root: &str) -> TestIndex {
             let dir = r.join(td);
             if dir.is_dir() {
                 let mut tf = Vec::new();
-                walk_dir(&dir, &mut tf);
+                walk_dir(&dir, &mut tf, &[], true);
                 for f in tf {
-                    if let Some(name) = f.file_name().and_then(|n| n.to_str()) {
-                        file_names.insert(name.to_ascii_lowercase());
-                    }
                     if let Ok(c) = fs::read_to_string(&f) {
-                        contents.push(c);
+                        index.add(&f, c);
                     }
                 }
             }
         }
     }
-    TestIndex { file_names, contents }
+    index
 }
 
-/// Type names DECLARED in this module (class / trait / interface / module).
+/// Publicly referenceable names declared by this source file.
 ///
-/// Used by the class-symbol stage of test detection: a test that imports a class
-/// through the package root never mentions the module's file stem, so the stem
-/// signal alone reports a well-tested module as untested.
-fn declared_type_names(source: &str, lang: Lang) -> Vec<String> {
+/// A test may import through a package barrel and never mention the file stem.
+/// Named types and top-level callables are therefore valid reference signals.
+/// Nested helpers and class methods are excluded because their short names
+/// collide constantly and the containing type is the honest public subject.
+fn declared_reference_names(source: &str, lang: Lang) -> Vec<String> {
     let mut parser = Parser::new();
     if parser.set_language(&lang.tree_sitter_language()).is_err() {
         return Vec::new();
@@ -1868,7 +2019,24 @@ fn declared_type_names(source: &str, lang: Lang) -> Vec<String> {
     let mut names = Vec::new();
     let mut stack = vec![tree.root_node()];
     while let Some(node) = stack.pop() {
-        if is_type_decl_node(node.kind(), lang) {
+        let top_level_callable = node.is_named()
+            && is_function_node(node.kind(), lang)
+            && {
+                let mut parent = node.parent();
+                let mut nested = false;
+                while let Some(ancestor) = parent {
+                    if (ancestor.is_named() && is_function_node(ancestor.kind(), lang))
+                        || (is_class_node(ancestor.kind(), lang)
+                            && !(lang == Lang::Ruby && ancestor.kind() == "module"))
+                    {
+                        nested = true;
+                        break;
+                    }
+                    parent = ancestor.parent();
+                }
+                !nested
+            };
+        if is_type_decl_node(node.kind(), lang) || top_level_callable {
             if let Some(name) = node_name(node, bytes) {
                 names.push(name);
             }
@@ -1939,19 +2107,15 @@ fn module_has_tests(file: &Path, idx: &TestIndex, declared_types: &[String]) -> 
             return true;
         }
     }
-    // Stage 2: an import/require/use line that mentions the module stem.
-    for content in &idx.contents {
-        for line in content.lines() {
-            let t = line.trim_start();
-            let is_import = t.starts_with("import ")
-                || t.starts_with("from ")
-                || t.starts_with("require")
-                || t.starts_with("use ")
-                || t.contains("require(");
-            if is_import && line.contains(stem) {
-                return true;
-            }
-        }
+    // Stage 2: a parsed import/require/use/dynamic-import specifier that names
+    // this module. Tests are parsed once while building the index, not once per
+    // production file; this keeps the scan linear in the corpus size.
+    let source_lang = Lang::from_path(file);
+    if source_lang
+        .and_then(|lang| idx.import_subjects.get(&lang))
+        .is_some_and(|subjects| subjects.contains(&normalise_reference_subject(stem)))
+    {
+        return true;
     }
     // Stage 3: a TYPE DECLARED here is referenced by a test.
     //
@@ -2106,14 +2270,14 @@ fn build_offenders(files: &[FileMetrics], functions: &[FunctionInfo]) -> Vec<Off
                 ),
             });
         }
-        if !fm.has_tests {
+        if !fm.has_referencing_test {
             items.push(Offender {
                 file: fm.path.clone(),
                 line: 1,
-                kind: "untested".to_string(),
+                kind: "no_test_reference".to_string(),
                 severity: "info".to_string(),
                 score: fm.loc as f64 / 100.0,
-                detail: "no referencing test".to_string(),
+                detail: "no referencing test found (this is not coverage)".to_string(),
             });
         }
     }
@@ -2279,7 +2443,7 @@ pub(crate) fn analyze_targets(files: &[PathBuf], scan_root: &str) -> Report {
             continue;
         }
         let rel = rel_display(path, scan_root);
-        let declared = declared_type_names(&source, lang);
+        let declared = declared_reference_names(&source, lang);
         let has_tests = (lang == Lang::Rust && rust_has_inline_tests(&source))
             || module_has_tests(path, &test_index, &declared);
         match analyze_source(lang, &source, &rel, has_tests) {
@@ -2411,7 +2575,14 @@ fn compute_exit_code(fail_on: Option<&str>, has_warn: bool, has_error: bool) -> 
 }
 
 /// `tina4 metrics` — native, language-agnostic. Returns the process exit code.
-pub fn run(path: Option<String>, top: Option<usize>, json: bool, fail_on: Option<String>) -> i32 {
+pub fn run(
+    path: Option<String>,
+    top: Option<usize>,
+    json: bool,
+    fail_on: Option<String>,
+    exclusions: Vec<String>,
+    include_non_production: bool,
+) -> i32 {
     if let Some(f) = &fail_on {
         if f != "warn" && f != "error" {
             eprintln!("  invalid --fail-on '{f}' (use warn or error)");
@@ -2420,7 +2591,11 @@ pub fn run(path: Option<String>, top: Option<usize>, json: bool, fail_on: Option
     }
     let top = top.unwrap_or(20);
 
-    let (files, scan_root) = match resolve_targets(path.as_deref()) {
+    let (files, scan_root) = match resolve_targets(
+        path.as_deref(),
+        &exclusions,
+        include_non_production,
+    ) {
         Ok(v) => v,
         Err(e) => {
             if json {
@@ -2555,7 +2730,6 @@ fn print_human(summary: &Summary, shown: &[Offender]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
     fn manifest() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2563,6 +2737,12 @@ mod tests {
 
     fn read_fixture(name: &str) -> String {
         std::fs::read_to_string(manifest().join("tests/fixtures").join(name)).unwrap()
+    }
+
+    fn test_index(name: &str, content: &str) -> TestIndex {
+        let mut index = TestIndex::default();
+        index.add(Path::new(name), content.to_string());
+        index
     }
 
     /// Destructure a MEASURED analysis, or fail loudly.
@@ -2682,15 +2862,12 @@ fn f(a: i32, b: Option<i32>, c: Result<i32, String>) -> Result<i32, String> {
     }
 
     #[test]
-    fn rust_closure_decisions_stay_with_the_enclosing_function() {
-        // A closure is Rust's lambda, not TypeScript's arrow: `.map(|x| ..)` is
-        // everywhere, and listing each as a function would bury the real hot
-        // spots under CC-1 noise. So the closure is not reported separately and
-        // its branch is charged to the function that writes it.
+    fn rust_closure_is_its_own_callable_scope() {
         let src = "fn f(xs: Vec<i32>) -> Vec<i32> { xs.into_iter().map(|x| if x > 0 { 1 } else { 0 }).collect() }\n";
         let (fm, fns) = analyze_rs(src);
-        assert_eq!(fm.functions, 1, "the closure is not a function of its own");
-        assert_eq!(fns[0].complexity, 2, "1 + the closure's if");
+        assert_eq!(fm.functions, 2, "the closure is a callable of its own");
+        assert_eq!(fns[0].complexity, 1, "the outer function owns no decision");
+        assert_eq!(fns[1].complexity, 2, "the closure owns its if");
     }
 
     #[test]
@@ -2800,7 +2977,7 @@ pub fn sub(a: i32, b: i32) -> i32 {
         let mut scores = Vec::new();
         for (name, lang, src) in cases {
             let (fm, _f, _s) = measured(lang, src, "t", false);
-            assert_eq!(fm.functions, 2, "{name}: both functions must be found");
+            assert_eq!(fm.functions, 2, "{name}: both named functions must be found");
             scores.push((name, fm.maintainability));
         }
         let rust = scores.iter().find(|(n, _)| *n == "rust").unwrap().1;
@@ -3018,13 +3195,12 @@ pub fn sub(a: i32, b: i32) -> i32 {
     }
 
     #[test]
-    fn a_python_lambda_still_counts_toward_its_enclosing_function() {
-        // Lambdas are never listed as functions of their own, so excluding them
-        // would silently lose their decisions instead of relocating them.
+    fn a_python_lambda_is_its_own_callable_scope() {
         let src = "def f(xs):\n    return sorted(xs, key=lambda x: 1 if x else 0)\n";
         let (_fm, fns) = analyze_py(src);
-        assert_eq!(fns.len(), 1, "the lambda is not reported separately");
-        assert_eq!(fns[0].complexity, 2, "1 + the lambda's ternary");
+        assert_eq!(fns.len(), 2, "the lambda is reported separately");
+        assert_eq!(fns[0].complexity, 1, "the outer function owns no decision");
+        assert_eq!(fns[1].complexity, 2, "the lambda owns its ternary");
     }
 
     #[test]
@@ -3066,14 +3242,31 @@ pub fn sub(a: i32, b: i32) -> i32 {
     }
 
     #[test]
-    fn a_php_closure_counts_toward_its_enclosing_method() {
-        // Anonymous functions are not listed as functions of their own (same rule
-        // as a Python lambda), so their decisions stay where they are written
-        // rather than disappearing.
+    fn a_php_closure_is_its_own_callable_scope() {
         let php = "<?php\nclass A {\n  function outer($x) {\n    return array_map(function ($y) { if ($y) { return 1; } return 2; }, $x);\n  }\n}\n";
         let (_fm, fns) = analyze_php(php);
         let outer = fns.iter().find(|f| f.name.ends_with("outer")).unwrap();
-        assert_eq!(outer.complexity, 2, "1 + the closure's if");
+        assert_eq!(outer.complexity, 1, "the outer method owns no decision");
+        let closure = fns.iter().find(|f| f.name.contains("anonymous")).unwrap();
+        assert_eq!(closure.complexity, 2, "the closure owns its if");
+    }
+
+    #[test]
+    fn nested_callable_boundaries_match_in_all_languages() {
+        let cases = [
+            (Lang::Python, "def register(items):\n    first = lambda x: 1 if x else 0\n    second = lambda x: 2 if x else 0\n    return first(items[0]) + second(items[0])\n"),
+            (Lang::Php, "<?php\nfunction register($items) {\n  $first = fn($x) => $x ? 1 : 0;\n  $second = fn($x) => $x ? 2 : 0;\n  return $first($items[0]) + $second($items[0]);\n}\n"),
+            (Lang::Ruby, "def register(items)\n  first = ->(x) { x ? 1 : 0 }\n  second = ->(x) { x ? 2 : 0 }\n  first.call(items[0]) + second.call(items[0])\nend\n"),
+            (Lang::Ts, "function register(items: number[]) {\n  const first = (x: number) => x ? 1 : 0;\n  const second = (x: number) => x ? 2 : 0;\n  return first(items[0]) + second(items[0]);\n}\n"),
+            (Lang::Rust, "fn register(items: Vec<i32>) -> i32 {\n  let first = |x: i32| if x > 0 { 1 } else { 0 };\n  let second = |x: i32| if x > 0 { 2 } else { 0 };\n  first(items[0]) + second(items[0])\n}\n"),
+        ];
+        for (lang, source) in cases {
+            let (_metrics, functions, _imports) = measured(lang, source, "scope", true);
+            assert_eq!(functions.len(), 3, "{lang:?}: outer and nested callables must be separate: {functions:?}");
+            assert_eq!(functions[0].complexity, 1, "{lang:?}: outer callable must not absorb nested decisions");
+            assert_eq!(functions[1].complexity, 2, "{lang:?}: first nested callable owns its decision");
+            assert_eq!(functions[2].complexity, 2, "{lang:?}: second nested callable owns its decision");
+        }
     }
 
     #[test]
@@ -3107,7 +3300,8 @@ pub fn sub(a: i32, b: i32) -> i32 {
         FileMetrics {
             path: "x.py".into(), loc, complexity: (avg_cc * funcs as f64) as u32,
             avg_complexity: avg_cc,
-            functions: funcs, maintainability: mi, halstead_volume: 0.0, has_tests,
+            functions: funcs, maintainability: mi, halstead_volume: 0.0,
+            has_referencing_test: has_tests,
             dep_count: 0, coupling_efferent: 0, coupling_afferent: 0, instability: 0.0,
             parse_health: 1.0,
         }
@@ -3168,10 +3362,10 @@ pub fn sub(a: i32, b: i32) -> i32 {
     }
 
     #[test]
-    fn offender_too_many_functions_and_untested() {
+    fn offender_too_many_functions_and_no_test_reference() {
         let offs = build_offenders(&[file_with(90.0, 10, 21, false)], &[]);
         assert!(offs.iter().any(|o| o.kind == "too_many_functions" && o.severity == "warn"));
-        assert!(offs.iter().any(|o| o.kind == "untested" && o.severity == "info"));
+        assert!(offs.iter().any(|o| o.kind == "no_test_reference" && o.severity == "info"));
         // Exactly 20 functions and a matched test => neither offender.
         let clean = build_offenders(&[file_with(90.0, 10, 20, true)], &[]);
         assert!(clean.is_empty());
@@ -3815,7 +4009,12 @@ impl Config {
             assert_eq!(report.files.len(), 1, "{name}: healthy source must be measured");
             let fm = &report.files[0];
             assert_eq!(fm.parse_health, 1.0, "{name}: health");
-            assert_eq!(fm.functions, 2, "{name}: both functions must be found");
+            let expected_functions = if name == "ruby" { 3 } else { 2 };
+            assert_eq!(
+                fm.functions,
+                expected_functions,
+                "{name}: named functions and nested callable blocks must be found"
+            );
             assert!(fm.loc >= 10, "{name}: LOC must be real, got {}", fm.loc);
             assert!(fm.complexity >= 4, "{name}: CC must count the branches, got {}", fm.complexity);
             assert!(
@@ -3929,7 +4128,7 @@ impl Config {
         fs::write(real.join("demo.js"), "function demo(a){ if(a){return 1;} return 0; }\n").unwrap();
 
         let mut found = Vec::new();
-        walk_dir(&dir, &mut found);
+        walk_dir(&dir, &mut found, &[], true);
         let names: Vec<String> = found
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
@@ -4147,11 +4346,9 @@ impl Config {
     }
 
     #[test]
-    fn comments_are_hashed_so_this_is_not_full_type_2() {
-        // Locks the HONEST label on the detector. Roy/Cordy Type-II tolerates
-        // comments; this implementation does not, in any of the five languages.
-        // Measured, not assumed - and pinned here so the doc comment above
-        // `collect_fragments` cannot drift back to claiming Type-2.
+    fn comments_are_ignored_for_type_2_duplication() {
+        // Roy/Cordy Type-II tolerates comments. Documentation strings remain
+        // executable string expressions and are deliberately not comments.
         //
         // The positive half is the same test: identifiers and same-kind literals
         // ARE normalised away, which is what makes the detector worth having.
@@ -4186,17 +4383,12 @@ impl Config {
             shape(Lang::Python, "def a(x):\n    return x - 1\n"),
             "`+` and `-` must not collide"
         );
-        // And the documented ceiling: comments are NOT normalised away.
+        // Comments are normalised away in every supported language.
         for (name, lang, plain, commented) in [
             (
                 "python", Lang::Python,
                 "def a(x):\n    return x + 1\n",
                 "def a(x):\n    # explain\n    return x + 1\n",
-            ),
-            (
-                "python-docstring", Lang::Python,
-                "def a(x):\n    return x + 1\n",
-                "def a(x):\n    \"doc\"\n    return x + 1\n",
             ),
             (
                 "php", Lang::Php,
@@ -4219,111 +4411,35 @@ impl Config {
                 "/// doc\nfn a(x: i32) -> i32 { x + 1 }\n",
             ),
         ] {
-            assert_ne!(
+            assert_eq!(
                 shape(lang, plain),
                 shape(lang, commented),
-                "{name}: comments ARE hashed today. If this now matches, the \
-                 engine has become comment-blind and the doc comment on the \
-                 duplication section must be updated to say so - it is a \
-                 change in which clones get reported, not a free win."
+                "{name}: comments must not defeat a Type-2 clone"
             );
         }
+        assert_ne!(
+            shape(Lang::Python, "def a(x):\n    return x + 1\n"),
+            shape(Lang::Python, "def a(x):\n    \"runtime value\"\n    return x + 1\n"),
+            "a Python string expression is executable syntax, not a comment"
+        );
     }
 
-    // ---- The parity lock against the REAL Python master reference ------------
+    // ---- Stable formula calibration -----------------------------------------
 
-    fn locate_tina4_python() -> Option<PathBuf> {
-        if let Ok(d) = std::env::var("TINA4_PYTHON_DIR") {
-            let p = PathBuf::from(d);
-            if p.is_dir() {
-                return Some(p);
-            }
-        }
-        let candidate = manifest().join("../tina4-python");
-        if candidate.join("tina4_python/dev_admin/metrics.py").is_file() {
-            return Some(candidate);
-        }
-        None
-    }
-
-    fn python_bin(dir: &Path) -> Option<PathBuf> {
-        let venv = dir.join(".venv/bin/python");
-        if venv.is_file() {
-            return Some(venv);
-        }
-        for name in ["python3", "python"] {
-            if let Ok(p) = which::which(name) {
-                return Some(p);
-            }
-        }
-        None
-    }
-
-    #[derive(serde::Deserialize)]
-    struct PyRef {
-        loc: usize,
-        complexity: u32,
-        functions: usize,
-        maintainability: f64,
-        avg_complexity: f64,
-        #[serde(default)]
-        error: Option<String>,
-    }
-
-    /// No mocks: shells out to the REAL tina4-python metrics.py and asserts the
-    /// Rust engine lands on the same numbers for the same real source files.
+    /// The Python implementation was retired by ADR-0054 and now delegates back
+    /// to this binary, so invoking it here would compare the engine with itself
+    /// (or, worse, with an older installed binary). Lock the accepted baseline
+    /// directly; callable allocation is covered by the cross-language test.
     #[test]
-    fn parity_matches_python_master() {
-        let Some(dir) = locate_tina4_python() else {
-            eprintln!("SKIP parity: tina4-python not found (set TINA4_PYTHON_DIR)");
-            return;
-        };
-        let Some(py) = python_bin(&dir) else {
-            eprintln!("SKIP parity: no python interpreter available");
-            return;
-        };
-        let driver = manifest().join("tests/parity_reference.py");
+    fn scope_neutral_formula_fixture_stays_stable() {
+        let src = read_fixture("sample_container.py");
+        let (fm, _) = analyze_py(&src);
 
-        for name in ["sample_container.py", "sample_metrics.py"] {
-            let fixture = manifest().join("tests/fixtures").join(name);
-            let out = Command::new(&py)
-                .arg(&driver)
-                .arg(&fixture)
-                .env("TINA4_PYTHON_DIR", &dir)
-                .output()
-                .expect("failed to run parity_reference.py");
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let reference: PyRef = serde_json::from_str(stdout.trim())
-                .unwrap_or_else(|_| panic!("bad driver output for {name}: {stdout}"));
-            if let Some(err) = &reference.error {
-                eprintln!("SKIP parity for {name}: {err}");
-                return;
-            }
-
-            let src = read_fixture(name);
-            let (fm, _fns) = analyze_py(&src);
-
-            eprintln!(
-                "PARITY {name}: py(loc={},cc={},fn={},mi={},avg={}) rust(loc={},cc={},fn={},mi={},avg={})",
-                reference.loc, reference.complexity, reference.functions,
-                reference.maintainability, reference.avg_complexity,
-                fm.loc, fm.complexity, fm.functions, fm.maintainability, fm.avg_complexity
-            );
-
-            assert_eq!(fm.loc, reference.loc, "{name}: LOC must match exactly");
-            assert_eq!(fm.complexity, reference.complexity, "{name}: total CC must match exactly");
-            assert_eq!(fm.functions, reference.functions, "{name}: function count must match exactly");
-            assert!(
-                (fm.avg_complexity - reference.avg_complexity).abs() <= 0.01,
-                "{name}: avg complexity {} vs {}", fm.avg_complexity, reference.avg_complexity
-            );
-            // MI matched EXACTLY to the reported 0.1 in development; the 0.15
-            // tolerance is a guard against float-rounding drift across platforms.
-            assert!(
-                (fm.maintainability - reference.maintainability).abs() <= 0.15,
-                "{name}: MI {} vs {}", fm.maintainability, reference.maintainability
-            );
-        }
+        assert_eq!(fm.loc, 81);
+        assert_eq!(fm.complexity, 14);
+        assert_eq!(fm.functions, 7);
+        assert_eq!(fm.maintainability, 39.4);
+        assert_eq!(fm.avg_complexity, 2.0);
     }
 
     // ── Test detection: the class-symbol stage ──────────────────────────
@@ -4334,8 +4450,8 @@ impl Config {
     // "untested" offender for it.
 
     #[test]
-    fn declared_type_names_finds_a_short_class() {
-        let names = declared_type_names("class ORM:\n    def save(self):\n        return True\n", Lang::Python);
+    fn declared_reference_names_finds_a_short_class() {
+        let names = declared_reference_names("class ORM:\n    def save(self):\n        return True\n", Lang::Python);
         assert!(names.contains(&"ORM".to_string()), "got {names:?}");
     }
 
@@ -4343,10 +4459,10 @@ impl Config {
     fn a_three_char_class_referenced_by_a_test_counts_as_tested() {
         // No length floor. A >3-char gate was the bug the Python master fixed:
         // it excluded exactly the short framework types that matter (ORM, Api, Log).
-        let idx = TestIndex {
-            file_names: ["test_models.py".to_string()].into_iter().collect(),
-            contents: vec!["from src import ORM\n\ndef test_save():\n    assert ORM().save()\n".to_string()],
-        };
+        let idx = test_index(
+            "test_models.py",
+            "from src import ORM\n\ndef test_save():\n    assert ORM().save()\n",
+        );
         let declared = vec!["ORM".to_string()];
         assert!(
             module_has_tests(Path::new("src/orm.py"), &idx, &declared),
@@ -4358,10 +4474,7 @@ impl Config {
     fn an_unreferenced_class_is_still_untested() {
         // The negative half. Without it this stage could return true for
         // anything and the test above would still pass.
-        let idx = TestIndex {
-            file_names: ["test_other.py".to_string()].into_iter().collect(),
-            contents: vec!["def test_nothing():\n    assert True\n".to_string()],
-        };
+        let idx = test_index("test_other.py", "def test_nothing():\n    assert True\n");
         let declared = vec!["Widget".to_string()];
         assert!(
             !module_has_tests(Path::new("src/widget.py"), &idx, &declared),
@@ -4391,7 +4504,7 @@ impl Config {
     fn a_typescript_interface_is_a_declared_type() {
         // An interface-only module has no class, so without this the module was
         // reported UNTESTED however plainly a test referenced it.
-        let names = declared_type_names(
+        let names = declared_reference_names(
             "export interface WidgetConnection {\n  id: string;\n}\n", Lang::Ts);
         assert!(names.contains(&"WidgetConnection".to_string()), "got {names:?}");
     }
@@ -4401,30 +4514,24 @@ impl Config {
         // The TS inline-type-import idiom: the reference sits mid-line on a
         // `const` declaration, so no import-line rule can see it. The type NAME
         // is the only signal, which is exactly what stage 3 is for.
-        let idx = TestIndex {
-            file_names: ["widget.test.ts".to_string()].into_iter().collect(),
-            contents: vec!["const c: import(\"../src/widgetConnection.ts\").WidgetConnection = { id: \"1\" };".to_string()],
-        };
+        let idx = test_index(
+            "widget.test.ts",
+            "const c: import(\"../src/widgetConnection.ts\").WidgetConnection = { id: \"1\" };",
+        );
         let declared = vec!["WidgetConnection".to_string()];
         assert!(module_has_tests(Path::new("src/widgetConnection.ts"), &idx, &declared));
     }
 
     #[test]
     fn an_unreferenced_interface_is_still_untested() {
-        let idx = TestIndex {
-            file_names: ["other.test.ts".to_string()].into_iter().collect(),
-            contents: vec!["const x = 1;".to_string()],
-        };
+        let idx = test_index("other.test.ts", "const x = 1;");
         let declared = vec!["SoloIface".to_string()];
         assert!(!module_has_tests(Path::new("src/ctrlIface.ts"), &idx, &declared));
     }
 
     #[test]
     fn a_phpunit_pascalcase_test_file_counts_as_tested() {
-        let idx = TestIndex {
-            file_names: ["metricstest.php".to_string()].into_iter().collect(),
-            contents: vec!["<?php\nclass MetricsTest {}\n".to_string()],
-        };
+        let idx = test_index("MetricsTest.php", "<?php\nclass MetricsTest {}\n");
         assert!(
             module_has_tests(Path::new("Tina4/Metrics.php"), &idx, &[]),
             "MetricsTest.php is the dedicated test for Metrics.php"
@@ -4435,14 +4542,110 @@ impl Config {
     fn a_pascalcase_match_is_anchored_not_a_substring() {
         // The negative half: `Base` must NOT be marked tested by DatabaseTest.php.
         // starts_with (not contains) is what makes the separator-less pattern safe.
-        let idx = TestIndex {
-            file_names: ["databasetest.php".to_string()].into_iter().collect(),
-            contents: vec!["<?php\nclass DatabaseTest {}\n".to_string()],
-        };
+        let idx = test_index("DatabaseTest.php", "<?php\nclass DatabaseTest {}\n");
         assert!(
             !module_has_tests(Path::new("Tina4/Base.php"), &idx, &[]),
             "DatabaseTest.php tests Database, not Base"
         );
+    }
+
+    #[test]
+    fn multiline_and_dynamic_typescript_imports_are_test_references() {
+        let multiline = test_index(
+            "storage.test.ts",
+            "import {\n  persist,\n} from '../src/storage/persist';\ntest('persist', () => persist('x'));",
+        );
+        assert!(module_has_tests(Path::new("src/storage/persist.ts"), &multiline, &[]));
+
+        let dynamic = test_index(
+            "edge-cases.test.ts",
+            "test('loads tracker', async () => { await import('../src/debug/tracker'); });",
+        );
+        assert!(module_has_tests(Path::new("src/debug/tracker.ts"), &dynamic, &[]));
+    }
+
+    #[test]
+    fn a_barrel_import_can_reference_an_exported_function() {
+        let declared = declared_reference_names(
+            "export function persist(value: string) { return value; }\n",
+            Lang::Ts,
+        );
+        assert!(declared.contains(&"persist".to_string()));
+        let index = test_index(
+            "storage.test.ts",
+            "import { persist } from '../src';\ntest('value', () => persist('x'));",
+        );
+        assert!(module_has_tests(Path::new("src/storage/persist.ts"), &index, &declared));
+    }
+
+    #[test]
+    fn a_shared_ruby_namespace_is_not_a_test_reference() {
+        let declared = declared_reference_names("module Tina4\n  VERSION = '1'\nend\n", Lang::Ruby);
+        assert!(!declared.contains(&"Tina4".to_string()), "a namespace is not an exported subject under test");
+        let index = test_index("version_spec.rb", "expect(Tina4::VERSION).not_to be_nil");
+        assert!(!module_has_tests(Path::new("lib/tina4/unrelated.rb"), &index, &declared));
+    }
+
+    #[test]
+    fn production_source_defaults_and_globs_are_explicit() {
+        for path in [
+            "tests/widget.test.ts", "src/widget.spec.ts", "src/test_widget.py",
+            "spec/widget_spec.rb", "Tina4/WidgetTest.php", "src/types.d.ts",
+        ] {
+            assert!(is_default_non_production_source(Path::new(path)), "{path} must not affect a production score");
+        }
+        assert!(!is_default_non_production_source(Path::new("src/widget.ts")));
+        assert!(path_matches_glob("packages/core/src/dev/admin.ts", "**/dev/**"));
+        assert!(path_matches_glob("src/generated/client.ts", "src/generated/*.ts"));
+        assert!(!path_matches_glob("src/core/client.ts", "src/generated/*.ts"));
+    }
+
+    #[test]
+    fn target_resolution_applies_repeatable_exclusions_and_allows_an_override() {
+        let directory = std::env::temp_dir().join(format!(
+            "tina4_metrics_exclusions_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        for relative in [
+            "src/app.ts",
+            "src/app.test.ts",
+            "src/types.d.ts",
+            "src/generated/client.ts",
+            "src/dev/panel.ts",
+        ] {
+            let path = directory.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "export const value = 1;\n").unwrap();
+        }
+        let exclusions = vec!["**/generated/**".to_string(), "**/dev/**".to_string()];
+        let (production, _) = resolve_targets(
+            Some(directory.join("src").to_str().unwrap()),
+            &exclusions,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            production.iter().map(|path| path.file_name().unwrap().to_string_lossy()).collect::<Vec<_>>(),
+            vec!["app.ts"],
+            "defaults and both explicit exclusions must compose"
+        );
+        let (with_non_production, _) = resolve_targets(
+            Some(directory.join("src").to_str().unwrap()),
+            &exclusions,
+            true,
+        )
+        .unwrap();
+        assert_eq!(with_non_production.len(), 3, "the override restores test and declaration source only");
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn json_names_the_test_signal_honestly() {
+        let (metrics, _functions) = analyze_py("def widget():\n    return 1\n");
+        let value = serde_json::to_value(metrics).unwrap();
+        assert_eq!(value["has_referencing_test"], false);
+        assert!(value.get("has_tests").is_none(), "the old field overclaimed coverage");
     }
 
 

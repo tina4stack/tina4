@@ -40,20 +40,25 @@ tina4 migrate                    Run database migrations
 tina4 test                       Run tests
 tina4 routes                     List registered routes
 tina4 metrics                    Report code-health top offenders (complexity, large files,
-                                 low maintainability, untested, duplication). Flags: --top N, --json,
-                                 --fail-on warn|error (CI gate), --path DIR|FILE. NATIVE +
+                                 low maintainability, missing test references, duplication).
+                                 Flags: --top N, --json, --fail-on warn|error (CI gate),
+                                 --path DIR|FILE, repeatable --exclude GLOB, and
+                                 --include-non-production. Tests/specs/declarations are excluded
+                                 from production scoring by default. NATIVE +
                                  language-agnostic (ADR-0002, src/metrics.rs): scans SOURCE
                                  directly for Python/PHP/Ruby/TypeScript+JS/Rust via tree-sitter,
                                  with NO Tina4 project and NO running framework required.
-                                 Formula parity with the Python master (metrics.py) — CC/MI/
-                                 thresholds identical, locked by a real parity test.
+                                 Shared CC/MI formulas and thresholds are locked against the
+                                 retired Python engine on scope-neutral source. Nested callable
+                                 boundaries are parity-locked across all five languages.
                                  DRY: cross-file duplicate detection via AST-shape hashing
                                  (Baxter-style), language-agnostic so it covers all five
                                  languages through one code path. Finds Type-1 (exact)
                                  clones plus consistent identifier and same-kind literal
-                                 renaming. NOT full Type-2: comments are hashed, so adding
-                                 a comment breaks the match (measured in all five
-                                 languages, locked by a test). Type-3/4 are NOT detected.
+                                 renaming; comments are ignored for Type-2 matching.
+                                 Executable Python docstrings remain significant. Type-3/4
+                                 are NOT detected. `has_referencing_test` is a parsed-reference
+                                 signal, explicitly not test execution or coverage.
                                  PARSE-HEALTH GUARD: a file the engine cannot read is
                                  REFUSED, never reported and never silently dropped. Two
                                  reasons trigger it, both per file: under 95% of lines

@@ -212,7 +212,7 @@ enum Commands {
     },
 
     /// Report code-health top offenders — NATIVE, language-agnostic (ADR-0002).
-    /// Scans SOURCE directly (Python/PHP/Ruby/TypeScript+JS) with NO Tina4 project
+    /// Scans SOURCE directly (Python/PHP/Ruby/TypeScript+JS/Rust) with NO Tina4 project
     /// and NO running framework required: per-file LOC, cyclomatic complexity,
     /// maintainability index, coupling, function count, offenders + `--fail-on`.
     Metrics {
@@ -228,6 +228,12 @@ enum Commands {
         /// Show only the worst N offenders (default: 20)
         #[arg(long)]
         top: Option<usize>,
+        /// Exclude a path glob from the scan (repeatable; supports *, **, and ?)
+        #[arg(long, value_name = "GLOB")]
+        exclude: Vec<String>,
+        /// Include tests, specs, and declaration files in the measured source
+        #[arg(long)]
+        include_non_production: bool,
     },
 
     /// Any command the client doesn't own is forwarded verbatim to the detected
@@ -409,8 +415,15 @@ fn main() {
         // Native, language-agnostic metrics engine (ADR-0002). No longer
         // forwarded to the framework CLI — scans SOURCE directly, no project
         // or running framework required.
-        Commands::Metrics { path, fail_on, json, top } => {
-            std::process::exit(metrics::run(path, top, json, fail_on));
+        Commands::Metrics { path, fail_on, json, top, exclude, include_non_production } => {
+            std::process::exit(metrics::run(
+                path,
+                top,
+                json,
+                fail_on,
+                exclude,
+                include_non_production,
+            ));
         }
 
         // Any non-native command (migrate, migrate:create, seed, test, routes,

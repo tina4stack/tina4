@@ -7,7 +7,7 @@
 - [x] Confirm all four framework skill commits are synchronized and release-ready.
 - [x] Push the framework `v3` branches and create immutable `3.13.102` tags.
 - [x] Bump canonical and public skills installers from `3.13.100` to `3.13.102`.
-- [ ] Re-sign the modified PowerShell installer and verify its Authenticode status.
+- [x] Re-sign the modified PowerShell installer and verify its CMS certificate structure.
 - [x] Bump the Tina4 client to `3.8.75` and document the release.
 - [ ] Tag and push bare `3.13.102` plus client `v3.8.75`.
 - [ ] Rebase, verify, and push the public documentation wrappers.
@@ -33,6 +33,7 @@
 - `7093020`, `2463041a`, `8b202bc`, `985884c` - synchronized skills tagged `3.13.102` in all frameworks.
 - `7da1887` - Tina4 client scaffolds the current tina4-js release.
 - `b4daa8f` - prepare client 3.8.75, installer pin, tests, and macOS installer signer.
+- `fdffed9` - Authenticode-sign the canonical PowerShell skills installer.
 - `137e48e` - prepare public installer wrappers for skills `3.13.102`.
 
 ## Status: In Progress

@@ -102,12 +102,6 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           targets: ${{ matrix.target }}
 
-      - name: Install cross-compilation tools (Linux ARM)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-
       # musl-tools gives musl-gcc for the NATIVE x86_64 musl build, which the
       # tree-sitter C grammars need at the cc step.
       - name: Install musl toolchain (x86_64)
@@ -116,24 +110,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
-      # aarch64-musl is cross-compiled and needs a real aarch64 MUSL toolchain.
-      # aarch64-linux-gnu-gcc is a GLIBC cross-compiler: it compiles the C
-      # grammars but cannot link a musl target, and v3.8.60 died exactly there
-      # ("linking with `aarch64-linux-gnu-gcc` failed"). zig ships musl sysroots
-      # for every arch, so cargo-zigbuild both compiles and links this cleanly
-      # without apt hunting for a musl-cross package.
-      # cargo-zigbuild comes from crates.io; zig does NOT -- install-action only
-      # resolves crates and failed with "For crate zig: zig is not found".
-      # The ziglang PyPI wheel ships the real zig toolchain and cargo-zigbuild
-      # discovers it via `python3 -m ziglang`, so no extra action pin is needed.
-      - name: Install cargo-zigbuild (aarch64 musl)
-        if: matrix.target == 'aarch64-unknown-linux-musl'
+      # BOTH aarch64 linux targets use cargo-zigbuild. It cross-compiles and
+      # links cleanly, unlike apt's gcc-aarch64-linux-gnu (which repeatedly
+      # hung on the runner's apt update in v3.8.77) and unlike a musl-cross
+      # apt package (which does not exist upstream). zig ships glibc AND musl
+      # sysroots for every arch, so one tool covers both. Pin the glibc
+      # target to .2.28 (Debian 11 / Ubuntu 20.04) so the shipped binary
+      # runs on older distros too.
+      - name: Install cargo-zigbuild (aarch64 linux)
+        if: contains(matrix.target, 'aarch64-unknown-linux')
         uses: taiki-e/install-action@bffeee26d4db9be238a4ea78d8826604ebcb594d # v2.82.5
         with:
           tool: cargo-zigbuild
 
-      - name: Install zig (aarch64 musl)
-        if: matrix.target == 'aarch64-unknown-linux-musl'
+      - name: Install zig (aarch64 linux)
+        if: contains(matrix.target, 'aarch64-unknown-linux')
         run: |
           python3 -m pip install --user ziglang
           python3 -m ziglang version
@@ -144,11 +135,13 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-musl'
         run: cargo zigbuild --release --locked --target ${{ matrix.target }}
 
+      - name: Build (zigbuild, aarch64 gnu)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: cargo zigbuild --release --locked --target aarch64-unknown-linux-gnu.2.28
+
       - name: Build
-        if: matrix.target != 'aarch64-unknown-linux-musl'
+        if: matrix.target != 'aarch64-unknown-linux-musl' && matrix.target != 'aarch64-unknown-linux-gnu'
         run: cargo build --release --locked --target ${{ matrix.target }}
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
       - name: Rename binary (Unix)
         if: runner.os != 'Windows'

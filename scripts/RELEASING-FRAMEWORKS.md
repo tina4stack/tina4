@@ -275,11 +275,27 @@ crate publish. That means if you have to fix and retag, the second run's
 `publish-crate` will fail with "already published" - this is expected and
 does not block the retag from producing the artifacts.
 
-Sign the draft. This step requires the SimplySign 2FA session:
+Sign the draft. This step requires the SimplySign 2FA session AND three
+env vars that the script will not guess for you:
 
 ```bash
 # Open SimplySign Desktop and log in (your 2FA)
 cd tina4
+
+# Cert path is stable across releases (full chain, leaf first, no root).
+export TINA4_SIGN_CERT="$PWD/secrets/codeinfinity-fullchain.pem"
+
+# Key id is the CKA_ID of the cert object on the cloud card. Read it once
+# per new card, then hard-code it here (no --login: the cloud card has no
+# PIN). This id is for the current Code Infinity cert - re-run the probe
+# if a new cert is enrolled.
+export TINA4_KEY_ID="63:6c:1f:49:e1:1c:d2:0d:7a:91:dd:5f:b9:92:03:c6:1b:a1:3c:c2"
+# To rediscover:
+#   pkcs11-tool --module /usr/local/lib/libSimplySignPKCS.dylib \
+#     --list-objects --type cert
+
+# The PKCS#11 module is auto-detected on macOS; on Linux point at the .so.
+
 ./scripts/sign-release.sh v3.8.<new>
 ```
 
@@ -360,6 +376,22 @@ once.
 - **PHP source version mismatch on publish**: `Tina4/App.php::VERSION` must
   equal the tag. The publish workflow refuses to publish on mismatch. Fix:
   bump the constant in `feature/release3.13.<ver>` before merging to v3.
+
+- **`aarch64-unknown-linux-gnu` build hangs on `apt install
+  gcc-aarch64-linux-gnu`**: seen on v3.8.77, twice, ~35 minutes each on a
+  single apt step. The runner's apt mirror throttles or hangs. All other
+  targets finish in minutes, so the whole release blocks on one job that
+  never times out. Fix (already landed): the workflow uses cargo-zigbuild
+  for BOTH arm64-linux targets (glibc pinned at 2.28 for gnu), same path
+  that already worked for arm64-musl. No apt cross-compile toolchain is
+  needed.
+
+- **Windows exe not blocked on missing signing env**: `./scripts/sign-release.sh`
+  needs `TINA4_SIGN_CERT` (PEM path) and `TINA4_KEY_ID` (cert CKA_ID on
+  the cloud card). Both are documented in section 5 above with concrete
+  values. The cert lives at `secrets/codeinfinity-fullchain.pem` in this
+  repo. If the id needs re-discovery, section 5 shows the pkcs11-tool
+  command.
 
 ## The runbook you want next: `scripts/framework-release.sh`
 

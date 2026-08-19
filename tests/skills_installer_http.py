@@ -76,7 +76,7 @@ class SkillHandler(http.server.BaseHTTPRequestHandler):
 
 def verify_install(skill_home: Path) -> None:
     destination = skill_home / ".agents" / "skills"
-    assert (destination / ".tina4-skills-ref").read_text().strip() == "3.13.102"
+    assert (destination / ".tina4-skills-ref").read_text().strip() == "3.13.105"
     for skill, references in INSTALLS.items():
         assert (destination / skill / "SKILL.md").is_file(), skill
         for reference in references:

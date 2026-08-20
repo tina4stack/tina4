@@ -110,7 +110,8 @@ cargo install tina4
 
 ## One-time setup (per channel)
 
-All accounts use **info@tina4.com** as the publisher identity.
+All accounts use **info@tina4.com** as the publisher identity. For the exact
+click-by-click on creating each token/secret, see **[`TOKENS.md`](TOKENS.md)**.
 
 ### Scoop
 1. Create a public repo `tina4stack/scoop-bucket`.

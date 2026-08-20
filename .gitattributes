@@ -1,3 +1,8 @@
 # Authenticode signatures cover the exact PowerShell script bytes. Do not let
 # Git rewrite line endings in the canonical signed installer.
 /install-skills.ps1 binary
+
+# Shell scripts must stay LF - CI runs them through bash/sed on Linux, where a
+# CRLF shebang or CRLF in the script body would break execution. Pin it so a
+# Windows checkout cannot commit CRLF back into them.
+*.sh text eol=lf

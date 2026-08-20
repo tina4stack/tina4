@@ -9,6 +9,36 @@ homepage = "https://tina4.com"
 keywords = ["cli", "web-framework", "scss", "dev-tools"]
 categories = ["command-line-utilities", "development-tools", "web-programming"]
 
+# Debian/Ubuntu packaging (cargo-deb). Produces tina4_<version>_<arch>.deb from
+# THIS manifest - one source of truth for version + description. The release
+# pipeline runs `cargo deb --no-build --target <triple>` after the normal build,
+# so the binary is reused (never recompiled) and the arch is taken from the
+# target triple. `target/release/...` below is auto-substituted with the
+# per-target directory when --target is passed. Baseline channel: the .deb is
+# attached to each GitHub Release for `apt install ./tina4_x.y.z_amd64.deb`.
+# A hosted apt.tina4.com repo (true `apt-get install tina4`) is a documented
+# follow-up - see packaging/README.md.
+[package.metadata.deb]
+maintainer = "Tina4 Stack <info@tina4.com>"
+copyright = "2026, Tina4 Stack <info@tina4.com>"
+license-file = ["LICENSE", "0"]
+section = "devel"
+priority = "optional"
+# We ship the glibc build in the .deb (not the static musl one). A Rust glibc
+# binary's only runtime dependency is libc6; pin it explicitly rather than using
+# "$auto" so packaging the arm64 .deb on an amd64 CI runner needs no cross-arch
+# dpkg-shlibdeps resolution.
+depends = "libc6"
+extended-description = """\
+The Tina4 CLI is one command for the whole Tina4 framework family (Python, PHP, \
+Ruby, Node.js): scaffold a project, run a hot-reloading dev server, generate \
+models and routes, run migrations, and measure code health - all from `tina4`."""
+assets = [
+    ["target/release/tina4", "usr/bin/tina4", "755"],
+    ["LICENSE", "usr/share/doc/tina4/copyright", "644"],
+    ["README.md", "usr/share/doc/tina4/README.md", "644"],
+]
+
 [[bin]]
 name = "tina4"
 path = "src/main.rs"

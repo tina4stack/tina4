@@ -37,10 +37,37 @@ irm https://raw.githubusercontent.com/tina4stack/tina4/main/install.ps1 | iex
 
 Installs to `%LOCALAPPDATA%\tina4` and automatically adds it to your user PATH. Open a new terminal after installation.
 
+### Windows (package managers)
+
+```powershell
+# Scoop (no admin needed)
+scoop bucket add tina4 https://github.com/tina4stack/scoop-bucket
+scoop install tina4
+
+# Chocolatey (admin shell)
+choco install tina4
+
+# winget
+winget install Tina4Stack.Tina4
+```
+
+Each channel tracks every release automatically. See
+[`packaging/README.md`](packaging/README.md) for how the manifests are published.
+
 ### Homebrew (macOS / Linux)
 
 ```sh
 brew install tina4stack/tap/tina4
+```
+
+### Debian / Ubuntu (.deb)
+
+Every release attaches an `amd64` and an `arm64` `.deb`:
+
+```sh
+ver=3.8.77
+curl -fsSLO https://github.com/tina4stack/tina4/releases/download/v$ver/tina4_${ver}-1_amd64.deb
+sudo apt install ./tina4_${ver}-1_amd64.deb
 ```
 
 ### From source (requires Rust)

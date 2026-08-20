@@ -1,0 +1,35 @@
+VERIFICATION
+
+Verification is intended to assist the Chocolatey moderators and end users in
+verifying that this package's contents are authentic.
+
+This package downloads the official Tina4 CLI binary published by the Tina4 Stack
+project on GitHub. It is the same file the project's own installers use.
+
+Package binary:
+  tina4-windows-amd64.exe
+
+Download location (embedded in tools\chocolateyinstall.ps1):
+  https://github.com/tina4stack/tina4/releases/download/v3.8.77/tina4-windows-amd64.exe
+
+SHA-256 (embedded as -Checksum64 in tools\chocolateyinstall.ps1):
+  72B07A5B8DE17A32701201A63EFA20A965A5E113A9A51EBE1CF6494774B28BB6
+
+To verify the checksum yourself:
+
+  1. Download the binary from the URL above.
+  2. Compute its hash, e.g. in PowerShell:
+       Get-FileHash tina4-windows-amd64.exe -Algorithm SHA256
+  3. Compare it to the SHA-256 above. They must match.
+
+You can also cross-check it against the project's signed checksum manifest,
+published as an asset on the same release:
+
+  https://github.com/tina4stack/tina4/releases/download/v3.8.77/SHA256SUMS
+
+The binary is additionally EV Authenticode code-signed; right-click the .exe,
+Properties, Digital Signatures to inspect the publisher signature.
+
+The software is licensed under the MIT License; a copy is included as
+tools\LICENSE.txt and is published at:
+  https://github.com/tina4stack/tina4/blob/main/LICENSE

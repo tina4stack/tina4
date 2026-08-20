@@ -93,3 +93,22 @@ release.
   `gh attestation verify <file> --repo tina4stack/tina4`.
 - **All:** `sha256sum -c SHA256SUMS` (or `shasum -a 256 -c`) against the
   published checksums.
+
+## Downstream package managers (automatic)
+
+You do nothing extra. Two hooks fan the signed release out to every channel:
+
+- **`.deb` (Debian/Ubuntu)** is built and attached during the release itself:
+  the `release-assets` job packages the amd64 + arm64 `.deb` from the just-built
+  glibc binaries (`cargo deb --no-build`) and includes them in `SHA256SUMS`. When
+  you sign, the sums are regenerated over the `.debs` too.
+- **Scoop, Homebrew, Chocolatey, winget** update when the release is *published*:
+  `.github/workflows/release-published.yml` renders every manifest from the tag +
+  `SHA256SUMS` (`scripts/render-manifests.sh`), commits the bumped manifests back
+  to `main`, and pushes each channel. Each channel **skips** unless its secret is
+  configured, so nothing breaks before a channel is live.
+
+The full channel guide - install commands, per-channel one-time setup, and the
+required secrets - is [`packaging/README.md`](../packaging/README.md). To preview
+what a bump will publish: `bash scripts/render-manifests.sh <version> <SHA256SUMS>`
+then `git diff -- packaging homebrew`.

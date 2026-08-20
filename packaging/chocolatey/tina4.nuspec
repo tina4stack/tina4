@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>tina4</id>
+    <version>3.8.77</version>
+    <packageSourceUrl>https://github.com/tina4stack/tina4/tree/main/packaging/chocolatey</packageSourceUrl>
+    <owners>tina4stack</owners>
+    <title>Tina4 CLI</title>
+    <authors>Tina4 Stack</authors>
+    <projectUrl>https://tina4.com</projectUrl>
+    <copyright>2026 Tina4 Stack</copyright>
+    <licenseUrl>https://github.com/tina4stack/tina4/blob/main/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <projectSourceUrl>https://github.com/tina4stack/tina4</projectSourceUrl>
+    <docsUrl>https://tina4.com</docsUrl>
+    <bugTrackerUrl>https://github.com/tina4stack/tina4/issues</bugTrackerUrl>
+    <tags>tina4 cli web-framework php python ruby nodejs scss dev-tools scaffolding</tags>
+    <summary>Unified CLI for the Tina4 framework - Python, PHP, Ruby, and Node.js.</summary>
+    <description>
+The **Tina4 CLI** is one command for the whole Tina4 framework family. Scaffold a
+project in any of four languages, run a hot-reloading dev server, generate models
+and routes, run migrations, and measure code health - all from `tina4`.
+
+Common commands:
+
+* `tina4 setup` - guided project setup (language + AI tool + scaffold)
+* `tina4 init &lt;language&gt; &lt;path&gt;` - scaffold a new project (python, php, ruby, nodejs, tina4js)
+* `tina4 serve` - start the dev server (file watcher + SCSS + browser)
+* `tina4 generate &lt;what&gt; &lt;name&gt;` - model, route, migration, middleware
+* `tina4 migrate` - run database migrations
+* `tina4 metrics` - report code-health top offenders
+* `tina4 doctor` - check installed languages/tools and skills currency
+
+This package downloads the official, EV-signed Windows binary from the project's
+GitHub Releases and verifies its SHA-256 checksum before installing. See
+tools\VERIFICATION.txt for how to verify it yourself.
+    </description>
+    <releaseNotes>https://github.com/tina4stack/tina4/releases/tag/v3.8.77</releaseNotes>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

@@ -1,0 +1,245 @@
+name: Publish package manifests
+
+# Fires when a release is PUBLISHED (i.e. after the local sign step finalizes the
+# draft - scripts/sign-release.ps1). At that point the Windows .exe is EV-signed
+# and SHA256SUMS is regenerated over the signed bytes, so the values every
+# downstream package manager needs (version, download URL, SHA-256) are final.
+#
+# This workflow is the "keep the thin manifests in sync" half of the distribution
+# pipeline (the .deb is built + attached in release.yml). It:
+#   1. downloads the published SHA256SUMS,
+#   2. renders every manifest in packaging/ + the Homebrew formula from it
+#      (scripts/render-manifests.sh - ONE source of truth for the values),
+#   3. commits the bumped manifests back to main, and
+#   4. publishes to Scoop / Chocolatey / winget - each step SKIPS cleanly until
+#      its account/repo/secret exists, so this is safe to land before any channel
+#      is live.
+#
+# One-time setup per channel is documented in packaging/README.md. Secrets used:
+#   SCOOP_BUCKET_TOKEN  PAT with write access to tina4stack/scoop-bucket
+#   CHOCO_API_KEY       api key for the info@tina4.com chocolatey.org account
+#   WINGET_TOKEN        PAT (public_repo) used by komac to fork + PR winget-pkgs
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to (re)publish manifests for, e.g. v3.8.78'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Render every manifest from the published release and commit them back to main.
+  # Also emits has_* flags so the publish jobs can skip a channel whose secret is
+  # not set (secrets are not available in job-level `if:`, so we surface them as
+  # outputs here).
+  # ---------------------------------------------------------------------------
+  render:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # commit the bumped manifests back to main
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
+      version: ${{ steps.ver.outputs.version }}
+      has_scoop: ${{ steps.flags.outputs.has_scoop }}
+      has_choco: ${{ steps.flags.outputs.has_choco }}
+      has_winget: ${{ steps.flags.outputs.has_winget }}
+      has_brew: ${{ steps.flags.outputs.has_brew }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Resolve tag + version
+        id: ver
+        env:
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -eu
+          tag="${INPUT_TAG:-$EVENT_TAG}"
+          case "$tag" in
+            v*) ;;
+            *) echo "::error::tag '$tag' must start with v"; exit 1;;
+          esac
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download the published SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "${{ steps.ver.outputs.tag }}" --repo "${{ github.repository }}" --pattern SHA256SUMS --dir . --clobber
+
+      - name: Render manifests
+        run: bash scripts/render-manifests.sh "${{ steps.ver.outputs.version }}" SHA256SUMS
+
+      - name: Commit bumped manifests back to main
+        run: |
+          set -eu
+          rm -f SHA256SUMS
+          if git diff --quiet -- packaging homebrew; then
+            echo "manifests already current for ${{ steps.ver.outputs.tag }} - nothing to commit"
+            exit 0
+          fi
+          git config user.name  "tina4stack"
+          git config user.email "info@tina4.com"
+          git add packaging homebrew
+          git commit -m "chore(packaging): sync manifests to ${{ steps.ver.outputs.tag }}"
+          git push origin main
+
+      # The exact rendered files, for the publish jobs (avoids re-cloning main,
+      # which could race a later release).
+      - name: Upload rendered manifests
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: manifests
+          path: |
+            packaging/**
+            homebrew/**
+          retention-days: 3
+          if-no-files-found: error
+
+      - name: Compute channel flags
+        id: flags
+        env:
+          SCOOP: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          CHOCO: ${{ secrets.CHOCO_API_KEY }}
+          WINGET: ${{ secrets.WINGET_TOKEN }}
+          BREW: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          echo "has_scoop=$([ -n "$SCOOP" ] && echo true || echo false)"   >> "$GITHUB_OUTPUT"
+          echo "has_choco=$([ -n "$CHOCO" ] && echo true || echo false)"   >> "$GITHUB_OUTPUT"
+          echo "has_winget=$([ -n "$WINGET" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "has_brew=$([ -n "$BREW" ] && echo true || echo false)"     >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # Scoop: push the rendered manifest to the tina4stack/scoop-bucket repo. Users
+  # then `scoop bucket add tina4 https://github.com/tina4stack/scoop-bucket` and
+  # `scoop install tina4`. (Scoop's own autoupdate can also bump it; this keeps
+  # the bucket instant on release.)
+  # ---------------------------------------------------------------------------
+  publish-scoop:
+    needs: render
+    if: needs.render.outputs.has_scoop == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout scoop-bucket
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: tina4stack/scoop-bucket
+          token: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+          path: bucket-repo
+      - name: Download rendered manifests
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: manifests
+          path: rendered
+      - name: Commit the manifest to the bucket
+        run: |
+          set -eu
+          mkdir -p bucket-repo/bucket
+          cp rendered/scoop/tina4.json bucket-repo/bucket/tina4.json
+          cd bucket-repo
+          if git diff --quiet; then echo "bucket already current"; exit 0; fi
+          git config user.name  "tina4stack"
+          git config user.email "info@tina4.com"
+          git add bucket/tina4.json
+          git commit -m "tina4: ${{ needs.render.outputs.version }}"
+          git push
+
+  # ---------------------------------------------------------------------------
+  # Homebrew: push the rendered formula to the tina4stack/homebrew-tap tap so
+  # `brew install tina4stack/tap/tina4` gets the new version. (The in-repo
+  # homebrew/tina4.rb is the source that render keeps current; the tap is what
+  # `brew` actually reads.)
+  # ---------------------------------------------------------------------------
+  publish-homebrew:
+    needs: render
+    if: needs.render.outputs.has_brew == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout homebrew tap
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: tina4stack/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap-repo
+      - name: Download rendered manifests
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: manifests
+          path: rendered
+      - name: Commit the formula to the tap
+        run: |
+          set -eu
+          mkdir -p tap-repo/Formula
+          cp rendered/homebrew/tina4.rb tap-repo/Formula/tina4.rb
+          cd tap-repo
+          if git diff --quiet; then echo "tap already current"; exit 0; fi
+          git config user.name  "tina4stack"
+          git config user.email "info@tina4.com"
+          git add Formula/tina4.rb
+          git commit -m "tina4: ${{ needs.render.outputs.version }}"
+          git push
+
+  # ---------------------------------------------------------------------------
+  # Chocolatey: pack + push to chocolatey.org (community feed, moderated).
+  # ---------------------------------------------------------------------------
+  publish-choco:
+    needs: render
+    if: needs.render.outputs.has_choco == 'true'
+    runs-on: windows-latest
+    steps:
+      - name: Download rendered manifests
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: manifests
+          path: rendered
+      - name: Pack + push
+        shell: pwsh
+        env:
+          CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location rendered/chocolatey
+          choco pack tina4.nuspec
+          $pkg = Get-ChildItem -Filter 'tina4.*.nupkg' | Select-Object -First 1
+          choco push $pkg.FullName --source https://push.chocolatey.org/ --api-key $env:CHOCO_API_KEY
+
+  # ---------------------------------------------------------------------------
+  # winget: Microsoft's OFFICIAL wingetcreate tool forks microsoft/winget-pkgs
+  # and opens the version-bump PR. It fetches the .exe, computes its SHA-256, and
+  # rewrites the manifest from the existing winget-pkgs entry - so it needs no
+  # local files. The FIRST-ever submission of the new package is done once by
+  # hand with `wingetcreate new` (see packaging/README.md); every release after
+  # is this automated `wingetcreate update`.
+  # ---------------------------------------------------------------------------
+  publish-winget:
+    needs: render
+    if: needs.render.outputs.has_winget == 'true'
+    runs-on: windows-latest
+    steps:
+      - name: Submit winget update (wingetcreate)
+        shell: pwsh
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (Get-Command wingetcreate -ErrorAction SilentlyContinue) {
+            $wc = 'wingetcreate'
+          } else {
+            Invoke-WebRequest https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+            $wc = '.\wingetcreate.exe'
+          }
+          $tag = '${{ needs.render.outputs.tag }}'
+          $url = "https://github.com/tina4stack/tina4/releases/download/$tag/tina4-windows-amd64.exe"
+          & $wc update Tina4Stack.Tina4 `
+              --version '${{ needs.render.outputs.version }}' `
+              --urls $url `
+              --submit --token $env:WINGET_TOKEN

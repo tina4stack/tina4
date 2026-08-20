@@ -234,6 +234,25 @@ binary via `which::which("claude")` and — because on Windows `claude` is a
 - GitHub: https://github.com/tina4stack/tina4
 - Website: https://tina4.com
 
+## Distribution (package managers)
+
+The CLI ships through package managers as well as the `install.sh`/`install.ps1`
+one-liners and `cargo install tina4`. Every channel feeds from the SAME GitHub
+Release artifacts (binaries + `SHA256SUMS`), so there is one release pipeline:
+
+- **`.deb` (amd64 + arm64)** is built and attached during the release by
+  `release.yml`'s `release-assets` job (`cargo deb --no-build` over the just-built
+  glibc binaries; metadata is `[package.metadata.deb]` in `Cargo.toml`).
+- **Scoop / Homebrew / Chocolatey / winget** are thin manifests in `packaging/`
+  and `homebrew/`, kept current by `.github/workflows/release-published.yml`,
+  which renders them from the published tag + `SHA256SUMS`
+  (`scripts/render-manifests.sh` - one source of truth) and pushes each channel.
+  Each channel skips until its secret exists.
+
+Authoritative guide (install commands, one-time per-channel setup, secrets):
+**`packaging/README.md`**. A hosted `apt.tina4.com` repo for `apt-get install
+tina4` is a documented follow-up there.
+
 ## First Principle: Documentation Matches Code Reality
 
 **This rule overrides everything else in this file.**

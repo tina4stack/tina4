@@ -369,19 +369,53 @@ enum SkillsStatus {
     Stale { installed: String, latest: String },
     InstalledUnknownLatest(String), // marker known, latest unknown (offline)
     UnknownInstalled(Option<String>), // no marker; latest maybe known
+    CheckEndpointBroken(Option<String>), // the version-check endpoint answered an HTTP error (4xx/5xx) - reachable but broken/moved
+}
+
+/// Outcome of fetching the latest published ref. Distinguishes a reachable-but-
+/// broken endpoint (an HTTP 4xx/5xx - moved/renamed/misconfigured, actionable)
+/// from a genuine transport failure (offline - benign, retry later). Collapsing
+/// the two into one `None` was the bug: a permanent 404 read as a transient blip.
+#[derive(Debug, PartialEq, Eq)]
+enum LatestRef {
+    Found(String),
+    HttpError,
+    Offline,
+}
+
+/// Pure decision from the curl result. `success` is the process success flag,
+/// `exit_code` its code (curl's `--fail` returns 22 for any HTTP >= 400; 6/7/28/...
+/// are transport failures), `parsed` the ref extracted from a 200 body. No IO -
+/// unit-tested with a mutation witness.
+fn latest_from_curl(success: bool, exit_code: Option<i32>, parsed: Option<String>) -> LatestRef {
+    if success {
+        // 200 but no parseable ref is treated as benign-unknown, not a broken
+        // endpoint: the script was served, we just could not read the pin.
+        return parsed.map_or(LatestRef::Offline, LatestRef::Found);
+    }
+    match exit_code {
+        Some(22) => LatestRef::HttpError, // curl --fail: the server answered 4xx/5xx
+        _ => LatestRef::Offline,          // could not resolve/connect/timeout/spawn
+    }
 }
 
 /// Pure decision: given whether the skills dir exists, the recorded installed
-/// ref, and the latest published ref, classify currency. No IO - unit-tested.
-fn classify_skills(dir_exists: bool, installed: Option<String>, latest: Option<String>) -> SkillsStatus {
+/// ref, and the latest-fetch outcome, classify currency. No IO - unit-tested.
+fn classify_skills(dir_exists: bool, installed: Option<String>, latest: LatestRef) -> SkillsStatus {
     if !dir_exists {
         return SkillsStatus::NotInstalled;
     }
-    match (installed, latest) {
-        (Some(i), Some(l)) if i == l => SkillsStatus::Current(i),
-        (Some(i), Some(l)) => SkillsStatus::Stale { installed: i, latest: l },
-        (Some(i), None) => SkillsStatus::InstalledUnknownLatest(i),
-        (None, l) => SkillsStatus::UnknownInstalled(l),
+    match latest {
+        LatestRef::HttpError => SkillsStatus::CheckEndpointBroken(installed),
+        LatestRef::Found(l) => match installed {
+            Some(i) if i == l => SkillsStatus::Current(i),
+            Some(i) => SkillsStatus::Stale { installed: i, latest: l },
+            None => SkillsStatus::UnknownInstalled(Some(l)),
+        },
+        LatestRef::Offline => match installed {
+            Some(i) => SkillsStatus::InstalledUnknownLatest(i),
+            None => SkillsStatus::UnknownInstalled(None),
+        },
     }
 }
 
@@ -416,17 +450,23 @@ fn has_legacy_developer_skill(skills_dir: &Path) -> bool {
 }
 
 /// Fetch the latest published skills ref from the same installer users refresh
-/// with, so "latest" always equals what a refresh would install. Best-effort:
-/// None on any curl/network failure (doctor then reports "offline", never fails).
-fn fetch_latest_skills_ref() -> Option<String> {
-    let out = Command::new(crate::console::resolve_cmd("curl"))
+/// with, so "latest" always equals what a refresh would install. Best-effort and
+/// never fails: an HTTP error on the endpoint (moved/renamed/misconfigured) is
+/// reported distinctly from a genuine offline, via `latest_from_curl`.
+fn fetch_latest_skills_ref() -> LatestRef {
+    let out = match Command::new(crate::console::resolve_cmd("curl"))
         .args(["-fsSL", "--max-time", "6", SKILLS_INSTALL_URL])
         .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    parse_ref_from_installer(&String::from_utf8_lossy(&out.stdout))
+    {
+        Ok(out) => out,
+        Err(_) => return LatestRef::Offline, // curl missing / spawn failed
+    };
+    let parsed = if out.status.success() {
+        parse_ref_from_installer(&String::from_utf8_lossy(&out.stdout))
+    } else {
+        None
+    };
+    latest_from_curl(out.status.success(), out.status.code(), parsed)
 }
 
 /// Read-only currency report for the global Tina4 AI skills. Never writes; never
@@ -489,6 +529,21 @@ fn check_skills_currency() {
                 None => "version not recorded - re-run install-skills to record it".to_string(),
             };
             println!("  {} {} ({} skills present)", icon_info().blue(), tail.yellow(), present);
+        }
+        SkillsStatus::CheckEndpointBroken(installed) => {
+            let head = match installed {
+                Some(reference) => format!("ref {} ({} skills)", reference, present),
+                None => format!("{} skills present", present),
+            };
+            println!(
+                "  {} {}  {}",
+                icon_warn().yellow(), head.cyan(),
+                "skills version check returned an HTTP error - the endpoint may have moved".yellow()
+            );
+            println!(
+                "      {} {}",
+                "a refresh uses the same endpoint and may also fail:".dimmed(), SKILLS_INSTALL_CMD.yellow()
+            );
         }
     }
 
@@ -559,6 +614,21 @@ fn check_codex_skills_currency() {
             );
             println!("  {} {} ({} skills present)", icon_info().blue(), tail.yellow(), present);
         }
+        SkillsStatus::CheckEndpointBroken(installed) => {
+            let head = match installed {
+                Some(reference) => format!("ref {} ({} skills)", reference, present),
+                None => format!("{} skills present", present),
+            };
+            println!(
+                "  {} {}  {}",
+                icon_warn().yellow(), head.cyan(),
+                "skills version check returned an HTTP error - the endpoint may have moved".yellow()
+            );
+            println!(
+                "      {} {}",
+                "a refresh uses the same endpoint and may also fail:".dimmed(), CODEX_SKILLS_INSTALL_CMD.yellow()
+            );
+        }
     }
     if has_legacy_developer_skill(&skills_dir) {
         println!(
@@ -624,6 +694,21 @@ fn check_cursor_skills_currency() {
             );
             println!("  {} {} ({} skills present)", icon_info().blue(), tail.yellow(), present);
         }
+        SkillsStatus::CheckEndpointBroken(installed) => {
+            let head = match installed {
+                Some(reference) => format!("ref {} ({} skills)", reference, present),
+                None => format!("{} skills present", present),
+            };
+            println!(
+                "  {} {}  {}",
+                icon_warn().yellow(), head.cyan(),
+                "skills version check returned an HTTP error - the endpoint may have moved".yellow()
+            );
+            println!(
+                "      {} {}",
+                "a refresh uses the same endpoint and may also fail:".dimmed(), CURSOR_SKILLS_INSTALL_CMD.yellow()
+            );
+        }
     }
     if has_legacy_developer_skill(&skills_dir) {
         println!(
@@ -662,7 +747,7 @@ mod tests {
     #[test]
     fn classify_not_installed_when_dir_missing() {
         assert_eq!(
-            classify_skills(false, Some("3.13.73".into()), Some("3.13.73".into())),
+            classify_skills(false, Some("3.13.73".into()), LatestRef::Found("3.13.73".into())),
             SkillsStatus::NotInstalled
         );
     }
@@ -670,7 +755,7 @@ mod tests {
     #[test]
     fn classify_current_on_match() {
         assert_eq!(
-            classify_skills(true, Some("3.13.73".into()), Some("3.13.73".into())),
+            classify_skills(true, Some("3.13.73".into()), LatestRef::Found("3.13.73".into())),
             SkillsStatus::Current("3.13.73".into())
         );
     }
@@ -678,7 +763,7 @@ mod tests {
     #[test]
     fn classify_stale_on_mismatch() {
         assert_eq!(
-            classify_skills(true, Some("3.13.71".into()), Some("3.13.73".into())),
+            classify_skills(true, Some("3.13.71".into()), LatestRef::Found("3.13.73".into())),
             SkillsStatus::Stale { installed: "3.13.71".into(), latest: "3.13.73".into() }
         );
     }
@@ -686,7 +771,7 @@ mod tests {
     #[test]
     fn classify_offline_when_latest_unknown() {
         assert_eq!(
-            classify_skills(true, Some("3.13.73".into()), None),
+            classify_skills(true, Some("3.13.73".into()), LatestRef::Offline),
             SkillsStatus::InstalledUnknownLatest("3.13.73".into())
         );
     }
@@ -694,8 +779,59 @@ mod tests {
     #[test]
     fn classify_unknown_when_no_marker() {
         assert_eq!(
-            classify_skills(true, None, Some("3.13.73".into())),
+            classify_skills(true, None, LatestRef::Found("3.13.73".into())),
             SkillsStatus::UnknownInstalled(Some("3.13.73".into()))
         );
+    }
+
+    // ── The fix: an HTTP error on the check endpoint is NOT offline ──────────
+    #[test]
+    fn classify_endpoint_broken_with_marker() {
+        // A 404 (HttpError) must NOT read as InstalledUnknownLatest ("offline").
+        assert_eq!(
+            classify_skills(true, Some("3.13.73".into()), LatestRef::HttpError),
+            SkillsStatus::CheckEndpointBroken(Some("3.13.73".into()))
+        );
+    }
+
+    #[test]
+    fn classify_endpoint_broken_without_marker() {
+        assert_eq!(
+            classify_skills(true, None, LatestRef::HttpError),
+            SkillsStatus::CheckEndpointBroken(None)
+        );
+    }
+
+    // ── latest_from_curl: exit-code decides HttpError vs Offline ─────────────
+    #[test]
+    fn latest_found_on_success_with_parsed_ref() {
+        assert_eq!(
+            latest_from_curl(true, Some(0), Some("1.2.3".into())),
+            LatestRef::Found("1.2.3".into())
+        );
+    }
+
+    #[test]
+    fn latest_offline_on_success_but_unparseable() {
+        // 200 but no pin marker: benign-unknown, not a broken endpoint.
+        assert_eq!(latest_from_curl(true, Some(0), None), LatestRef::Offline);
+    }
+
+    #[test]
+    fn latest_http_error_on_curl_exit_22() {
+        // curl --fail returns 22 for any HTTP >= 400 (the 404 case).
+        assert_eq!(latest_from_curl(false, Some(22), None), LatestRef::HttpError);
+    }
+
+    #[test]
+    fn latest_offline_on_transport_failure() {
+        // 7 = couldn't connect; any non-22 non-zero exit is a transport failure.
+        assert_eq!(latest_from_curl(false, Some(7), None), LatestRef::Offline);
+    }
+
+    #[test]
+    fn latest_offline_when_curl_never_ran() {
+        // spawn failed / no exit code at all.
+        assert_eq!(latest_from_curl(false, None, None), LatestRef::Offline);
     }
 }

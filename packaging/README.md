@@ -75,6 +75,7 @@ URLs, and every SHA-256, mapped per architecture).
 | Chocolatey| Windows         | `packaging/chocolatey/`                    | `choco install tina4`                             | `release-published` | choco account + `CHOCO_API_KEY` |
 | winget    | Windows         | `packaging/winget/`                        | `winget install Tina4Stack.Tina4`                 | `release-published` | first `wingetcreate new` + `WINGET_TOKEN` |
 | .deb      | Debian/Ubuntu   | `Cargo.toml` `[package.metadata.deb]`      | `apt install ./tina4_<v>_amd64.deb`               | `release.yml`     | none |
+| apt.tina4.com | Debian/Ubuntu | `packaging/apt/`                       | `apt-get install tina4`                           | `apt-publish.sh` (on server) | live — key on the tina4.com box |
 
 `SHA256SUMS`, `cargo`, and `.deb` need nothing new. The rest each need a
 one-time account/repo plus a repository secret; until that secret exists, the
@@ -148,20 +149,23 @@ click-by-click on creating each token/secret, see **[`TOKENS.md`](TOKENS.md)**.
    PRs); save it as the secret `WINGET_TOKEN`.
 3. Every release after the first runs `wingetcreate update` automatically.
 
-### .deb (baseline - already working)
+### .deb (baseline)
 Nothing. The amd64 + arm64 `.deb`s are built and attached to each release by
-`release.yml`. See the follow-up below for a hosted `apt-get install tina4`.
+`release.yml`. `sudo apt install ./tina4_<ver>-1_amd64.deb`.
 
-## Follow-up: a hosted apt repo (`apt-get install tina4`)
+### apt.tina4.com (`apt-get install tina4`) — LIVE
+A self-hosted, GPG-signed reprepro repository on the `tina4.com` box gives true
+`apt-get install tina4` + upgrade-by-name:
 
-The baseline `.deb` is download-then-install and has no upgrade-by-name. A true
-`apt-get install tina4` + `apt upgrade` needs a hosted, signed APT repository:
+```bash
+curl -fsSL https://apt.tina4.com/tina4.asc | sudo gpg --dearmor -o /usr/share/keyrings/tina4.gpg
+echo "deb [signed-by=/usr/share/keyrings/tina4.gpg] https://apt.tina4.com stable main" | sudo tee /etc/apt/sources.list.d/tina4.list
+sudo apt-get update && sudo apt-get install tina4
+```
 
-- Build the same `.deb` (already produced), publish it to a repo signed with a
-  GPG key held by info@tina4.com.
-- Self-host `apt.tina4.com` with `reprepro`/`aptly`, or use a managed OSS host
-  (Cloudsmith / packagecloud). Users add the repo + key once.
-- This is deliberately **not** in this change; it needs a host + signing key.
+Per release, the maintainer runs `apt-publish.sh <ver>` on the server, which
+pulls the release `.debs` and `reprepro includedeb`s them. The signing key lives
+only on the server (never in CI). Full details: [`apt/README.md`](apt/README.md).
 
 An `.rpm` + dnf/yum repo (Fedora/RHEL) is the mirror move if demand appears.
 

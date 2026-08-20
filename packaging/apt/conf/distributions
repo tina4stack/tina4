@@ -1,0 +1,8 @@
+Origin: Tina4
+Label: Tina4 CLI
+Codename: stable
+Suite: stable
+Architectures: amd64 arm64
+Components: main
+Description: Tina4 CLI apt repository (https://apt.tina4.com)
+SignWith: BD0EB84909E29BC5E87E5D0839783C6CB3084433

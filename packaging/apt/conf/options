@@ -1,0 +1,6 @@
+# reprepro reads dists/ + pool/ locations and the gpg homedir from here, so the
+# public tree lands in the Apache docroot while conf/ + db/ + the signing key
+# stay OUTSIDE the webroot (never served).
+outdir /home/tina4/domains/apt.tina4.com/public_html
+gnupghome /home/tina4/domains/apt.tina4.com/reprepro/.gnupg
+verbose

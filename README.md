@@ -60,15 +60,17 @@ Each channel tracks every release automatically. See
 brew install tina4stack/tap/tina4
 ```
 
-### Debian / Ubuntu (.deb)
-
-Every release attaches an `amd64` and an `arm64` `.deb`:
+### Debian / Ubuntu (apt)
 
 ```sh
-ver=3.8.77
-curl -fsSLO https://github.com/tina4stack/tina4/releases/download/v$ver/tina4_${ver}-1_amd64.deb
-sudo apt install ./tina4_${ver}-1_amd64.deb
+curl -fsSL https://apt.tina4.com/tina4.asc | sudo gpg --dearmor -o /usr/share/keyrings/tina4.gpg
+echo "deb [signed-by=/usr/share/keyrings/tina4.gpg] https://apt.tina4.com stable main" | sudo tee /etc/apt/sources.list.d/tina4.list
+sudo apt-get update && sudo apt-get install tina4
 ```
+
+Signed metadata, amd64 + arm64, and `apt-get upgrade` keeps it current. Or grab a
+single `.deb` from a [release](https://github.com/tina4stack/tina4/releases) and
+`sudo apt install ./tina4_<ver>-1_amd64.deb`.
 
 ### From source (requires Rust)
 

@@ -66,6 +66,6 @@ Decisions (2026-08-20, from the maintainer):
 - [x] render script initial BRE-vs-ERE bug (`\+`/`\{64\}` under `sed -E`) — caught by the 9.9.9 propagation test, fixed to ERE
 
 ## Commits
-- (pending — single commit on feature/package-manager-distribution)
+- 74ee343  feat(dist): package-manager distribution (Scoop, Choco, winget, .deb) + auto-publish — merged to main
 
-## Status: Built + locally verified; pending commit + PR to main. External accounts/secrets are the maintainer's one-time setup (see packaging/README.md).
+## Status: DONE (merged to main, 74ee343). All manifests + automation built and locally verified. Remaining is the maintainer's one-time external setup — create the scoop-bucket + homebrew-tap repos, the chocolatey.org account, the first `wingetcreate new`, and add the four repo secrets (see packaging/README.md). Each publish job skips until its secret exists, so releases are safe now. Follow-up: hosted apt.tina4.com repo for `apt-get install tina4`.

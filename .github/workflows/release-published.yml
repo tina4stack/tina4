@@ -144,7 +144,7 @@ jobs:
         run: |
           set -eu
           mkdir -p bucket-repo/bucket
-          cp rendered/scoop/tina4.json bucket-repo/bucket/tina4.json
+          cp rendered/packaging/scoop/tina4.json bucket-repo/bucket/tina4.json
           cd bucket-repo
           if git diff --quiet; then echo "bucket already current"; exit 0; fi
           git config user.name  "tina4stack"
@@ -207,7 +207,7 @@ jobs:
           CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
         run: |
           $ErrorActionPreference = 'Stop'
-          Set-Location rendered/chocolatey
+          Set-Location rendered/packaging/chocolatey
           choco pack tina4.nuspec
           $pkg = Get-ChildItem -Filter 'tina4.*.nupkg' | Select-Object -First 1
           choco push $pkg.FullName --source https://push.chocolatey.org/ --api-key $env:CHOCO_API_KEY

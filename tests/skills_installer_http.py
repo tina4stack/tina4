@@ -7,6 +7,7 @@ import argparse
 import http.server
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import threading
@@ -74,9 +75,18 @@ class SkillHandler(http.server.BaseHTTPRequestHandler):
         print("http:", message % args, flush=True)
 
 
-def verify_install(skill_home: Path) -> None:
+def installer_default_ref(repo: Path) -> str:
+    """The expected ref is the installer's OWN default, so this test tracks the
+    installer instead of drifting against a hardcoded version."""
+    text = (repo / "install-skills.sh").read_text()
+    match = re.search(r"TINA4_SKILLS_REF:-([0-9][0-9.]*)", text)
+    assert match, "could not read the default ref from install-skills.sh"
+    return match.group(1)
+
+
+def verify_install(skill_home: Path, expected_ref: str) -> None:
     destination = skill_home / ".agents" / "skills"
-    assert (destination / ".tina4-skills-ref").read_text().strip() == "3.13.105"
+    assert (destination / ".tina4-skills-ref").read_text().strip() == expected_ref
     for skill, references in INSTALLS.items():
         assert (destination / skill / "SKILL.md").is_file(), skill
         for reference in references:
@@ -151,7 +161,7 @@ def run_installer(kind: str, mode: str, repo: Path) -> None:
                 ]
             print(f"running {kind} installer in {mode} mode", flush=True)
             subprocess.run(command, cwd=repo, env=env, check=True)
-            verify_install(skill_home)
+            verify_install(skill_home, installer_default_ref(repo))
     finally:
         server.shutdown()
         server.server_close()

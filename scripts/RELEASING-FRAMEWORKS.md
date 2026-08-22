@@ -24,10 +24,12 @@ retagging, which invalidates trust anchors and looks careless.
 4. Docs              landing page, release notes, book chapters
 5. CLI (optional)    only when the Rust CLI needs new bytes
 6. Verify            confirm every registry actually got the release
+7. Close issues      sweep + close what this release solved
 ```
 
-Only step 5 needs the SimplySign session. Steps 0 to 4 and 6 are just git
-+ shell, so they can run in one sweep. Sign only when the CLI moves.
+Only step 5 needs the SimplySign session. Steps 0 to 4, 6, and 7 are just
+git + shell + `gh`, so they can run in one sweep. Sign only when the CLI
+moves.
 
 ## 0. Preflight
 
@@ -358,6 +360,59 @@ curl -sf https://tina4.com/ | grep -oE "Current framework release: 3\.13\.[0-9]+
 ```
 
 Every check must pass. If ANY check fails, the release is not done.
+
+## 7. Close resolved issues
+
+Once every registry is live, sweep the open issues across all five repos.
+An issue this release actually solves gets closed with a comment naming
+the shipped version + the ADR / fixture invariants that lock the fix.
+An issue this release does NOT solve stays open; do not close what the
+release did not fix (a "fixed by 3.13.<ver>" comment on a stale issue
+misleads future readers). The distinction between owner-authored and
+other-authored issues is deliberate (memory `feedback_github_issues`):
+
+- **Andre's own issues that this release resolves**: close with a comment
+  that names the shipped version, points at the commit / tag, links the
+  ratifying ADR, and cites the fixture invariants that gate the fix. If
+  the fix is user-visible (behavioural change or new option), quote the
+  new call shape.
+- **Anyone else's issue this release resolves**: comment with the same
+  facts but LEAVE OPEN so the reporter can confirm and close themselves.
+  A verified-by-me close on someone else's report often reads as
+  dismissive; a comment invites verification.
+- **Issues this release does not solve**: leave alone. A drive-by
+  "still not this release" comment is noise.
+
+```bash
+# Enumerate open issues across every repo the release touched.
+for r in tina4-python tina4-php tina4-ruby tina4-nodejs tina4-js; do
+  echo "===== $r"
+  gh issue list --repo tina4stack/$r --state open --limit 20 \
+    --json number,title,author \
+    --jq '.[] | "  #\(.number) [\(.author.login)] \(.title)"'
+done
+
+# For each issue that this release solves, comment then (if owner-authored) close.
+# Use gh issue comment/close with a HEREDOC so the markdown formats cleanly:
+
+gh issue comment <NN> --repo tina4stack/<repo> --body "$(cat <<'EOF'
+Fixed and shipped in **tina4-<lang> 3.13.<ver>** (commit `<sha>`, tag `3.13.<ver>`).
+
+<one paragraph naming the specific change and how a caller uses it>
+
+Ratified in [ADR-XXXX](https://github.com/tina4stack/tina4-documentation/blob/main/plan/v3/decisions/ADR-XXXX.md)
+with fixture invariants `<invariant-ids>`. Proven live in all four
+backends against the shared fixture server, no mocks. Live on <registry>:
+<url>
+EOF
+)"
+
+# Owner-authored only:
+gh issue close <NN> --repo tina4stack/<repo> --reason completed
+```
+
+Skip this step entirely if the release is a docs-only or infra-only cut
+that does not close any user-visible ticket.
 
 ## Failure modes and what they teach
 

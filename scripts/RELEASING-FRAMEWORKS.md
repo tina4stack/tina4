@@ -451,6 +451,36 @@ once.
   number. If origin has taken it, park local under a branch marker
   (`git branch save/…`) and take the next free slot.
 
+- **Subagent exits with npm install still running in the background**:
+  seen twice on 3.13.114 Node port. The tina4-dev worker did all the
+  code + tests but bailed after triggering `rm -rf package-lock.json
+  node_modules && npm install --include=optional` in the background,
+  reporting "Waiting for npm install." as its final line. Result: 13
+  files modified, `package-lock.json` deleted, `node_modules/` absent,
+  nothing committed. Main session had to complete the install, build,
+  and commit manually. Rule for parallel-port prompts: the agent's own
+  `npm install` MUST finish (foreground, blocking) before the agent's
+  final commit + push AND before its final report; do not let the
+  agent return with a background child still running.
+
+- **Reference-before-ports vs parallel-with-ports**: `feedback_python_master`
+  says Python is the reference. On 3.13.113 I spawned Python first and
+  the 3 ports plus tina4-js in parallel; Python landed second, so the
+  ports built from the ADR alone. Worked fine because the ADR was
+  strict enough. On 3.13.114 the same shape held: Ruby and Node ports
+  finished before Python's commit was visible on origin/v3, both
+  correctly noting "implemented from ADR alone; reconcile after Python
+  lands". Wire matched. When the ADR is strict, parallel-with-ports is
+  faster than reference-first-then-ports and does not sacrifice parity.
+  Reconcile step: after all four land, diff wire samples across the
+  four contract-test fixtures - if bytes match, no reconcile needed.
+
+- **Batch publish watchers**: don't spawn one `gh run watch` per repo.
+  A single background bash task can `gh run watch --exit-status` all
+  four sequentially, then curl every registry, then print one summary.
+  Saves 4x notifications and 4x re-attaches. See `bb5eq0z23` pattern
+  from 3.13.114 for the exact shape.
+
 ## The runbook you want next: `scripts/framework-release.sh`
 
 Every step above is machine-checkable. A companion script would:

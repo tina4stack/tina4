@@ -168,43 +168,69 @@ Packagist mirrors GitHub via webhook; give it a minute.
 
 ## 3. Installer
 
-The two `install-skills.sh` files must move together. Skip either and
-`curl -fsSL https://tina4.com/install-skills.sh | sh` still installs the
-old skills.
+FOUR files must move together, in three repos. Skip any and either
+`curl -fsSL https://tina4.com/install-skills.sh | sh` or the Windows
+`irm ... | iex` path still fetches the old skills - or fetches a signed
+installer that points at an old tag, which is worse.
 
 ```bash
-# 3a. Bootstrap on tina4.com
+# 3a. tina4.com bootstrap for both platforms
 cd tina4-documentation
 sed -i.bak 's|tina4/3\.13\.<old>|tina4/3.13.<new>|g; \
             s|tina4@3\.13\.<old>|tina4@3.13.<new>|g' \
-  docs/public/install-skills.sh
-rm docs/public/install-skills.sh.bak
-git add docs/public/install-skills.sh
+  docs/public/install-skills.sh docs/public/install-skills.ps1
+rm docs/public/install-skills.sh.bak docs/public/install-skills.ps1.bak
+git add docs/public/install-skills.sh docs/public/install-skills.ps1
 git commit -m "install-skills: bootstrap fetches 3.13.<new> (was 3.13.<old>)"
 git push origin main
 
-# 3b. Real installer on tina4
+# 3b. Real installer .sh on tina4
 cd ../tina4
 sed -i.bak 's/ref="${TINA4_SKILLS_REF:-3\.13\.<old>}"/ref="${TINA4_SKILLS_REF:-3.13.<new>}"/' \
   install-skills.sh
-sed -i.bak 's/"3\.13\.<old>"/"3.13.<new>"/g' tests/skills_installer_http.py
-rm install-skills.sh.bak tests/skills_installer_http.py.bak
-git add install-skills.sh tests/skills_installer_http.py
-git commit -m "install-skills: bump ref 3.13.<old> -> 3.13.<new>"
+rm install-skills.sh.bak
+git add install-skills.sh
+git commit -m "install-skills: bump .sh ref 3.13.<old> -> 3.13.<new>"
 git push origin main
 
-# 3c. Tag the tina4 repo at the framework version (no v prefix here —
-# the shell script installer track uses bare version tags to match what
-# the bootstrap fetches; the CLI track uses vX.Y.Z tags separately).
+# 3c. Real installer .ps1 on tina4 - MUST BE RE-SIGNED with the SAME edit,
+# or Windows CI (.github/workflows/ci.yml) fails signature verification
+# AND the tina4.com shim refuses to run the installer at all. Signing on
+# macOS with an active SimplySign session:
+
+# Open SimplySign Desktop and log in (Code Infinity EV cloud card mounted)
+./scripts/sign-skills-installer-mac.sh --check   # cheap dry run
+./scripts/sign-skills-installer-mac.sh           # actually signs .ps1 in place
+
+# Verify the signature independently before committing
+osslsigncode verify install-skills.ps1           # last line: Succeeded
+
+sed -i.bak 's/"3\.13\.<old>"/"3.13.<new>"/g' install-skills.ps1
+# ^ was already done by the signing step? Confirm the ref is 3.13.<new>
+grep TINA4_SKILLS_REF install-skills.ps1 | head -1
+rm -f install-skills.ps1.bak
+
+git add install-skills.ps1
+git commit -m "install-skills: bump .ps1 ref 3.13.<old> -> 3.13.<new> (re-signed)"
+git push origin main
+
+# 3d. Tag the tina4 repo at the framework version, ONCE both .sh and .ps1
+# are on main. Bare tag (no v prefix) - the shell installer track uses
+# these; the CLI track uses vX.Y.Z tags separately.
 git tag -a 3.13.<new> -m "Release 3.13.<new>"
 git push origin 3.13.<new>
 ```
+
+`tests/skills_installer_http.py` reads the default ref out of
+`install-skills.sh` at runtime, so no test assertion needs bumping here.
+That trap (bumping the .sh and forgetting the test) is closed.
 
 Jenkins deploys tina4-documentation on push to main. Verify the bootstrap
 is live once the deploy lands:
 
 ```bash
 curl -sf https://tina4.com/install-skills.sh | grep primary_url
+curl -sf https://tina4.com/install-skills.ps1 | osslsigncode verify /dev/stdin | tail -3
 ```
 
 ## 4. Documentation
@@ -392,6 +418,38 @@ once.
   values. The cert lives at `secrets/codeinfinity-fullchain.pem` in this
   repo. If the id needs re-discovery, section 5 shows the pkcs11-tool
   command.
+
+- **`install-skills.ps1` sign path was thought to be Windows-only**: an
+  older note said the .ps1 needed `signtool.exe` from the Windows SDK, so
+  every macOS-driven release ended with "bump .sh only, defer .ps1 to a
+  Windows box". Not true. `scripts/sign-skills-installer-mac.sh` uses
+  `jsign` + the SimplySign PKCS#11 module to sign a PowerShell script's
+  Authenticode block on macOS, same session as the CLI .exe signing. Sign
+  the .ps1 in the SAME release, never later - Windows CI + the tina4.com
+  shim both reject an unsigned or stale-signed installer.
+
+- **Node lockfile `--include=optional` (not just `--package-lock-only`)**:
+  the 3.13.113 publish re-hit the esbuild trap. Fixing takes a full
+  regenerate that ACTUALLY installs the transitive tree so npm records
+  every platform binary: `rm -rf package-lock.json node_modules && npm
+  install --include=optional`. The earlier `--package-lock-only` flavour
+  captured only the local platform.
+
+- **Parallel-agent fan-out for 4-language parity**: when the change touches
+  the shared contract (ADR + fixture), a single serial "Python master
+  then port to 3 others" burns hours of wall time. The 3.13.113 pattern
+  worked: write the ADR + fixture first (they ARE the spec), then spawn
+  one tina4-dev subagent per framework repo simultaneously, each on its
+  own worktree so `feedback_no_parallel_workers_one_tree` is satisfied.
+  Verify each independently on completion, then release plumb once all 4
+  CIs are green. Half the wall-clock, no serial handoff.
+
+- **Docs repo ADR-number race**: my local `plan/v3/decisions/ADR-0058.md`
+  claimed a slot that origin had already given to RBAC while I worked
+  offline. Rebase died on conflict. Rule: `git fetch && git log
+  origin/main..HEAD --oneline plan/v3/decisions/` BEFORE claiming a
+  number. If origin has taken it, park local under a branch marker
+  (`git branch save/…`) and take the next free slot.
 
 ## The runbook you want next: `scripts/framework-release.sh`
 

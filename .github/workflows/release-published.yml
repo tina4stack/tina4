@@ -239,7 +239,23 @@ jobs:
           }
           $tag = '${{ needs.render.outputs.tag }}'
           $url = "https://github.com/tina4stack/tina4/releases/download/$tag/tina4-windows-amd64.exe"
-          & $wc update Tina4Stack.Tina4 `
+          # `wingetcreate update` can only bump a package that ALREADY exists in
+          # microsoft/winget-pkgs. Until the first-ever New-Package PR is merged
+          # by a Microsoft moderator, the identifier is absent and update reports
+          # "... was not found" - expected for the initial release, not a build
+          # failure. Treat that one case as a tolerable skip; fail on anything else.
+          $ErrorActionPreference = 'Continue'
+          $out = & $wc update Tina4Stack.Tina4 `
               --version '${{ needs.render.outputs.version }}' `
               --urls $url `
-              --submit --token $env:WINGET_TOKEN
+              --submit --token $env:WINGET_TOKEN 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          if ($code -ne 0) {
+            if ($out -match 'was not found') {
+              Write-Warning "Tina4Stack.Tina4 is not in winget-pkgs yet (first New-Package PR pending a Microsoft moderator). Skipping the automated update until it merges."
+              exit 0
+            }
+            Write-Error "wingetcreate update failed (exit $code)"
+            exit 1
+          }

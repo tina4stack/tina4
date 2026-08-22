@@ -253,6 +253,29 @@ Authoritative guide (install commands, one-time per-channel setup, secrets):
 **`packaging/README.md`**. A hosted `apt.tina4.com` repo for `apt-get install
 tina4` is a documented follow-up there.
 
+## Releasing the skills installer (install-skills.ps1 is EV-signed)
+
+`install-skills.ps1` is a repo tree file served to users at a tag (raw
+githubusercontent + the tina4.com shim), and BOTH the CI gate
+(`.github/workflows/ci.yml`) and the runtime shim require a VALID Code Infinity
+Authenticode signature. It is marked `binary` in `.gitattributes` so its exact
+signed bytes survive commit/checkout.
+
+RULE: any edit to `install-skills.ps1` (e.g. bumping the default
+`TINA4_SKILLS_REF` when the skills change) INVALIDATES the signature. Re-sign it
+in the SAME change or CI goes red and the Windows installer fails its own
+signature check:
+
+  1. Open SimplySign Desktop and log in (mounts the Code Infinity EV cloud card).
+  2. `pwsh ./scripts/sign-installers.ps1`   (signs + verifies in place; guards it is the Code Infinity cert)
+  3. `git add install-skills.ps1`, commit, then (re)create the skills tag
+     `3.13.NNN` on THIS repo at the signed commit.
+
+`install-skills.sh` needs no signature. The tina4.com entry-point shims live in
+`tina4-documentation/docs/public/install-skills.{sh,ps1}` and pin the tag to
+fetch, so bump those to the new skills tag too. The CLI `.exe` is signed
+separately at release by `scripts/sign-release.ps1`.
+
 ## First Principle: Documentation Matches Code Reality
 
 **This rule overrides everything else in this file.**

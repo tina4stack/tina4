@@ -65,6 +65,12 @@ fn known_vars() -> Vec<(&'static str, &'static str, &'static str, &'static str)>
         ("TINA4_DATABASE_FIREBIRD_PATH", "", "Firebird database file path override (default: unset)", "Database"),
         ("TINA4_ORM_PLURAL_TABLE_NAMES", "false", "Pluralize ORM table names", "Database"),
 
+        // Graph Database
+        ("TINA4_GRAPH_URL", "", "Graph database URL; the scheme selects the engine (ultipa://, neo4j://, bolt://, memgraph://, http(s):// for ArangoDB). Empty = graph layer disabled", "Graph Database"),
+        ("TINA4_GRAPH_USERNAME", "", "Graph database username", "Graph Database"),
+        ("TINA4_GRAPH_PASSWORD", "", "Graph database password", "Graph Database"),
+        ("TINA4_GRAPH_CONNECT_TIMEOUT", "10", "Graph connect timeout in seconds (<= 0 = unbounded)", "Graph Database"),
+
         // Cache
         ("TINA4_DB_CACHE", "false", "Enable the persistent cross-request query cache", "Cache"),
         ("TINA4_AUTO_CACHING", "false", "Enable request-scoped query caching", "Cache"),
@@ -163,6 +169,12 @@ fn known_vars() -> Vec<(&'static str, &'static str, &'static str, &'static str)>
         ("TINA4_MONGO_PASSWORD", "", "MongoDB queue password", "Queue"),
         ("TINA4_MONGO_DB", "tina4", "MongoDB queue database", "Queue"),
         ("TINA4_MONGO_COLLECTION", "tina4_queue", "MongoDB queue collection", "Queue"),
+        ("TINA4_QUEUE_VISIBILITY_TIMEOUT", "300", "Seconds a popped job stays reserved before at-least-once reclaim (<= 0 disables reclaim)", "Queue"),
+        ("TINA4_KAFKA_SECURITY_PROTOCOL", "PLAINTEXT", "Kafka security protocol: PLAINTEXT, SSL, SASL_PLAINTEXT, SASL_SSL", "Queue"),
+        ("TINA4_KAFKA_SASL_MECHANISM", "", "Kafka SASL mechanism (e.g. PLAIN, SCRAM-SHA-256); empty = no SASL", "Queue"),
+        ("TINA4_KAFKA_SASL_USERNAME", "", "Kafka SASL username", "Queue"),
+        ("TINA4_KAFKA_SASL_PASSWORD", "", "Kafka SASL password", "Queue"),
+        ("TINA4_KAFKA_SSL_CA_LOCATION", "", "Kafka CA certificate path for TLS brokers/proxies", "Queue"),
 
         // WebSocket
         ("TINA4_WS_BACKPLANE", "", "WebSocket backplane selector: redis or nats (empty = local-only)", "WebSocket"),
@@ -170,6 +182,13 @@ fn known_vars() -> Vec<(&'static str, &'static str, &'static str, &'static str)>
         ("TINA4_WS_ALLOWED_ORIGINS", "", "WebSocket origin allow-list (empty = allow all)", "WebSocket"),
         ("TINA4_WS_IDLE_TIMEOUT", "0", "WebSocket idle reaper timeout in seconds (0 = disabled)", "WebSocket"),
         ("TINA4_WS_MAX_FRAME_SIZE", "1048576", "Maximum WebSocket frame size in bytes (1MB)", "WebSocket"),
+
+        // Realtime (WebRTC)
+        ("TINA4_RTC_BACKEND", "mesh", "Realtime media backend; only mesh ships today (unknown value falls back to mesh, never fails boot)", "Realtime"),
+        ("TINA4_RTC_STUN_URLS", "stun:stun.l.google.com:19302", "Comma-separated STUN URLs", "Realtime"),
+        ("TINA4_RTC_TURN_URL", "", "Comma-separated TURN URLs; enables TURN when set together with the secret", "Realtime"),
+        ("TINA4_RTC_TURN_SECRET", "", "coturn use-auth-secret shared secret for ephemeral TURN credentials", "Realtime"),
+        ("TINA4_RTC_TURN_TTL", "3600", "Ephemeral TURN credential lifetime in seconds", "Realtime"),
 
         // GraphQL
         ("TINA4_GRAPHQL_ENDPOINT", "/graphql", "GraphQL endpoint path", "GraphQL"),
@@ -196,6 +215,11 @@ fn known_vars() -> Vec<(&'static str, &'static str, &'static str, &'static str)>
         // AI / Dev-Admin — AI
         ("TINA4_AI_URL", "http://localhost:11437/api/chat", "Dev-admin AI chat endpoint URL", "AI"),
         ("TINA4_AI_MODEL", "qwen2.5-coder:14b", "AI model used for plan generation", "AI"),
+        ("TINA4_AI_PROVIDER", "local", "App AI provider: local, openai, or anthropic", "AI"),
+        ("TINA4_AI_KEY", "", "Hosted-provider key; required for openai/anthropic, never for local", "AI"),
+        ("TINA4_AI_TIMEOUT", "60", "Total request deadline in seconds, including retries and body reads", "AI"),
+        ("TINA4_AI_CONNECT_TIMEOUT", "10", "Connection-establishment deadline in seconds", "AI"),
+        ("TINA4_AI_MAX_RETRIES", "2", "Retries before output, only for connection errors, 429, and 5xx", "AI"),
         ("TINA4_RAG_URL", "http://localhost:11438", "RAG service URL", "AI"),
         ("TINA4_RAG_TOPK", "4", "RAG top-K retrieval count", "AI"),
         ("TINA4_MCP_URL", "https://mcp.tina4.com", "Official Tina4 framework MCP base URL (tina4_context grounding)", "AI"),

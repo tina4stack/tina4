@@ -38,6 +38,14 @@ tina4 install <target>           Install a language runtime or tina4-js
 tina4 generate <what> <name>     Generate model, route, migration, middleware
 tina4 migrate                    Run database migrations
 tina4 test                       Run tests
+tina4 lint [--fix]               Lint the project's src/. Forwarded to the framework
+                                 CLI. Zero new dependency: runs the project's OWN
+                                 linter if it has one (ruff / rubocop / eslint /
+                                 phpcs — detected, never installed), else the
+                                 runtime's built-in syntax check (py compile /
+                                 ruby -c / node --check / php -l). Exit 0 clean,
+                                 non-zero on findings (CI gate). --fix applies safe
+                                 autofixes when the detected tool supports them.
 tina4 routes                     List registered routes
 tina4 metrics                    Report code-health top offenders (complexity, large files,
                                  low maintainability, missing test references, duplication).

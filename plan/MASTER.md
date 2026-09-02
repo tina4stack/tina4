@@ -30,6 +30,8 @@ plan-driven scaffold-first + resource-naming fix (#14), and init-defaults-to-SQL
 
 | 14 | Cursor skills + client `v3.8.69` release | [cursor-skills-installation.md](cursor-skills-installation.md) | Complete - menu-driven Claude/Codex/Cursor skills, automatic refresh, signed release |
 
+| 15 | `tina4 lint` — unified lint across all 4 (zero new deps; runtime syntax-check baseline + opt-in BYOL linter) | [lint-command.md](lint-command.md) | Proposed — awaiting nod (esp. zero-dep/opt-in design) |
+
 ## Rules of the method
 - One thread at a time; scope it in its plan file first, get a nod, then build.
 - Tests first, real (no mocks), positive + negative — before the code.

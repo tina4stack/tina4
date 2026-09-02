@@ -238,9 +238,12 @@ enum Commands {
 
     /// Any command the client doesn't own is forwarded verbatim to the detected
     /// framework CLI: `tina4 <cmd> <args...>` -> `<framework-cli> <cmd> <args...>`.
-    /// This covers migrate/migrate:create/seed/test/routes/queue/
+    /// This covers migrate/migrate:create/seed/test/lint/routes/queue/
     /// generate/console and anything a framework adds later. The framework owns
     /// arg parsing and rejects unknowns; dispatch pays zero manifest cost.
+    /// `tina4 lint` runs the project's own linter if it has one (ruff/rubocop/
+    /// eslint/phpcs), else the runtime's zero-dep syntax check — it installs
+    /// nothing (`--fix` applies safe autofixes when the detected tool supports them).
     #[command(external_subcommand)]
     External(Vec<String>),
 }

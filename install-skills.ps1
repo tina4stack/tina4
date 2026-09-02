@@ -73,6 +73,9 @@ function Test-Tina4Checksums {
   # truncated download can never reach a skills directory. Mirrors the same step in
   # install-skills.sh. install-skills.ps1 is itself EV-signed; this checks the payload.
   $manifest = Join-Path ([System.IO.Path]::GetTempPath()) ("tina4-skills-" + [guid]::NewGuid() + ".sha256")
+  # SHA256 via .NET, not Get-FileHash: that cmdlet is absent on some Windows
+  # PowerShell hosts (CommandNotFoundException), while .NET is always present.
+  $sha256 = [System.Security.Cryptography.SHA256]::Create()
   try {
     Invoke-Tina4Download -Urls @(
       "$primaryRoot/tina4/$ref/skills.sha256",
@@ -92,12 +95,14 @@ function Test-Tina4Checksums {
       if (-not (Test-Path -LiteralPath $path)) {
         throw "A skill file named in the manifest was not downloaded: $($matches[2])"
       }
-      if ((Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash -ine $expected) {
+      $actual = [System.BitConverter]::ToString($sha256.ComputeHash([System.IO.File]::ReadAllBytes($path))).Replace('-', '')
+      if ($actual -ine $expected) {
         throw "A skill file failed checksum verification (tampering or a stale manifest) -- nothing installed: $($matches[2])"
       }
     }
     Write-Host "  verified $($lines.Count) skill files against skills.sha256 (ref $ref)" -ForegroundColor Green
   } finally {
+    $sha256.Dispose()
     Remove-Item -LiteralPath $manifest -Force -ErrorAction SilentlyContinue
   }
 }
@@ -158,8 +163,8 @@ Write-Host "  Done - seven skills installed for $target (ref $ref). Restart your
 # SIG # Begin signature block
 # MIIoPAYJKoZIhvcNAQcCoIIoLTCCKCkCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBrUqpJX4jwYeFA
-# OS/fJ5yvHq4zLJ38mvvJbpmLOXKQhaCCINgwggbNMIIEtaADAgECAhEAu/DMtbe4
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBwZIfbmLPL+S4p
+# CczCf0F/wlOix8LcRzXbQaXkAzNCUqCCINgwggbNMIIEtaADAgECAhEAu/DMtbe4
 # Mf0hrjJ3iuQMiTANBgkqhkiG9w0BAQwFADCBgDELMAkGA1UEBhMCUEwxIjAgBgNV
 # BAoTGVVuaXpldG8gVGVjaG5vbG9naWVzIFMuQS4xJzAlBgNVBAsTHkNlcnR1bSBD
 # ZXJ0aWZpY2F0aW9uIEF1dGhvcml0eTEkMCIGA1UEAxMbQ2VydHVtIFRydXN0ZWQg
@@ -339,36 +344,36 @@ Write-Host "  Done - seven skills installed for $target (ref $ref). Restart your
 # LjE4MDYGA1UEAxMvQ2VydHVtIEV4dGVuZGVkIFZhbGlkYXRpb24gQ29kZSBTaWdu
 # aW5nIDIwMjEgQ0ECEFIdiL99yRWe40RYYdsSYcYwDQYJYIZIAWUDBAIBBQCggYgw
 # GQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYJKoZIhvcNAQkFMQ8XDTI2MDkw
-# MjIyMDc0MVowHAYKKwYBBAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcN
-# AQkEMSIEIG6lNStpKWNYq+iPqAGX9t1+FNN6X0bZZfFqGsjLuD3XMA0GCSqGSIb3
-# DQEBAQUABIIBgJlXUu6SsskCScMZUzlKhHqNoeoSqfrAIQaYPYXZrxnEXjZ/iJEI
-# 1CNj3zoSLtyhakzFciSYkGFm5At/7LyPPCydAs3TiRE5Eja/RFvhSoXivxRrmVmW
-# +BKBhjilc07a0/CqZ+2L9V6GTovs5tK+iLekqTzC8E3qtNZSQ+lSiI+eGInChbcH
-# R3efN/hdfqVNwj6dwHINgA1VBtfkT+XdUyRnLd8KH3Sp80AUpDHDRLI0yy8cAG1I
-# Rr9YVgpPbJCQEJ8cHFgyp0SmuZIeku94ENEs4AMZ/KcGKUSYB6Z7QpExkGRkDy6p
-# 42KUMfYonXBcQM8yowSLD2LvBU1zespIleDCdbOwnqWTxQ6NRT41bHtCU8+DLHNg
-# qzN6bFPA3h2Z0CG7sMibo4ZAOSKGrsn3bBAHE/GEehtuqteAXAUAes9TZe09fh99
-# pAce3iad7nM5i+e+NtCSoIvtoHbdPaNb3xLb3kpq7+oBQ5rVl+akbn4hFNB+fsLY
-# wKY0W3Af/w5mBKGCBAIwggP+BgkqhkiG9w0BCQYxggPvMIID6wIBATBqMFYxCzAJ
+# MjIyMTQyOFowHAYKKwYBBAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcN
+# AQkEMSIEIDs8Zxh8h+idChJbkjTAMgwpZpsI8gSdcOKQK7Iz80r3MA0GCSqGSIb3
+# DQEBAQUABIIBgJIPZC80OLw+09NPgCY98dSgJ1Wr7FfNTm/83Vpt+eR9H5mzKezK
+# +k5hFCKr/8gSIUZGhp+G8GQo09VWB1O1hYEpEwAPqgYhjz9O0IA0RTKK5XjOwCYM
+# VIzYnIWKaq5EwuGmXVh9O6yjO1vwIo+epkiGRxhG3v7Xpg7DpniUu6cd27sS96fd
+# OUXUfUuY0ANT5IoOR3Tug+6aAAfUrawgLE9iEUlQBOapmNeMO2yLqISXySltA9y6
+# ltHFFZgMUwmOjSYmpA3x7ZGi9Dpti1ixcTQIuBHxpEgjqDdkP1es+po+VeYMbFAL
+# VeJH2jMuyeC4nXwr7Cqm9oYMYsqj+nl8MBOPwCWkyR8twynclUkPCk/IIor1riLn
+# 2mgZXbutS/a1GG0J/df23kDF65tClyTrjJ9rvX3sWQd26fa3FYAFEasQt5O+ZI5e
+# cP089YniKiKcfvpJUpcNuKtPyiWaL/SwZVp5DIu3Q02HicxeuyIBzNXz8dTaesL8
+# MvKbc80+w0P1+aGCBAIwggP+BgkqhkiG9w0BCQYxggPvMIID6wIBATBqMFYxCzAJ
 # BgNVBAYTAlBMMSEwHwYDVQQKExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAi
 # BgNVBAMTG0NlcnR1bSBUaW1lc3RhbXBpbmcgMjAyMSBDQQIQKPB3wRw2vf5fdDJH
 # cCcuAzANBglghkgBZQMEAgIFAKCCAVYwGgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJ
-# EAEEMBwGCSqGSIb3DQEJBTEPFw0yNjA5MDIyMjA3NDVaMDcGCyqGSIb3DQEJEAIv
+# EAEEMBwGCSqGSIb3DQEJBTEPFw0yNjA5MDIyMjE0MzNaMDcGCyqGSIb3DQEJEAIv
 # MSgwJjAkMCIEIIW+kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EFJcQ8MD8GCSqG
-# SIb3DQEJBDEyBDCx4fqqcqdSMmnl2XMj9+aTtuwBQ7bnTrYEiPMqt++1LuFKD376
-# 2Tm8Pg0KQViCo+AwgZ8GCyqGSIb3DQEJEAIMMYGPMIGMMIGJMIGGBBRXFGhBDKha
+# SIb3DQEJBDEyBDAMSqYDxqd0s3mpVT/KuQY08TFXt09dKvtD0KxIbsOMQch6YY9z
+# x23R1K/vM+ZGpjcwgZ8GCyqGSIb3DQEJEAIMMYGPMIGMMIGJMIGGBBRXFGhBDKha
 # 80JO+RZKUTYQ9NONmDBuMFqkWDBWMQswCQYDVQQGEwJQTDEhMB8GA1UEChMYQXNz
 # ZWNvIERhdGEgU3lzdGVtcyBTLkEuMSQwIgYDVQQDExtDZXJ0dW0gVGltZXN0YW1w
 # aW5nIDIwMjEgQ0ECECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcNAQEBBQAEggIA
-# KLmW6oIsZveSsRoyyL2TBnhKskgTf291zaXLVOngr4zxr5BRjSPpftiaWFrHctxF
-# Ogg7en8KyrPe4zxUqdHbNdhJh8AihUJlGE6MLj47bcAU2CXnMqIwJAtFVnXQglVj
-# v7Dx7Ao1D42xC2L6xPvfubu53kjuXsHwXWl0ENF/7SbHCKAH8ZDsTbdcO66+yB5G
-# lBJG/dq0MYelgP+SR9JiEtxT6/9D3O3c1q7DrxpKF+60QNaMvvEBGNMI9lIFTYmw
-# UBQ/UaXWsV2Uo0bZwjVj0JnZe1GvANiydIUmhj6wAu547YiwIG0muVYGXKEpUHrN
-# oMTn6DYRVLkPy7BEWw1REE9MqkAqRGm2T2JQS1oPJDL6ktZa0juTDNxa7ef04w3D
-# rnHP8Nqap01BFI0jEozfaa64pv2O2eDVWOIg3jGJW+DzsX1GSbjb4aeC4cW92RtA
-# j+u7pjFtq2JzqykRcpqEp+8+ehRZXifUsLPskOa9kh4k6FDmeqoN2Dso+ONQqOpS
-# alsxgD/y7EXNZQ7HqUbTQOL/V5HF5Smd1fWweTsszUJ0WOuZPRkn5CYlL4R7Hn5L
-# 8Nw7EMk1CQsoGyit6s7LASd3z6x5A2imm/jzQJJWKIfadfZ+LtfPvrWVddh2wzMr
-# 1eizY6IYlQqACLLjGSqZYZEVM+fFSbTv3kNG8qM4fw0=
+# AVc7fS31+XoPLdB4kK1NGVhSd/NE99xK5jynxxRP1Rmwih8oZGilnodozgG7ann2
+# EhnBP/C4tQnxECMkmYtLOPyFtEdaGU3baE6/AAjjeAkn/JYr94CkNis6gvTQRxA8
+# wUzH8+czWVeuiKYScG/M2y/+95gcPy3QbjRM2t7FTUM56/WJpEWQ50yy4PZzHk4E
+# OdT/pyJ7jn34cW2ltECum3Js3iG/ecngRajxyMNqqLMyPs3Luh9ToIrqJHsdmOXg
+# sp2imGd4GUv54fSfIKhG7LdKXzeVm+OVXzl9TJHGyMk3Ejv7vzSUXOBv8KM/CBLe
+# uhXrSid08aVF5ypzQIuLOj1rxsFBETOfHk4vgQ3P1KGrTU3wB8D0Tmaddl1T/veM
+# EVPCV2qt2FPQDSZKaZwqzp/6KfC+yPo0h1J3Bv4b21jFGpGBIO++4nLdeTA7qvr5
+# MU2NxuXmkEAWaz5PmvMIKlm40JSwRFzu8gl6xNWZ31WNncpTfow/PniYjLPnNE9s
+# 6uosH63lnRmmrHC4urTMZTSpK7eFxhSBbGjRzYpXLhqRHuKNj0APag2hG9L+q4AZ
+# wl5SNxbArz/rvdyXqSTR8r2/qTYbOKYQvR6Pjthj52rBZBzGpFE+nJki5xsVTgs8
+# 6242hx0z11JIEKVZ9s+J6EqQhEPAmFj9Ou6G6PpLDzM=
 # SIG # End signature block

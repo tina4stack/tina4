@@ -20,7 +20,7 @@ set -eu
 
 # Pin skills to a released tag, not a moving branch, so an install is reproducible.
 # Bump this when the skills change in a new release. Override with TINA4_SKILLS_REF.
-ref="${TINA4_SKILLS_REF:-3.13.123}"
+ref="${TINA4_SKILLS_REF:-3.13.129}"
 target="${TINA4_SKILLS_TARGET:-}"
 skill_home="${TINA4_SKILLS_HOME:-$HOME}"
 primary_root="${TINA4_SKILLS_PRIMARY_ROOT:-https://raw.githubusercontent.com/tina4stack}"
@@ -42,7 +42,8 @@ case "$target" in
 esac
 
 stage="$(mktemp -d)"
-trap 'rm -rf "$stage"' EXIT
+manifest_file="$(mktemp)"
+trap 'rm -rf "$stage" "$manifest_file"' EXIT
 
 # download_file <destination> <primary-url> <fallback-url>
 download_file() {
@@ -71,6 +72,33 @@ install_skill() {
       "$base/$skill/references/$reference" "$mirror/$skill/references/$reference"
   done
   echo "  + $skill  ($repo)"
+}
+
+# Verify every staged skill file against the checksum manifest published in THIS
+# repo (tina4) at $ref by scripts/gen-skills-sha256.sh, so a tampered or truncated
+# download can never be published. A mismatch or a missing tool aborts with nothing
+# installed. install-skills.sh needs no code signature; this is its integrity layer.
+verify_checksums() {
+  download_file "$manifest_file" \\
+    "${primary_root}/tina4/${ref}/skills.sha256" \\
+    "${mirror_root}/tina4@${ref}/skills.sha256"
+  if [ ! -s "$manifest_file" ]; then
+    echo "error: skills checksum manifest is empty -- refusing to install" >&2
+    return 1
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    verify_cmd="sha256sum -c"
+  elif command -v shasum >/dev/null 2>&1; then
+    verify_cmd="shasum -a 256 -c"
+  else
+    echo "error: no sha256 tool (sha256sum/shasum) to verify skills -- refusing to install" >&2
+    return 1
+  fi
+  if ! ( cd "$stage" && $verify_cmd "$manifest_file" ) >/dev/null 2>&1; then
+    echo "error: a skill file failed checksum verification (tampering or a stale manifest) -- nothing installed" >&2
+    return 1
+  fi
+  echo "  verified $(grep -c . "$manifest_file") skill files against skills.sha256 (ref $ref)"
 }
 
 publish_skills() {
@@ -116,6 +144,7 @@ install_skill tina4-python  tina4-js          html-and-components.md signals-and
 install_skill tina4-python  tina4-maintainer  cli-and-deployment.md frond-and-frontend.md routing-and-orm.md subsystems.md
 install_skill tina4-python  tina4-architect
 
+verify_checksums
 publish_skills
 
 echo ""

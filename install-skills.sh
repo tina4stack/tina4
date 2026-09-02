@@ -79,8 +79,8 @@ install_skill() {
 # download can never be published. A mismatch or a missing tool aborts with nothing
 # installed. install-skills.sh needs no code signature; this is its integrity layer.
 verify_checksums() {
-  download_file "$manifest_file" \\
-    "${primary_root}/tina4/${ref}/skills.sha256" \\
+  download_file "$manifest_file" \
+    "${primary_root}/tina4/${ref}/skills.sha256" \
     "${mirror_root}/tina4@${ref}/skills.sha256"
   if [ ! -s "$manifest_file" ]; then
     echo "error: skills checksum manifest is empty -- refusing to install" >&2

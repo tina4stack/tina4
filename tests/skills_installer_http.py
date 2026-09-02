@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.server
 import os
 from pathlib import Path
@@ -23,6 +24,10 @@ DEV_REFS = (
     "realtime.md",
     "ai-coder-rule-path.svg",
 )
+# Every skill + reference install-skills.sh stages, keyed by stage-relative skill
+# dir. Mirrors the installer's install_skill calls AND scripts/gen-skills-sha256.sh
+# exactly -- a file here the installer does not fetch (or the reverse) breaks the
+# checksum step, which is precisely what this test guards.
 INSTALLS = {
     "tina4-developer-python": DEV_REFS,
     "tina4-developer-php": DEV_REFS,
@@ -40,7 +45,37 @@ INSTALLS = {
         "routing-and-orm.md",
         "subsystems.md",
     ),
+    "tina4-architect": (),
 }
+
+SKILLS_MARKER = "/.claude/skills/"
+
+
+def stage_relpaths() -> list[str]:
+    """Every stage-relative file path the installer stages, in manifest order."""
+    paths: list[str] = []
+    for skill, references in INSTALLS.items():
+        paths.append(f"{skill}/SKILL.md")
+        paths.extend(f"{skill}/references/{reference}" for reference in references)
+    return paths
+
+
+def fixture_bytes(relpath: str) -> bytes:
+    """Deterministic content for a staged file, keyed ONLY on its stage-relative
+    path -- so the primary and the mirror serve identical bytes for the same file
+    and a single checksum manifest verifies whichever source answered."""
+    return (f"tina4 skills fixture: {relpath}\n").encode()
+
+
+def manifest_bytes() -> bytes:
+    """A skills.sha256 manifest matching the fixtures above, in the same format
+    scripts/gen-skills-sha256.sh emits (`<hash>  <stage-relative-path>`)."""
+    lines = [
+        f"{hashlib.sha256(fixture_bytes(rel)).hexdigest()}  {rel}"
+        for rel in stage_relpaths()
+    ]
+    lines.sort(key=lambda line: line.split("  ", 1)[1])
+    return ("\n".join(lines) + "\n").encode()
 
 
 class SkillHandler(http.server.BaseHTTPRequestHandler):
@@ -66,10 +101,17 @@ class SkillHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        if path.endswith("/skills.sha256"):
+            body = manifest_bytes()
+        else:
+            marker = path.find(SKILLS_MARKER)
+            relpath = path[marker + len(SKILLS_MARKER):] if marker != -1 else path
+            body = fixture_bytes(relpath)
+
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
-        self.wfile.write(("fixture for " + path + "\n").encode())
+        self.wfile.write(body)
 
     def log_message(self, message: str, *args: object) -> None:
         print("http:", message % args, flush=True)

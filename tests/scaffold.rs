@@ -213,6 +213,14 @@ fn init_js_scaffolds_a_project_that_tests_and_audits_clean() {
         !package_json.contains("\"vite\": \"^5"),
         "vite ^5 pulls esbuild <=0.24.2 (GHSA-67mh-4wv8-2f99):\n{package_json}"
     );
+    // vitest 4.x is not installable: npm exits 1 resolving it, leaving the
+    // project with no node_modules and nothing that runs. Sits next to the vite
+    // pin because both are pins that make a scaffold arrive broken.
+    assert!(
+        !package_json.contains("\"vitest\": \"^4"),
+        "vitest ^4 cannot be installed by npm (edgesOut), so the scaffold \
+         arrives with no dependencies at all:\n{package_json}"
+    );
 
     // The example test must exist AND be discoverable by vitest's default glob.
     let example = proj.join("tests/signals.test.ts");

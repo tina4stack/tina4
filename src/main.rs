@@ -1604,30 +1604,24 @@ fn handle_update() {
     };
 
     let tmp_path = current_exe.with_extension("tmp");
-    let mut downloaded = false;
 
-    for name in &candidates {
+    let downloaded = download_first_candidate(&candidates, |name| {
         let url = format!(
             "https://github.com/{}/releases/download/{}/{}",
             REPO, latest_tag, name
         );
-        println!(
-            "{} Trying {} ...",
-            icon_play().green(),
-            name.cyan()
-        );
-        if download_file(&url, &tmp_path) {
-            downloaded = true;
-            break;
-        }
-    }
+        println!("{} Trying {} ...", icon_play().green(), name.cyan());
+        download_file_classified(&url, &tmp_path)
+    });
 
-    if !downloaded {
+    if let Err(failure) = downloaded {
         eprintln!(
-            "{} Download failed (tried: {}). Download manually from:\n  https://github.com/{}/releases",
-            icon_fail().red(), candidates.join(", "), REPO
+            "{} {}",
+            icon_fail().red(),
+            report_failed_download(&tmp_path, &failure, &candidates, &latest_tag)
         );
-        return;
+        // A failed update must be visible to whatever ran it.
+        std::process::exit(1);
     }
 
     // Replace current binary
@@ -2021,7 +2015,122 @@ fn get_binary_name_candidates() -> Vec<String> {
     names
 }
 
+/// What one download attempt did, and whether another asset name could help.
+///
+/// The distinction is the whole point of this type. `Http` means the server
+/// refused the URL -- under `curl -f` that is the 404 you get for an asset
+/// name a release does not publish, and the next candidate is worth trying.
+/// Anything else went wrong on this machine (no space, no permission, no
+/// route, curl killed), and no other asset name can change that. Retrying
+/// under one only buries the real error beneath a list of 404s.
+#[derive(Debug, PartialEq, Eq)]
+enum DownloadOutcome {
+    Ok,
+    Http,
+    Local(String),
+}
+
+/// Why the walk over candidate names ended without a download.
+#[derive(Debug, PartialEq, Eq)]
+enum DownloadFailure {
+    /// Every candidate was refused by the server: this release genuinely has
+    /// no asset under any name we know for this platform.
+    NoAssetForPlatform,
+    /// A candidate failed on this machine. Carries the name it was trying and
+    /// what went wrong, because that is the part the user has to act on.
+    Local { name: String, why: String },
+}
+
+/// Map curl's exit status onto whether a different asset name could help.
+///
+/// 22 is what `--fail` returns when the HTTP response was an error, so that
+/// and only that means "wrong name, try the next one". Every other code is a
+/// condition on this machine -- 23 write error, 7 connect failure, 6 DNS, and
+/// so on. A curl killed by a signal reports no code at all (SIGXFSZ when a
+/// file-size limit is hit, for instance), which is why this takes the whole
+/// `ExitStatus` and not `.code()`: treating "no code" as a server refusal
+/// would resume the loop over a failure that had already written a truncated
+/// file to disk.
+fn classify_curl_status(status: &std::process::ExitStatus) -> DownloadOutcome {
+    if status.success() {
+        return DownloadOutcome::Ok;
+    }
+    match status.code() {
+        Some(22) => DownloadOutcome::Http,
+        Some(code) => DownloadOutcome::Local(format!("curl exited {}", code)),
+        None => DownloadOutcome::Local("curl was killed by a signal".to_string()),
+    }
+}
+
+/// Try each candidate asset name in turn, stopping at the first that lands.
+///
+/// A local failure ends the walk immediately. That is the behaviour change:
+/// the bytes never reached the disk, so the remaining names would each fail
+/// the same way, and the only thing continuing achieves is to replace a real
+/// diagnosis with a list of missing platform binaries.
+fn download_first_candidate(
+    candidates: &[String],
+    mut attempt: impl FnMut(&str) -> DownloadOutcome,
+) -> Result<String, DownloadFailure> {
+    for name in candidates {
+        match attempt(name) {
+            DownloadOutcome::Ok => return Ok(name.clone()),
+            DownloadOutcome::Http => continue,
+            DownloadOutcome::Local(why) => {
+                return Err(DownloadFailure::Local {
+                    name: name.clone(),
+                    why,
+                })
+            }
+        }
+    }
+    Err(DownloadFailure::NoAssetForPlatform)
+}
+
+/// Clean up after a failed download and produce what to tell the user.
+///
+/// The partial file has to go: curl leaves whatever it managed to write, and
+/// a truncated binary sitting next to the real one is both confusing and, if
+/// anything ever installed it, dangerous.
+fn report_failed_download(
+    tmp_path: &std::path::Path,
+    failure: &DownloadFailure,
+    candidates: &[String],
+    tag: &str,
+) -> String {
+    std::fs::remove_file(tmp_path).ok();
+    match failure {
+        DownloadFailure::Local { name, why } => {
+            let dir = tmp_path
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| ".".to_string());
+            format!(
+                "Could not save {} to {} ({}).\n  \
+                 The release asset is fine -- this failed on this machine, and trying \
+                 another asset name would not have helped.\n  \
+                 Check free space with `df -h` and that you can write to {}.",
+                name,
+                tmp_path.display(),
+                why,
+                dir
+            )
+        }
+        DownloadFailure::NoAssetForPlatform => format!(
+            "Release {} publishes no asset this build knows how to ask for (tried: {}).\n  \
+             Download manually from:\n  https://github.com/{}/releases",
+            tag,
+            candidates.join(", "),
+            REPO
+        ),
+    }
+}
+
 fn download_file(url: &str, dest: &std::path::Path) -> bool {
+    matches!(download_file_classified(url, dest), DownloadOutcome::Ok)
+}
+
+fn download_file_classified(url: &str, dest: &std::path::Path) -> DownloadOutcome {
     let dest_str = dest.to_string_lossy();
 
     let status = if console::is_windows() {
@@ -2033,7 +2142,14 @@ fn download_file(url: &str, dest: &std::path::Path) -> bool {
                 .args(["-fsSL", "-o", &dest_str, url])
                 .status()
         } else {
-            // Fallback to PowerShell with TLS 1.2 forced
+            // Fallback to PowerShell with TLS 1.2 forced. Note the trade-off:
+            // Invoke-WebRequest exits 1 for everything, so on this branch a
+            // 404 and a full disk are indistinguishable and both come back as
+            // a local failure, which stops the walk. That loses the fallback
+            // names on Windows machines with no curl.exe -- worth it only
+            // because no release since v3.2.0 has used one of those names,
+            // while a misreported local failure costs every user who hits it.
+            // Untested: this path needs a Windows box without curl.exe.
             std::process::Command::new("powershell")
                 .args(["-NoProfile", "-Command",
                     &format!("[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing", url, dest_str)])
@@ -2045,7 +2161,11 @@ fn download_file(url: &str, dest: &std::path::Path) -> bool {
             .status()
     };
 
-    matches!(status, Ok(s) if s.success())
+    match status {
+        Ok(status) => classify_curl_status(&status),
+        // curl itself could not be started at all -- not a server problem.
+        Err(e) => DownloadOutcome::Local(format!("could not run the downloader: {}", e)),
+    }
 }
 
 // ── Tina4-js AI context ─────────────────────────────────────────
@@ -2142,6 +2262,148 @@ Always read and follow `.claude/skills/tina4-js/SKILL.md` when working with this
 
 #[cfg(test)]
 mod tests {
+
+
+    // ---- `tina4 update` download reporting -------------------------------
+    //
+    // A local failure -- a full disk, an unwritable directory, curl killed --
+    // used to be indistinguishable from "this release has no asset by that
+    // name", because `download_file` returned a bool. The loop moved on to
+    // the next candidate, every remaining candidate 404'd, and the summary
+    // named a list of platform binaries. Users read that as "there is no
+    // build for my machine" while the actual build was fine and their disk
+    // was not. These tests hold the seam that keeps the two apart.
+
+    /// Real `ExitStatus` values, from real processes. Hand-built statuses
+    /// would only prove that the mapping matches itself.
+    fn status_of(script: &str) -> std::process::ExitStatus {
+        std::process::Command::new("sh")
+            .args(["-c", script])
+            .status()
+            .expect("sh should run")
+    }
+
+    #[test]
+    fn curl_http_failure_is_the_only_one_worth_another_asset_name() {
+        assert_eq!(classify_curl_status(&status_of("exit 0")), DownloadOutcome::Ok);
+        assert_eq!(classify_curl_status(&status_of("exit 22")), DownloadOutcome::Http);
+        // 23 is curl's write error -- the full-disk case.
+        assert!(matches!(
+            classify_curl_status(&status_of("exit 23")),
+            DownloadOutcome::Local(_)
+        ));
+        // 7 is a connect failure.
+        assert!(matches!(
+            classify_curl_status(&status_of("exit 7")),
+            DownloadOutcome::Local(_)
+        ));
+    }
+
+    #[test]
+    fn a_signalled_curl_is_local_not_a_missing_asset() {
+        // curl hitting RLIMIT_FSIZE dies on SIGXFSZ and reports no exit code
+        // at all, having already written a partial file. Reading that as a
+        // server refusal is exactly how a truncated download used to be
+        // followed by 404s for names nobody was ever going to get.
+        let status = status_of("kill -XFSZ $$");
+        assert!(status.code().is_none(), "expected a signalled status, got {:?}", status);
+        assert!(matches!(classify_curl_status(&status), DownloadOutcome::Local(_)));
+    }
+
+    #[test]
+    fn a_local_failure_stops_the_walk_instead_of_trying_more_names() {
+        let names: Vec<String> = ["real", "old-name", "older-name"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut tried: Vec<String> = Vec::new();
+        let result = download_first_candidate(&names, |name| {
+            tried.push(name.to_string());
+            DownloadOutcome::Local("no space left on device".to_string())
+        });
+        assert_eq!(
+            tried,
+            vec!["real".to_string()],
+            "a local failure must not be followed by more candidates"
+        );
+        match result {
+            Err(DownloadFailure::Local { name, why }) => {
+                assert_eq!(name, "real");
+                assert!(why.contains("no space"));
+            }
+            other => panic!("expected a local failure, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn every_name_is_tried_when_the_server_refuses_each_one() {
+        let names: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let mut tried = 0;
+        let result = download_first_candidate(&names, |_| {
+            tried += 1;
+            DownloadOutcome::Http
+        });
+        assert_eq!(tried, 3, "an HTTP refusal is what the fallback names exist for");
+        assert_eq!(result, Err(DownloadFailure::NoAssetForPlatform));
+    }
+
+    #[test]
+    fn the_first_name_that_lands_wins_and_the_rest_are_left_alone() {
+        let names: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let mut tried: Vec<String> = Vec::new();
+        let result = download_first_candidate(&names, |name| {
+            tried.push(name.to_string());
+            if name == "b" { DownloadOutcome::Ok } else { DownloadOutcome::Http }
+        });
+        assert_eq!(result, Ok("b".to_string()));
+        assert_eq!(tried, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn a_failed_download_leaves_no_partial_file_behind() {
+        let dir = std::env::temp_dir().join(format!("tina4-dl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = dir.join("tina4.tmp");
+        std::fs::write(&tmp, vec![0u8; 65536]).unwrap();
+        assert!(tmp.is_file());
+
+        let names = vec!["tina4-linux-amd64".to_string()];
+        let failure = DownloadFailure::Local {
+            name: "tina4-linux-amd64".to_string(),
+            why: "curl exited 23".to_string(),
+        };
+        let message = report_failed_download(&tmp, &failure, &names, "v3.8.78");
+
+        assert!(!tmp.exists(), "the truncated download must be removed");
+        std::fs::remove_dir_all(&dir).ok();
+
+        // The message has to point at this machine, not at the release.
+        assert!(message.contains("this machine"), "message was: {}", message);
+        assert!(message.contains("df -h"), "message was: {}", message);
+        assert!(
+            !message.contains("Download manually"),
+            "a local failure must not send the user to the releases page: {}",
+            message
+        );
+    }
+
+    #[test]
+    fn a_genuinely_missing_asset_still_names_every_candidate() {
+        let dir = std::env::temp_dir().join(format!("tina4-dl2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = dir.join("tina4.tmp");
+        let names: Vec<String> = ["tina4-plan9-amd64", "tina4-plan9-x86_64"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let message =
+            report_failed_download(&tmp, &DownloadFailure::NoAssetForPlatform, &names, "v3.8.78");
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(message.contains("tina4-plan9-amd64"));
+        assert!(message.contains("tina4-plan9-x86_64"));
+        assert!(message.contains("v3.8.78"));
+        assert!(message.contains("Download manually"));
+    }
     use super::*;
 
     /// Create a temp .env file and hand its path to the test. Each test

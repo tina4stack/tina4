@@ -902,6 +902,13 @@ startServer();
     println!("  {} Created Node.js scaffold", icon_ok().green());
 }
 
+// The vitest pin is ^5, not ^4. Every 4.x release tried -- 4.1.9, 4.1.10 and
+// 4.1.11 -- makes npm 10.9.7 exit 1 with "Cannot read properties of null
+// (reading 'edgesOut')", against an empty cache as well as a warm one, so a
+// scaffolded project ends up with no node_modules at all and `tina4 init` can
+// only warn about it. A package.json holding nothing but that one dependency
+// reproduces it. 5.0.0 installs, and the scaffold it produces tests, audits
+// and builds clean.
 fn scaffold_tina4js(path: &str) {
     let project_name = project_name_from_path(path);
 
@@ -923,7 +930,7 @@ fn scaffold_tina4js(path: &str) {
   }},
   "devDependencies": {{
     "vite": "^8.2.0",
-    "vitest": "^4.1.10",
+    "vitest": "^5.0.0",
     "jsdom": "^30.0.1",
     "typescript": "^5.4.0"
   }}

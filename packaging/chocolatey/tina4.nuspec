@@ -2,7 +2,7 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>tina4</id>
-    <version>3.8.78</version>
+    <version>3.8.79</version>
     <packageSourceUrl>https://github.com/tina4stack/tina4/tree/main/packaging/chocolatey</packageSourceUrl>
     <owners>tina4stack</owners>
     <title>Tina4 CLI</title>
@@ -35,7 +35,7 @@ This package downloads the official, EV-signed Windows binary from the project's
 GitHub Releases and verifies its SHA-256 checksum before installing. See
 tools\VERIFICATION.txt for how to verify it yourself.
     </description>
-    <releaseNotes>https://github.com/tina4stack/tina4/releases/tag/v3.8.78</releaseNotes>
+    <releaseNotes>https://github.com/tina4stack/tina4/releases/tag/v3.8.79</releaseNotes>
   </metadata>
   <files>
     <file src="tools\**" target="tools" />

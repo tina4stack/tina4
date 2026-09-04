@@ -1,5 +1,4 @@
 pub mod console;
-mod agent;
 mod deploy;
 mod env_config;
 mod env_migrate;
@@ -8,7 +7,6 @@ mod doctor;
 mod init;
 mod install;
 mod manifest;
-mod mcp_context;
 mod metrics;
 mod rag;
 mod scss;
@@ -160,13 +158,6 @@ enum Commands {
 
     /// Download framework-specific documentation into .tina4-docs/
     Docs,
-
-    /// Start the AI agent server for Code With Me
-    Agent {
-        /// Port number (default: framework port + 2000)
-        #[arg(short, long)]
-        port: Option<u16>,
-    },
 
     /// Build production assets (SCSS minify + bundle for the front-end)
     Build {
@@ -443,11 +434,6 @@ fn main() {
         // the client carries no per-command flag knowledge and can never drift
         // out of parity with the framework's command surface.
         Commands::External(args) => delegate_command(args),
-
-        Commands::Agent { port } => {
-            let default_port = 9145u16; // default agent port
-            agent::run(port.unwrap_or(default_port));
-        }
 
         Commands::Ai { all, force } => {
             // Check if this is a tina4-js (frontend) project — handle directly
@@ -749,48 +735,6 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
     let css_dir = "src/public/css";
     if std::path::Path::new(scss_dir).exists() {
         scss::compile_dir(scss_dir, css_dir, false);
-    }
-
-    // Start the AI agent server in background (for Code With Me).
-    // Agent port = framework port + 2000.
-    //
-    // Gated on BOTH:
-    //   1. `--production` CLI flag is NOT set (explicit user intent)
-    //   2. TINA4_DEBUG is truthy
-    //
-    // Either gate alone would suffice in normal usage — `--production`
-    // sets TINA4_DEBUG=false a few lines up — but we check both so
-    // that a stale shell env or weird wrapper script can't leak the
-    // agent port into a production deployment. The agent exposes LLM
-    // endpoints, plan execution, and file-write tools; shipping it
-    // in prod would be a serious footgun.
-    let debug_mode = std::env::var("TINA4_DEBUG")
-        .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes" | "on"))
-        .unwrap_or(false);
-    let allow_agents = debug_mode && !force_production;
-    if allow_agents {
-        let agent_port = port + 2000;
-        std::thread::spawn(move || {
-            match std::panic::catch_unwind(|| {
-                agent::run(agent_port);
-            }) {
-                Ok(_) => {}
-                Err(e) => {
-                    eprintln!("  {} Agent server crashed: {:?}", console::icon_warn(), e);
-                }
-            }
-        });
-    } else {
-        let reason = if force_production {
-            "--production flag set"
-        } else {
-            "TINA4_DEBUG=false"
-        };
-        println!(
-            "  {} Agent server disabled ({})",
-            icon_info().blue(),
-            reason
-        );
     }
 
     // Start language server (auto-detects production server internally)

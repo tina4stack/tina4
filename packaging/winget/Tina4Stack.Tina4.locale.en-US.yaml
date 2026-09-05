@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
 PackageIdentifier: Tina4Stack.Tina4
-PackageVersion: 3.8.81
+PackageVersion: 3.8.82
 PackageLocale: en-US
 Publisher: Tina4 Stack
 PublisherUrl: https://tina4.com

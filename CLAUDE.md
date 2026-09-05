@@ -50,8 +50,15 @@ tina4 routes                     List registered routes
 tina4 metrics                    Report code-health top offenders (complexity, large files,
                                  low maintainability, missing test references, duplication).
                                  Flags: --top N, --json, --fail-on warn|error (CI gate),
-                                 --path DIR|FILE, repeatable --exclude GLOB, and
-                                 --include-non-production. Tests/specs/declarations are excluded
+                                 --path DIR|FILE, repeatable --exclude GLOB,
+                                 --include-non-production, and --no-history. RUN HISTORY
+                                 (3.8.80): each scan records .tina4-metrics.json in the
+                                 scan root, and the next scan of the same scope reports a
+                                 "Since last run" delta (offenders / duplicate lines / avg
+                                 maintainability / avg complexity, marked better|worse, plus
+                                 improved/regressed files). --json carries it under `delta`;
+                                 --no-history reads and writes nothing.
+                                 Tests/specs/declarations are excluded
                                  from production scoring by default. NATIVE +
                                  language-agnostic (ADR-0002, src/metrics.rs): scans SOURCE
                                  directly for Python/PHP/Ruby/TypeScript+JS/Rust via tree-sitter,
@@ -62,8 +69,12 @@ tina4 metrics                    Report code-health top offenders (complexity, l
                                  DRY: cross-file duplicate detection via AST-shape hashing
                                  (Baxter-style), language-agnostic so it covers all five
                                  languages through one code path. Finds Type-1 (exact)
-                                 clones plus consistent identifier and same-kind literal
-                                 renaming; comments are ignored for Type-2 matching.
+                                 clones plus consistent identifier and numeric/boolean
+                                 literal renaming (Type-2); comments are ignored. Since
+                                 3.8.80 a string/template literal's CONTENT is folded into
+                                 the shape hash, so two unrelated big string blobs that
+                                 share the same ${...} interpolation skeleton no longer
+                                 collide as a phantom clone (identical strings still match).
                                  Executable Python docstrings remain significant. Type-3/4
                                  are NOT detected. `has_referencing_test` is a parsed-reference
                                  signal, explicitly not test execution or coverage.

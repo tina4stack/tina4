@@ -2642,9 +2642,9 @@ fn compute_exit_code(fail_on: Option<&str>, has_warn: bool, has_error: bool) -> 
 }
 
 // ── Run history: regression / improvement tracking ──────────────────────────
-// Every scan records a compact snapshot to `.tina4-metrics.json` in the scan
-// root, so the NEXT run of the same scope can say what improved and what got
-// worse. Zero new dependencies: the record is serde_json and timestamps are
+// Every scan records a summary plus full per-file snapshots to
+// `.tina4-metrics.json` in the scan root, so the NEXT run of the same scope can
+// say what improved and what got worse. Zero new dependencies: the record is serde_json and timestamps are
 // UNIX seconds from SystemTime. `--no-history` reads and writes nothing.
 //
 // The file is data, not source (a `.json`), so the engine never scans it and it
@@ -2652,7 +2652,7 @@ fn compute_exit_code(fail_on: Option<&str>, has_warn: bool, has_error: bool) -> 
 // to .gitignore for a purely local baseline - both work.
 
 const HISTORY_FILE: &str = ".tina4-metrics.json";
-const HISTORY_SCHEMA: u32 = 1;
+const HISTORY_SCHEMA: u32 = 2;
 const TREND_CAP: usize = 20;
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -2669,13 +2669,31 @@ struct MetricsSnapshot {
     duplicate_lines: usize,
 }
 
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq)]
 struct HistoryFile {
     offenders: usize,
     /// Highest cyclomatic complexity of any function in the file.
     worst_cc: u32,
     maintainability: f64,
     loc: usize,
+    complexity: u32,
+    avg_complexity: f64,
+    functions: usize,
+    halstead_volume: f64,
+    has_referencing_test: bool,
+    dep_count: usize,
+    coupling_efferent: usize,
+    coupling_afferent: usize,
+    instability: f64,
+    parse_health: f64,
+    duplicate_groups: usize,
+    duplicate_lines: usize,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct HistoryRun {
+    snapshot: MetricsSnapshot,
+    files: BTreeMap<String, HistoryFile>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2688,6 +2706,11 @@ struct HistoryRecord {
     /// the file cannot grow without bound.
     #[serde(default)]
     trend: Vec<MetricsSnapshot>,
+    /// Complete per-file snapshots for each retained run, oldest first. This
+    /// is the commit-friendly changelog; `last` and `files` remain as a compact
+    /// current-run mirror for consumers of schema 1.
+    #[serde(default)]
+    runs: Vec<HistoryRun>,
 }
 
 /// One file's movement between two runs.
@@ -2698,6 +2721,12 @@ struct FileDelta {
     offenders_after: i64,
     worst_cc_before: i64,
     worst_cc_after: i64,
+    /// Full metric snapshots for this file, so a changelog consumer can see
+    /// what changed without reopening the history file and joining paths.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metrics_before: Option<HistoryFile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metrics_after: Option<HistoryFile>,
     /// "improved" | "regressed" | "new" | "resolved".
     status: String,
 }
@@ -2711,6 +2740,9 @@ struct RunDelta {
     after: MetricsSnapshot,
     improved_files: Vec<FileDelta>,
     regressed_files: Vec<FileDelta>,
+    /// Files whose metrics changed without crossing the offender/complexity
+    /// improvement gates. This makes clean-file churn visible as well.
+    changed_files: Vec<FileDelta>,
 }
 
 fn now_secs() -> u64 {
@@ -2749,8 +2781,8 @@ fn snapshot_of(summary: &Summary) -> MetricsSnapshot {
     }
 }
 
-/// Per-file offender count + worst function complexity for this run, the two
-/// signals a next run diffs to say a file improved or regressed.
+/// Full per-file metric snapshot for this run, plus offender and duplication
+/// signals used by the next run's changelog diff.
 fn per_file_history(report: &Report) -> BTreeMap<String, HistoryFile> {
     let mut map: BTreeMap<String, HistoryFile> = BTreeMap::new();
     for f in &report.files {
@@ -2761,6 +2793,18 @@ fn per_file_history(report: &Report) -> BTreeMap<String, HistoryFile> {
                 worst_cc: 0,
                 maintainability: f.maintainability,
                 loc: f.loc,
+                complexity: f.complexity,
+                avg_complexity: f.avg_complexity,
+                functions: f.functions,
+                halstead_volume: f.halstead_volume,
+                has_referencing_test: f.has_referencing_test,
+                dep_count: f.dep_count,
+                coupling_efferent: f.coupling_efferent,
+                coupling_afferent: f.coupling_afferent,
+                instability: f.instability,
+                parse_health: f.parse_health,
+                duplicate_groups: 0,
+                duplicate_lines: 0,
             },
         );
     }
@@ -2774,7 +2818,19 @@ fn per_file_history(report: &Report) -> BTreeMap<String, HistoryFile> {
     for o in &report.offenders {
         map.entry(o.file.clone()).or_default().offenders += 1;
     }
+    for clone in &report.clones {
+        for occurrence in &clone.occurrences {
+            if let Some(file) = map.get_mut(&occurrence.file) {
+                file.duplicate_groups += 1;
+                file.duplicate_lines += clone.lines;
+            }
+        }
+    }
     map
+}
+
+fn history_file_changed(before: &HistoryFile, after: &HistoryFile) -> bool {
+    before != after
 }
 
 fn compute_delta(
@@ -2784,6 +2840,7 @@ fn compute_delta(
 ) -> RunDelta {
     let mut improved: Vec<FileDelta> = Vec::new();
     let mut regressed: Vec<FileDelta> = Vec::new();
+    let mut changed: Vec<FileDelta> = Vec::new();
 
     for (path, cf) in cur_files {
         let before = prev.files.get(path);
@@ -2801,6 +2858,19 @@ fn compute_delta(
                     offenders_after: oa,
                     worst_cc_before: 0,
                     worst_cc_after: wa,
+                    metrics_before: None,
+                    metrics_after: Some(cf.clone()),
+                    status: "new".to_string(),
+                });
+            } else {
+                changed.push(FileDelta {
+                    path: path.clone(),
+                    offenders_before: 0,
+                    offenders_after: 0,
+                    worst_cc_before: 0,
+                    worst_cc_after: wa,
+                    metrics_before: None,
+                    metrics_after: Some(cf.clone()),
                     status: "new".to_string(),
                 });
             }
@@ -2817,6 +2887,8 @@ fn compute_delta(
                 offenders_after: oa,
                 worst_cc_before: wb,
                 worst_cc_after: wa,
+                metrics_before: before.cloned(),
+                metrics_after: Some(cf.clone()),
                 status: "improved".to_string(),
             });
         } else if oa > ob || (cc_moves && wa > wb) {
@@ -2826,7 +2898,20 @@ fn compute_delta(
                 offenders_after: oa,
                 worst_cc_before: wb,
                 worst_cc_after: wa,
+                metrics_before: before.cloned(),
+                metrics_after: Some(cf.clone()),
                 status: "regressed".to_string(),
+            });
+        } else if history_file_changed(before.unwrap(), cf) {
+            changed.push(FileDelta {
+                path: path.clone(),
+                offenders_before: ob,
+                offenders_after: oa,
+                worst_cc_before: wb,
+                worst_cc_after: wa,
+                metrics_before: before.cloned(),
+                metrics_after: Some(cf.clone()),
+                status: "changed".to_string(),
             });
         }
     }
@@ -2840,7 +2925,20 @@ fn compute_delta(
                 offenders_after: 0,
                 worst_cc_before: bf.worst_cc as i64,
                 worst_cc_after: 0,
+                metrics_before: Some(bf.clone()),
+                metrics_after: None,
                 status: "resolved".to_string(),
+            });
+        } else if !cur_files.contains_key(path) {
+            changed.push(FileDelta {
+                path: path.clone(),
+                offenders_before: 0,
+                offenders_after: 0,
+                worst_cc_before: bf.worst_cc as i64,
+                worst_cc_after: 0,
+                metrics_before: Some(bf.clone()),
+                metrics_after: None,
+                status: "removed".to_string(),
             });
         }
     }
@@ -2852,6 +2950,7 @@ fn compute_delta(
     regressed.sort_by(|a, b| {
         (b.offenders_after - b.offenders_before).cmp(&(a.offenders_after - a.offenders_before))
     });
+    changed.sort_by(|a, b| a.path.cmp(&b.path));
 
     RunDelta {
         since_secs: now_secs().saturating_sub(prev.last.at),
@@ -2859,6 +2958,7 @@ fn compute_delta(
         after: after.clone(),
         improved_files: improved,
         regressed_files: regressed,
+        changed_files: changed,
     }
 }
 
@@ -2869,13 +2969,29 @@ fn save_history(
     files: BTreeMap<String, HistoryFile>,
 ) {
     let mut trend: Vec<MetricsSnapshot> = Vec::new();
-    if let Some(p) = prev {
-        trend = p.trend;
-        trend.push(p.last); // the previous run's summary joins the trend line
+    if let Some(p) = prev.as_ref() {
+        trend = p.trend.clone();
+        trend.push(p.last.clone()); // the previous run's summary joins the trend line
         let overflow = trend.len().saturating_sub(TREND_CAP);
         if overflow > 0 {
             trend.drain(0..overflow);
         }
+    }
+    let mut runs = prev
+        .as_ref()
+        .map(|p| p.runs.clone())
+        .unwrap_or_default();
+    // A schema-2 record always has runs, but seed the sequence from the current
+    // mirror fields if a hand-edited/early record omitted them.
+    if runs.is_empty() {
+        if let Some(p) = prev.as_ref() {
+            runs.push(HistoryRun { snapshot: p.last.clone(), files: p.files.clone() });
+        }
+    }
+    runs.push(HistoryRun { snapshot: last.clone(), files: files.clone() });
+    let overflow = runs.len().saturating_sub(TREND_CAP);
+    if overflow > 0 {
+        runs.drain(0..overflow);
     }
     let rec = HistoryRecord {
         schema: HISTORY_SCHEMA,
@@ -2883,6 +2999,7 @@ fn save_history(
         last,
         files,
         trend,
+        runs,
     };
     if let Ok(json) = serde_json::to_string_pretty(&rec) {
         // Best-effort: a metrics scan must never fail because it could not write
@@ -2988,6 +3105,7 @@ fn print_delta_human(delta: &RunDelta, scan_root: &str) {
     };
     show("improved", "1;32", &delta.improved_files);
     show("regressed", "1;31", &delta.regressed_files);
+    show("changed", "2", &delta.changed_files);
     let _ = scan_root;
 }
 
@@ -5186,10 +5304,10 @@ impl Config {
         }
     }
     fn hfile(off: usize, cc: u32) -> HistoryFile {
-        HistoryFile { offenders: off, worst_cc: cc, maintainability: 50.0, loc: 100 }
+        HistoryFile { offenders: off, worst_cc: cc, maintainability: 50.0, loc: 100, ..HistoryFile::default() }
     }
     fn record(files: BTreeMap<String, HistoryFile>, last: MetricsSnapshot) -> HistoryRecord {
-        HistoryRecord { schema: HISTORY_SCHEMA, scan_root: ".".to_string(), last, files, trend: vec![] }
+        HistoryRecord { schema: HISTORY_SCHEMA, scan_root: ".".to_string(), last, files, trend: vec![], runs: vec![] }
     }
 
     #[test]
@@ -5207,9 +5325,9 @@ impl Config {
     }
 
     #[test]
-    fn history_ignores_cc_wobble_on_a_clean_file() {
-        // A file with zero offenders whose worst complexity rises is summary noise,
-        // NOT a per-file regression - it must not appear in either list.
+    fn history_records_cc_wobble_on_a_clean_file() {
+        // A file with zero offenders whose worst complexity rises is not an
+        // improvement/regression gate, but the full history still records it.
         let mut prev_files = BTreeMap::new();
         prev_files.insert("a.py".to_string(), hfile(0, 3));
         let prev = record(prev_files, snap(0, 0, 80.0, 1.0));
@@ -5218,8 +5336,26 @@ impl Config {
         let d = compute_delta(&prev, &snap(0, 0, 60.0, 5.0), &cur);
         assert!(
             d.improved_files.is_empty() && d.regressed_files.is_empty(),
-            "cc wobble on a clean file is not a per-file change"
+            "cc wobble on a clean file is not an improvement/regression gate"
         );
+        assert_eq!(d.changed_files.len(), 1);
+    }
+
+    #[test]
+    fn history_reports_full_metric_changes_for_a_clean_file() {
+        let mut prev_files = BTreeMap::new();
+        prev_files.insert("a.py".to_string(), hfile(0, 3));
+        let prev = record(prev_files, snap(0, 0, 80.0, 1.0));
+        let mut after = hfile(0, 3);
+        after.loc = 120;
+        after.functions = 4;
+        let mut cur = BTreeMap::new();
+        cur.insert("a.py".to_string(), after);
+        let d = compute_delta(&prev, &snap(0, 0, 80.0, 1.0), &cur);
+        let file = d.changed_files.iter().find(|f| f.path == "a.py").expect("metric change should be visible");
+        assert_eq!(file.status, "changed");
+        assert_eq!(file.metrics_before.as_ref().unwrap().loc, 100);
+        assert_eq!(file.metrics_after.as_ref().unwrap().loc, 120);
     }
 
     #[test]
@@ -5261,6 +5397,8 @@ impl Config {
         assert_eq!(loaded.schema, HISTORY_SCHEMA);
         assert_eq!(loaded.last.total_offenders, 1);
         assert_eq!(loaded.files.get("a.py").map(|f| f.offenders), Some(1));
+        assert_eq!(loaded.runs.len(), 1);
+        assert_eq!(loaded.runs[0].files.get("a.py").map(|f| f.loc), Some(100));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -5281,6 +5419,7 @@ impl Config {
             "trend capped at {TREND_CAP}, got {}",
             loaded.trend.len()
         );
+        assert!(loaded.runs.len() <= TREND_CAP, "runs capped at {TREND_CAP}, got {}", loaded.runs.len());
         let _ = fs::remove_dir_all(&dir);
     }
 }

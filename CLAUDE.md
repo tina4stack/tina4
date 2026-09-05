@@ -57,7 +57,10 @@ tina4 metrics                    Report code-health top offenders (complexity, l
                                  "Since last run" delta (offenders / duplicate lines / avg
                                  maintainability / avg complexity, marked better|worse, plus
                                  improved/regressed files). --json carries it under `delta`;
-                                 --no-history reads and writes nothing.
+                                 --no-history reads and writes nothing. The history file
+                                 retains full per-file metric snapshots for a bounded
+                                 commit-friendly changelog; delete `.tina4-metrics.json`
+                                 to clear it.
                                  `--path` accepts any supported source directory or file;
                                  it does not require a Tina4 project. Use repeatable
                                  `--exclude` switches for project-specific generated or

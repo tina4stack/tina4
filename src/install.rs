@@ -59,8 +59,12 @@ fn install_python() {
         } else if check_exists("uv") {
             // uv-managed Python — downloaded into the user profile, no admin.
             println!("  {} Installing Python via uv (no admin needed)...", icon_play().green());
+            // `--default` makes uv also create `python` / `python3` executables in
+            // its bin dir (on PATH), so a bare `python` resolves afterward. Without
+            // it uv installs a MANAGED interpreter that only `uv run` can see, which
+            // reads as "uv installed but not python". Harmless no-op on an older uv.
             let _ = Command::new("uv")
-                .args(["python", "install", "3.12"])
+                .args(["python", "install", "3.12", "--default"])
                 .stdout(std::process::Stdio::inherit())
                 .stderr(std::process::Stdio::inherit())
                 .status();
@@ -82,8 +86,12 @@ fn install_python() {
                 "  {} Installing a managed Python via uv (no Xcode tools needed)...",
                 icon_play().green()
             );
+            // `--default` makes uv also create `python` / `python3` executables in
+            // its bin dir (on PATH), so a bare `python` resolves afterward. Without
+            // it uv installs a MANAGED interpreter that only `uv run` can see, which
+            // reads as "uv installed but not python". Harmless no-op on an older uv.
             let _ = Command::new("uv")
-                .args(["python", "install", "3.12"])
+                .args(["python", "install", "3.12", "--default"])
                 .stdout(std::process::Stdio::inherit())
                 .stderr(std::process::Stdio::inherit())
                 .status();
@@ -320,7 +328,12 @@ fn install_nodejs() {
         println!("  {} Node.js already installed", icon_ok().green());
     } else {
         run_install_commands(&[
-            // Windows (Chocolatey) — LTS line.
+            // Windows, admin-free FIRST: winget installs the Node LTS to the user
+            // scope with no Administrator. choco's node package writes machine-wide
+            // and needs admin, which is exactly what left a user-level box with no
+            // node (and therefore no npm) — the "Cannot install tina4nodejs" report.
+            ("winget", &["install", "-e", "--id", "OpenJS.NodeJS.LTS", "--silent", "--accept-package-agreements", "--accept-source-agreements"]),
+            // Windows fallback (Chocolatey) — needs admin.
             ("choco", &["install", "nodejs-lts", "-y"]),
             ("brew", &["install", "node@22"]),
             // Linux: use NodeSource
@@ -328,10 +341,18 @@ fn install_nodejs() {
         ]);
     }
 
-    // npm comes with node, check it
-    if check_exists("npm") {
-        println!("  {} npm already installed", icon_ok().green());
+    // npm ships WITH Node. If it is still missing here, either Node did not install
+    // (no admin-free path succeeded) or it just landed and this process's PATH is
+    // stale (a Windows PATH change needs a fresh shell). Running `npm install -g`
+    // now would fail with a cryptic "npm not found", so stop with a real next step.
+    if !check_exists("npm") {
+        eprintln!(
+            "  {} Node.js/npm is not on PATH. If Node just installed, open a NEW terminal and re-run `tina4 install nodejs`. Otherwise install Node LTS from https://nodejs.org (or `winget install OpenJS.NodeJS.LTS`) and re-run.",
+            icon_fail().red()
+        );
+        return;
     }
+    println!("  {} npm found", icon_ok().green());
 
     // Install the Node framework globally. The published npm package is
     // `tina4-nodejs` (the monorepo root) — it provides the `tina4nodejs`

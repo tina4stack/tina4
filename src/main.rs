@@ -225,6 +225,11 @@ enum Commands {
         /// Include tests, specs, and declaration files in the measured source
         #[arg(long)]
         include_non_production: bool,
+        /// Do not read or write the .tina4-metrics.json run-history baseline
+        /// (by default each scan records a snapshot so the next run reports
+        /// what improved or regressed)
+        #[arg(long = "no-history")]
+        no_history: bool,
     },
 
     /// Any command the client doesn't own is forwarded verbatim to the detected
@@ -417,7 +422,7 @@ fn main() {
         // Native, language-agnostic metrics engine (ADR-0002). No longer
         // forwarded to the framework CLI — scans SOURCE directly, no project
         // or running framework required.
-        Commands::Metrics { path, fail_on, json, top, exclude, include_non_production } => {
+        Commands::Metrics { path, fail_on, json, top, exclude, include_non_production, no_history } => {
             std::process::exit(metrics::run(
                 path,
                 top,
@@ -425,6 +430,7 @@ fn main() {
                 fail_on,
                 exclude,
                 include_non_production,
+                no_history,
             ));
         }
 

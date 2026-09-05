@@ -21,3 +21,7 @@ tina4-windows-amd64.exe.zip
 
 # scratch dir from a local musl cross-build
 target-musl/
+
+# Stray framework-project env files (never part of the Rust CLI)
+.env
+.env.example

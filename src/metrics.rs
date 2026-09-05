@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tree_sitter::{Node, Parser};
 
 // ── Languages ──────────────────────────────────────────────────────────────
@@ -1432,7 +1432,7 @@ pub(crate) fn analyze_source(
     };
 
     let mut fragments: Vec<CloneFragment> = Vec::new();
-    collect_fragments(root, 0, &mut fragments);
+    collect_fragments(root, 0, src, &mut fragments);
 
     Some(FileAnalysis::Measured { metrics: fm, functions, imports: specs, fragments })
 }
@@ -1543,6 +1543,38 @@ fn shape_hash_of(kind: &str, child_hashes: &[u64]) -> u64 {
     h.finish()
 }
 
+/// Leaf kinds that carry opaque string BODY text across the five grammars. Their
+/// content is folded into the clone hash (below) so two blocks whose only shared
+/// structure is a string/template literal do not collide. Identifiers are
+/// deliberately absent: renaming them must still read as the same shape, which is
+/// what makes this a Type-2 (renamed-clone) detector rather than an exact-match one.
+fn is_string_leaf(kind: &str) -> bool {
+    matches!(
+        kind,
+        "string_fragment"        // ts/js template and string bodies
+            | "string_content"   // python, ruby, rust, php
+            | "string_value"     // php alternate
+            | "heredoc_body"     // php / ruby heredocs
+            | "raw_string_literal" // rust r"..."
+    )
+}
+
+/// Fold a string leaf's text into its structural hash. A string BODY is data, not
+/// renameable code, so two blocks that differ only in their string contents are
+/// not "one block to unify". Without this, two unrelated template literals that
+/// share the same `${...}` interpolation skeleton hash identically and get
+/// reported as a phantom clone (the embedded-worker-source false positive that
+/// `mongoClient.ts` and `syncBridge.ts` tripped). Identical strings still fold to
+/// the identical hash, so real clones are detected exactly as before.
+fn mix_leaf_text(seed: u64, text: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    seed.hash(&mut h);
+    text.hash(&mut h);
+    h.finish()
+}
+
 /// Walk one file's tree, emitting a fragment for every sub-tree big enough to be
 /// worth reporting. Returns this node's (hash, node_count, parsed_cleanly).
 ///
@@ -1562,6 +1594,7 @@ fn shape_hash_of(kind: &str, child_hashes: &[u64]) -> u64 {
 fn collect_fragments(
     node: Node,
     file: u32,
+    src: &[u8],
     out: &mut Vec<CloneFragment>,
 ) -> (u64, u32, bool) {
     if node.is_error() || node.is_missing() {
@@ -1576,7 +1609,7 @@ fn collect_fragments(
     let mut c = node.walk();
     if c.goto_first_child() {
         loop {
-            let (h, n, clean) = collect_fragments(c.node(), file, out);
+            let (h, n, clean) = collect_fragments(c.node(), file, src, out);
             if n > 0 {
                 child_hashes.push(h);
                 count += n;
@@ -1587,7 +1620,15 @@ fn collect_fragments(
             }
         }
     }
-    let hash = shape_hash_of(node.kind(), &child_hashes);
+    let mut hash = shape_hash_of(node.kind(), &child_hashes);
+    // A string leaf's bytes distinguish it: two different bodies must not collide
+    // on a shared AST shape (the template-literal false positive). Identical text
+    // folds to the identical hash, so genuine clones are untouched.
+    if is_string_leaf(node.kind()) {
+        if let Ok(text) = node.utf8_text(src) {
+            hash = mix_leaf_text(hash, text);
+        }
+    }
     let start_line = node.start_position().row + 1;
     let end_line = node.end_position().row + 1;
     // Only NAMED nodes are candidates: an anonymous token is punctuation and can
@@ -2405,6 +2446,11 @@ struct JsonPayload {
     /// Files excluded from every number above because too little of them
     /// parsed. Present even when empty so a consumer can rely on the key.
     unparsed: Vec<RefusedFile>,
+    /// What changed since the previous recorded run of the SAME scan root.
+    /// `null` on the first run (nothing to compare) or when `--no-history` is
+    /// set. See the run-history section below.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delta: Option<RunDelta>,
 }
 
 pub(crate) struct Report {
@@ -2575,6 +2621,370 @@ fn compute_exit_code(fail_on: Option<&str>, has_warn: bool, has_error: bool) -> 
 }
 
 /// `tina4 metrics` — native, language-agnostic. Returns the process exit code.
+// ── Run history: regression / improvement tracking ──────────────────────────
+// Every scan records a compact snapshot to `.tina4-metrics.json` in the scan
+// root, so the NEXT run of the same scope can say what improved and what got
+// worse. Zero new dependencies: the record is serde_json and timestamps are
+// UNIX seconds from SystemTime. `--no-history` reads and writes nothing.
+//
+// The file is data, not source (a `.json`), so the engine never scans it and it
+// never pollutes its own numbers. Commit it to gate regressions in CI, or add it
+// to .gitignore for a purely local baseline - both work.
+
+const HISTORY_FILE: &str = ".tina4-metrics.json";
+const HISTORY_SCHEMA: u32 = 1;
+const TREND_CAP: usize = 20;
+
+#[derive(Serialize, Deserialize, Clone)]
+struct MetricsSnapshot {
+    /// UNIX seconds when this scan ran.
+    at: u64,
+    tool_version: String,
+    files_analyzed: usize,
+    total_functions: usize,
+    avg_complexity: f64,
+    avg_maintainability: f64,
+    total_offenders: usize,
+    duplicate_blocks: usize,
+    duplicate_lines: usize,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct HistoryFile {
+    offenders: usize,
+    /// Highest cyclomatic complexity of any function in the file.
+    worst_cc: u32,
+    maintainability: f64,
+    loc: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+struct HistoryRecord {
+    schema: u32,
+    scan_root: String,
+    last: MetricsSnapshot,
+    files: BTreeMap<String, HistoryFile>,
+    /// Older summaries, oldest first, excluding `last`. Capped at TREND_CAP so
+    /// the file cannot grow without bound.
+    #[serde(default)]
+    trend: Vec<MetricsSnapshot>,
+}
+
+/// One file's movement between two runs.
+#[derive(Serialize)]
+struct FileDelta {
+    path: String,
+    offenders_before: i64,
+    offenders_after: i64,
+    worst_cc_before: i64,
+    worst_cc_after: i64,
+    /// "improved" | "regressed" | "new" | "resolved".
+    status: String,
+}
+
+/// What changed since the previous recorded run.
+#[derive(Serialize)]
+struct RunDelta {
+    /// Age of the previous run in seconds (how long since the baseline).
+    since_secs: u64,
+    before: MetricsSnapshot,
+    after: MetricsSnapshot,
+    improved_files: Vec<FileDelta>,
+    regressed_files: Vec<FileDelta>,
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn history_path(scan_root: &str) -> PathBuf {
+    Path::new(scan_root).join(HISTORY_FILE)
+}
+
+fn load_history(scan_root: &str) -> Option<HistoryRecord> {
+    let raw = fs::read_to_string(history_path(scan_root)).ok()?;
+    let rec: HistoryRecord = serde_json::from_str(&raw).ok()?;
+    // A record from an incompatible schema is ignored (treated as no baseline)
+    // rather than crashing a scan; the next save rewrites it at the current schema.
+    if rec.schema != HISTORY_SCHEMA {
+        return None;
+    }
+    Some(rec)
+}
+
+fn snapshot_of(summary: &Summary) -> MetricsSnapshot {
+    MetricsSnapshot {
+        at: now_secs(),
+        tool_version: env!("CARGO_PKG_VERSION").to_string(),
+        files_analyzed: summary.files_analyzed,
+        total_functions: summary.total_functions,
+        avg_complexity: summary.avg_complexity,
+        avg_maintainability: summary.avg_maintainability,
+        total_offenders: summary.total_offenders,
+        duplicate_blocks: summary.duplicate_blocks,
+        duplicate_lines: summary.duplicate_lines,
+    }
+}
+
+/// Per-file offender count + worst function complexity for this run, the two
+/// signals a next run diffs to say a file improved or regressed.
+fn per_file_history(report: &Report) -> BTreeMap<String, HistoryFile> {
+    let mut map: BTreeMap<String, HistoryFile> = BTreeMap::new();
+    for f in &report.files {
+        map.insert(
+            f.path.clone(),
+            HistoryFile {
+                offenders: 0,
+                worst_cc: 0,
+                maintainability: f.maintainability,
+                loc: f.loc,
+            },
+        );
+    }
+    for func in &report.functions {
+        if let Some(e) = map.get_mut(&func.file) {
+            if func.complexity > e.worst_cc {
+                e.worst_cc = func.complexity;
+            }
+        }
+    }
+    for o in &report.offenders {
+        map.entry(o.file.clone()).or_default().offenders += 1;
+    }
+    map
+}
+
+fn compute_delta(
+    prev: &HistoryRecord,
+    after: &MetricsSnapshot,
+    cur_files: &BTreeMap<String, HistoryFile>,
+) -> RunDelta {
+    let mut improved: Vec<FileDelta> = Vec::new();
+    let mut regressed: Vec<FileDelta> = Vec::new();
+
+    for (path, cf) in cur_files {
+        let before = prev.files.get(path);
+        let (ob, wb) = before
+            .map(|b| (b.offenders as i64, b.worst_cc as i64))
+            .unwrap_or((0, 0));
+        let (oa, wa) = (cf.offenders as i64, cf.worst_cc as i64);
+        if before.is_none() {
+            // A file that did not exist last run. Only worth calling out if it
+            // arrives carrying offenders.
+            if oa > 0 {
+                regressed.push(FileDelta {
+                    path: path.clone(),
+                    offenders_before: 0,
+                    offenders_after: oa,
+                    worst_cc_before: 0,
+                    worst_cc_after: wa,
+                    status: "new".to_string(),
+                });
+            }
+            continue;
+        }
+        // Worst-complexity movement only counts when the file already carries an
+        // offender: a cc wobble on an otherwise-clean file is summary noise, not a
+        // per-file regression, and 0->0 offender lines just clutter the report.
+        let cc_moves = oa == ob && ob > 0;
+        if oa < ob || (cc_moves && wa < wb) {
+            improved.push(FileDelta {
+                path: path.clone(),
+                offenders_before: ob,
+                offenders_after: oa,
+                worst_cc_before: wb,
+                worst_cc_after: wa,
+                status: "improved".to_string(),
+            });
+        } else if oa > ob || (cc_moves && wa > wb) {
+            regressed.push(FileDelta {
+                path: path.clone(),
+                offenders_before: ob,
+                offenders_after: oa,
+                worst_cc_before: wb,
+                worst_cc_after: wa,
+                status: "regressed".to_string(),
+            });
+        }
+    }
+    // A file that had offenders last run and is gone now (deleted, or renamed)
+    // counts as resolved - its offenders left the report.
+    for (path, bf) in &prev.files {
+        if !cur_files.contains_key(path) && bf.offenders > 0 {
+            improved.push(FileDelta {
+                path: path.clone(),
+                offenders_before: bf.offenders as i64,
+                offenders_after: 0,
+                worst_cc_before: bf.worst_cc as i64,
+                worst_cc_after: 0,
+                status: "resolved".to_string(),
+            });
+        }
+    }
+
+    // Biggest offender swing first.
+    improved.sort_by(|a, b| {
+        (b.offenders_before - b.offenders_after).cmp(&(a.offenders_before - a.offenders_after))
+    });
+    regressed.sort_by(|a, b| {
+        (b.offenders_after - b.offenders_before).cmp(&(a.offenders_after - a.offenders_before))
+    });
+
+    RunDelta {
+        since_secs: now_secs().saturating_sub(prev.last.at),
+        before: prev.last.clone(),
+        after: after.clone(),
+        improved_files: improved,
+        regressed_files: regressed,
+    }
+}
+
+fn save_history(
+    scan_root: &str,
+    prev: Option<HistoryRecord>,
+    last: MetricsSnapshot,
+    files: BTreeMap<String, HistoryFile>,
+) {
+    let mut trend: Vec<MetricsSnapshot> = Vec::new();
+    if let Some(p) = prev {
+        trend = p.trend;
+        trend.push(p.last); // the previous run's summary joins the trend line
+        let overflow = trend.len().saturating_sub(TREND_CAP);
+        if overflow > 0 {
+            trend.drain(0..overflow);
+        }
+    }
+    let rec = HistoryRecord {
+        schema: HISTORY_SCHEMA,
+        scan_root: scan_root.to_string(),
+        last,
+        files,
+        trend,
+    };
+    if let Ok(json) = serde_json::to_string_pretty(&rec) {
+        // Best-effort: a metrics scan must never fail because it could not write
+        // its own bookkeeping (read-only dir, CI sandbox). The numbers still print.
+        let _ = fs::write(history_path(scan_root), json);
+    }
+}
+
+/// Human-readable "since last run" block. Direction-aware: fewer offenders,
+/// fewer duplicate lines and lower complexity are better; higher maintainability
+/// is better.
+fn print_delta_human(delta: &RunDelta, scan_root: &str) {
+    use std::io::IsTerminal;
+    let use_color = std::io::stdout().is_terminal();
+    let paint = |text: String, code: &str| -> String {
+        if use_color {
+            format!("\u{1b}[{code}m{text}\u{1b}[0m")
+        } else {
+            text
+        }
+    };
+    // GREEN when the movement is an improvement, RED when a regression, dim when flat.
+    let tag = |better: bool, worse: bool| -> String {
+        if better {
+            paint("better".to_string(), "1;32")
+        } else if worse {
+            paint("worse".to_string(), "1;31")
+        } else {
+            paint("same".to_string(), "2")
+        }
+    };
+    let b = &delta.before;
+    let a = &delta.after;
+
+    println!();
+    println!(
+        "  Since last run ({}, {})",
+        human_age(delta.since_secs),
+        b.tool_version
+    );
+    // offenders: down is better
+    let d_off = a.total_offenders as i64 - b.total_offenders as i64;
+    println!(
+        "    offenders           {:>6} -> {:<6} ({:+})  {}",
+        b.total_offenders,
+        a.total_offenders,
+        d_off,
+        tag(d_off < 0, d_off > 0)
+    );
+    // duplicate lines: down is better
+    let d_dup = a.duplicate_lines as i64 - b.duplicate_lines as i64;
+    println!(
+        "    duplicate lines     {:>6} -> {:<6} ({:+})  {}",
+        b.duplicate_lines,
+        a.duplicate_lines,
+        d_dup,
+        tag(d_dup < 0, d_dup > 0)
+    );
+    // avg maintainability: UP is better
+    let d_mnt = round_dp(a.avg_maintainability - b.avg_maintainability, 1);
+    println!(
+        "    avg maintainability {:>6.1} -> {:<6.1} ({:+.1})  {}",
+        b.avg_maintainability,
+        a.avg_maintainability,
+        d_mnt,
+        tag(d_mnt > 0.0, d_mnt < 0.0)
+    );
+    // avg complexity: down is better
+    let d_cpx = round_dp(a.avg_complexity - b.avg_complexity, 2);
+    println!(
+        "    avg complexity      {:>6.2} -> {:<6.2} ({:+.2})  {}",
+        b.avg_complexity,
+        a.avg_complexity,
+        d_cpx,
+        tag(d_cpx < 0.0, d_cpx > 0.0)
+    );
+
+    let show = |label: &str, code: &str, list: &[FileDelta]| {
+        if list.is_empty() {
+            return;
+        }
+        let head: Vec<String> = list
+            .iter()
+            .take(5)
+            .map(|f| {
+                // Show the signal that actually moved: offender count if it
+                // changed, otherwise the worst-function complexity.
+                let change = if f.offenders_before != f.offenders_after {
+                    format!("{}->{}", f.offenders_before, f.offenders_after)
+                } else {
+                    format!("cc {}->{}", f.worst_cc_before, f.worst_cc_after)
+                };
+                format!("{} ({})", f.path, change)
+            })
+            .collect();
+        let more = list.len().saturating_sub(5);
+        let suffix = if more > 0 {
+            format!(", +{more} more")
+        } else {
+            String::new()
+        };
+        println!("    {}: {}{}", paint(label.to_string(), code), head.join(", "), suffix);
+    };
+    show("improved", "1;32", &delta.improved_files);
+    show("regressed", "1;31", &delta.regressed_files);
+    let _ = scan_root;
+}
+
+/// "just now" / "5m ago" / "3h ago" / "2d ago" - a calendar-free age so the
+/// tool needs no date library.
+fn human_age(secs: u64) -> String {
+    if secs < 60 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    }
+}
+
 pub fn run(
     path: Option<String>,
     top: Option<usize>,
@@ -2582,6 +2992,7 @@ pub fn run(
     fail_on: Option<String>,
     exclusions: Vec<String>,
     include_non_production: bool,
+    no_history: bool,
 ) -> i32 {
     if let Some(f) = &fail_on {
         if f != "warn" && f != "error" {
@@ -2611,6 +3022,20 @@ pub fn run(
     let total_offenders = report.offenders.len();
     let summary = build_summary(&report, total_offenders);
 
+    // Run history: snapshot this scan and diff it against the previous record for
+    // the same scan root, so the report can say what improved and what regressed.
+    // `--no-history` reads and writes nothing.
+    let cur_snapshot = snapshot_of(&summary);
+    let cur_files = per_file_history(&report);
+    let history_prev = if no_history {
+        None
+    } else {
+        load_history(&scan_root)
+    };
+    let delta = history_prev
+        .as_ref()
+        .map(|p| compute_delta(p, &cur_snapshot, &cur_files));
+
     // Exit code from the FULL offender set (before top truncation).
     let has_warn = report.offenders.iter().any(|o| o.severity == "warn");
     let has_error = report.offenders.iter().any(|o| o.severity == "error");
@@ -2633,12 +3058,27 @@ pub fn run(
             dependency_graph: report.dependency_graph.clone(),
             duplication: report.clones.clone(),
             unparsed: report.refused.clone(),
+            delta,
         };
         println!("{}", serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string()));
+        if !no_history {
+            save_history(&scan_root, history_prev, cur_snapshot, cur_files);
+        }
         return exit_code;
     }
 
     print_human(&summary, &shown);
+    match &delta {
+        Some(d) => print_delta_human(d, &scan_root),
+        None if !no_history => println!(
+            "\n  Baseline saved to {} - rerun to see what changed.",
+            history_path(&scan_root).display()
+        ),
+        None => {}
+    }
+    if !no_history {
+        save_history(&scan_root, history_prev, cur_snapshot, cur_files);
+    }
     exit_code
 }
 
@@ -4316,7 +4756,7 @@ impl Config {
         );
 
         let mut fragments: Vec<CloneFragment> = Vec::new();
-        let (_hash, _count, clean) = collect_fragments(tree.root_node(), 0, &mut fragments);
+        let (_hash, _count, clean) = collect_fragments(tree.root_node(), 0, junk.as_bytes(), &mut fragments);
         assert!(!clean, "a tree with an ERROR node is not clean");
         assert!(
             fragments.is_empty(),
@@ -4346,6 +4786,44 @@ impl Config {
     }
 
     #[test]
+    fn different_string_bodies_are_not_a_clone() {
+        // Two template literals with the SAME `${...}` interpolation skeleton but
+        // ENTIRELY different text must not be reported as duplicates. Before the
+        // string-leaf fold this collided - the structural hash saw only the shape
+        // and discarded the body - which is the mongoClient.ts / syncBridge.ts
+        // phantom "229 duplicated lines" false positive.
+        let mk = |word: &str| -> String {
+            let mut s = String::from("const S = { a: 1 };\nexport const T = `");
+            for _ in 0..30 {
+                s.push_str(word);
+                s.push_str(" ${S.a}\n");
+            }
+            s.push_str("`;\n");
+            s
+        };
+        let a = mk("alphaworker");
+        let b = mk("bravohelper");
+        let (report, dir) = scan_temp("dup_strbody", &[("a.ts", a.as_str()), ("b.ts", b.as_str())]);
+        assert!(
+            !report.offenders.iter().any(|o| o.kind == "duplication"),
+            "unrelated string bodies that share an interpolation shape are not a clone: {:?}",
+            report.clones
+        );
+        let _ = fs::remove_dir_all(dir);
+
+        // Positive control: IDENTICAL template literals are STILL a clone - the fix
+        // makes the detector more precise, it does not switch duplication off.
+        let same = mk("sameworker");
+        let (report2, dir2) =
+            scan_temp("dup_strsame", &[("a.ts", same.as_str()), ("b.ts", same.as_str())]);
+        assert!(
+            report2.offenders.iter().any(|o| o.kind == "duplication"),
+            "identical template literals must still be detected as a clone"
+        );
+        let _ = fs::remove_dir_all(dir2);
+    }
+
+    #[test]
     fn comments_are_ignored_for_type_2_duplication() {
         // Roy/Cordy Type-II tolerates comments. Documentation strings remain
         // executable string expressions and are deliberately not comments.
@@ -4357,7 +4835,7 @@ impl Config {
             parser.set_language(&lang.tree_sitter_language()).unwrap();
             let tree = parser.parse(src, None).unwrap();
             let mut out = Vec::new();
-            collect_fragments(tree.root_node(), 0, &mut out).0
+            collect_fragments(tree.root_node(), 0, src.as_bytes(), &mut out).0
         }
         // Renaming is invisible - the property the whole metric rests on.
         assert_eq!(
@@ -4648,5 +5126,116 @@ impl Config {
         assert!(value.get("has_tests").is_none(), "the old field overclaimed coverage");
     }
 
+    // ── Run-history diffing ─────────────────────────────────────────────────
+    fn snap(off: usize, dup: usize, maint: f64, cpx: f64) -> MetricsSnapshot {
+        MetricsSnapshot {
+            at: 1_000,
+            tool_version: "test".to_string(),
+            files_analyzed: 1,
+            total_functions: 1,
+            avg_complexity: cpx,
+            avg_maintainability: maint,
+            total_offenders: off,
+            duplicate_blocks: 0,
+            duplicate_lines: dup,
+        }
+    }
+    fn hfile(off: usize, cc: u32) -> HistoryFile {
+        HistoryFile { offenders: off, worst_cc: cc, maintainability: 50.0, loc: 100 }
+    }
+    fn record(files: BTreeMap<String, HistoryFile>, last: MetricsSnapshot) -> HistoryRecord {
+        HistoryRecord { schema: HISTORY_SCHEMA, scan_root: ".".to_string(), last, files, trend: vec![] }
+    }
 
+    #[test]
+    fn history_delta_flags_offender_improvement_and_regression() {
+        let mut prev_files = BTreeMap::new();
+        prev_files.insert("a.py".to_string(), hfile(3, 20));
+        prev_files.insert("b.py".to_string(), hfile(1, 10));
+        let prev = record(prev_files, snap(4, 0, 50.0, 3.0));
+        let mut cur = BTreeMap::new();
+        cur.insert("a.py".to_string(), hfile(1, 20)); // 3 -> 1  improved
+        cur.insert("b.py".to_string(), hfile(2, 10)); // 1 -> 2  regressed
+        let d = compute_delta(&prev, &snap(3, 0, 51.0, 2.9), &cur);
+        assert!(d.improved_files.iter().any(|f| f.path == "a.py" && f.status == "improved"));
+        assert!(d.regressed_files.iter().any(|f| f.path == "b.py" && f.status == "regressed"));
+    }
+
+    #[test]
+    fn history_ignores_cc_wobble_on_a_clean_file() {
+        // A file with zero offenders whose worst complexity rises is summary noise,
+        // NOT a per-file regression - it must not appear in either list.
+        let mut prev_files = BTreeMap::new();
+        prev_files.insert("a.py".to_string(), hfile(0, 3));
+        let prev = record(prev_files, snap(0, 0, 80.0, 1.0));
+        let mut cur = BTreeMap::new();
+        cur.insert("a.py".to_string(), hfile(0, 9));
+        let d = compute_delta(&prev, &snap(0, 0, 60.0, 5.0), &cur);
+        assert!(
+            d.improved_files.is_empty() && d.regressed_files.is_empty(),
+            "cc wobble on a clean file is not a per-file change"
+        );
+    }
+
+    #[test]
+    fn history_flags_cc_regression_on_an_offending_file() {
+        let mut prev_files = BTreeMap::new();
+        prev_files.insert("a.py".to_string(), hfile(1, 40));
+        let prev = record(prev_files, snap(1, 0, 40.0, 4.0));
+        let mut cur = BTreeMap::new();
+        cur.insert("a.py".to_string(), hfile(1, 70)); // same offenders, worse cc
+        let d = compute_delta(&prev, &snap(1, 0, 38.0, 4.5), &cur);
+        let f = d
+            .regressed_files
+            .iter()
+            .find(|f| f.path == "a.py")
+            .expect("an offending file whose worst cc rose must regress");
+        assert_eq!((f.worst_cc_before, f.worst_cc_after), (40, 70));
+    }
+
+    #[test]
+    fn history_resolved_when_offending_file_disappears() {
+        let mut prev_files = BTreeMap::new();
+        prev_files.insert("gone.py".to_string(), hfile(2, 30));
+        let prev = record(prev_files, snap(2, 0, 40.0, 3.0));
+        let d = compute_delta(&prev, &snap(0, 0, 45.0, 2.0), &BTreeMap::new());
+        assert!(d.improved_files.iter().any(|f| f.path == "gone.py" && f.status == "resolved"));
+    }
+
+    #[test]
+    fn history_roundtrips_and_first_run_is_empty() {
+        let dir = std::env::temp_dir().join(format!("tina4-hist-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let root = dir.to_string_lossy().to_string();
+        assert!(load_history(&root).is_none(), "no baseline before the first save");
+        let mut files = BTreeMap::new();
+        files.insert("a.py".to_string(), hfile(1, 12));
+        save_history(&root, None, snap(1, 5, 50.0, 3.0), files);
+        let loaded = load_history(&root).expect("baseline should load back");
+        assert_eq!(loaded.schema, HISTORY_SCHEMA);
+        assert_eq!(loaded.last.total_offenders, 1);
+        assert_eq!(loaded.files.get("a.py").map(|f| f.offenders), Some(1));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn history_trend_accumulates_and_caps() {
+        let dir = std::env::temp_dir().join(format!("tina4-trend-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let root = dir.to_string_lossy().to_string();
+        save_history(&root, None, snap(10, 0, 40.0, 3.0), BTreeMap::new());
+        for i in 0..(TREND_CAP + 5) {
+            let prev = load_history(&root);
+            save_history(&root, prev, snap(i, 0, 40.0, 3.0), BTreeMap::new());
+        }
+        let loaded = load_history(&root).unwrap();
+        assert!(
+            loaded.trend.len() <= TREND_CAP,
+            "trend capped at {TREND_CAP}, got {}",
+            loaded.trend.len()
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

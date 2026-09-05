@@ -2620,7 +2620,6 @@ fn compute_exit_code(fail_on: Option<&str>, has_warn: bool, has_error: bool) -> 
     }
 }
 
-/// `tina4 metrics` — native, language-agnostic. Returns the process exit code.
 // ── Run history: regression / improvement tracking ──────────────────────────
 // Every scan records a compact snapshot to `.tina4-metrics.json` in the scan
 // root, so the NEXT run of the same scope can say what improved and what got
@@ -2985,6 +2984,7 @@ fn human_age(secs: u64) -> String {
     }
 }
 
+/// `tina4 metrics` — native, language-agnostic. Returns the process exit code.
 pub fn run(
     path: Option<String>,
     top: Option<usize>,

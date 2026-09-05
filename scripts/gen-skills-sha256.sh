@@ -15,7 +15,7 @@ ideacloneroot="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
 
 # Mirror install-skills.sh's skill + reference list EXACTLY. Keep the two in sync:
 # a file here that the installer does not fetch (or vice versa) fails verification.
-dev_refs="auth-and-services.md data-and-orm.md deployment.md routes-and-api.md templates-and-frontend.md realtime.md ai-coder-rule-path.svg"
+dev_refs="auth-and-services.md data-and-orm.md deployment.md routes-and-api.md templates-and-frontend.md realtime.md web-push.md ai-coder-rule-path.svg"
 
 # entry = "repo|skill|space separated references"
 entries="

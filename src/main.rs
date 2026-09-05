@@ -207,7 +207,7 @@ enum Commands {
     /// and NO running framework required: per-file LOC, cyclomatic complexity,
     /// maintainability index, coupling, function count, offenders + `--fail-on`.
     Metrics {
-        /// Directory OR file to scan (default: cwd, auto-detecting src/ or packages/*/src)
+        /// Any supported source directory OR file to scan (default: cwd, auto-detecting src/ or packages/*/src)
         #[arg(long)]
         path: Option<String>,
         /// Exit 1 when any offender is at/above this severity (CI gate)

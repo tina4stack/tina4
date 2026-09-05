@@ -1646,6 +1646,13 @@ fn collect_fragments(
 
 /// A set of fragments that share a shape.
 #[derive(Clone, Debug, Serialize)]
+pub(crate) struct CloneOccurrence {
+    pub file: String,
+    pub start_line: usize,
+    pub end_line: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct CloneGroup {
     pub files: Vec<String>,
     pub first_file: String,
@@ -1653,6 +1660,10 @@ pub(crate) struct CloneGroup {
     pub copies: usize,
     pub lines: usize,
     pub cross_file: bool,
+    /// Every source occurrence in this clone group. The legacy summary fields
+    /// remain unchanged; this makes the JSON actionable instead of naming only
+    /// the first occurrence and the participating files.
+    pub occurrences: Vec<CloneOccurrence>,
 }
 
 /// Group fragments by shape, then keep only the MAXIMAL ones.
@@ -1696,6 +1707,15 @@ fn group_clones(mut frags: Vec<CloneFragment>, paths: &[String]) -> Vec<CloneGro
             files.sort();
             files.dedup();
             let first = &g[0];
+            let mut occurrences: Vec<CloneOccurrence> = g
+                .iter()
+                .map(|f| CloneOccurrence {
+                    file: paths.get(f.file as usize).cloned().unwrap_or_default(),
+                    start_line: f.start_line,
+                    end_line: f.end_line,
+                })
+                .collect();
+            occurrences.sort_by(|a, b| a.file.cmp(&b.file).then(a.start_line.cmp(&b.start_line)));
             CloneGroup {
                 cross_file: files.len() > 1,
                 first_file: paths.get(first.file as usize).cloned().unwrap_or_default(),
@@ -1703,6 +1723,7 @@ fn group_clones(mut frags: Vec<CloneFragment>, paths: &[String]) -> Vec<CloneGro
                 copies: g.len(),
                 lines: first.lines(),
                 files,
+                occurrences,
             }
         })
         .collect();
@@ -4252,6 +4273,8 @@ pub fn sub(a: i32, b: i32) -> i32 {
             report.clones
         );
         assert_eq!(cross[0].files.len(), 2, "both files must be named");
+        assert_eq!(cross[0].occurrences.len(), 2, "every clone occurrence must be named");
+        assert!(cross[0].occurrences.iter().all(|o| o.start_line > 0 && o.end_line >= o.start_line));
         assert!(
             report
                 .offenders
@@ -5115,6 +5138,28 @@ impl Config {
         )
         .unwrap();
         assert_eq!(with_non_production.len(), 3, "the override restores test and declaration source only");
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn target_resolution_accepts_any_supported_source_directory() {
+        let directory = std::env::temp_dir().join(format!(
+            "tina4_metrics_arbitrary_source_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("widget.py"), "def widget():\n    return 1\n").unwrap();
+        fs::write(directory.join("component.ts"), "export function component() { return 1; }\n").unwrap();
+        fs::write(directory.join("notes.txt"), "not source\n").unwrap();
+
+        let (files, root) = resolve_targets(Some(directory.to_str().unwrap()), &[], false).unwrap();
+        let names: Vec<String> = files
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(root, directory.to_string_lossy());
+        assert_eq!(names, vec!["component.ts", "widget.py"]);
         let _ = fs::remove_dir_all(directory);
     }
 

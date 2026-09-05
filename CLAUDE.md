@@ -58,6 +58,10 @@ tina4 metrics                    Report code-health top offenders (complexity, l
                                  maintainability / avg complexity, marked better|worse, plus
                                  improved/regressed files). --json carries it under `delta`;
                                  --no-history reads and writes nothing.
+                                 `--path` accepts any supported source directory or file;
+                                 it does not require a Tina4 project. Use repeatable
+                                 `--exclude` switches for project-specific generated or
+                                 distributed trees (for example `**/public/js/**`).
                                  Tests/specs/declarations are excluded
                                  from production scoring by default. NATIVE +
                                  language-agnostic (ADR-0002, src/metrics.rs): scans SOURCE
@@ -70,7 +74,9 @@ tina4 metrics                    Report code-health top offenders (complexity, l
                                  (Baxter-style), language-agnostic so it covers all five
                                  languages through one code path. Finds Type-1 (exact)
                                  clones plus consistent identifier and numeric/boolean
-                                 literal renaming (Type-2); comments are ignored. Since
+                                 literal renaming (Type-2); comments are ignored. JSON
+                                 duplication groups include every occurrence's file and
+                                 start/end line. Since
                                  3.8.80 a string/template literal's CONTENT is folded into
                                  the shape hash, so two unrelated big string blobs that
                                  share the same ${...} interpolation skeleton no longer

@@ -27,4 +27,4 @@ and a `tina4 init js` scaffold whose dependencies actually install.
 - SimplySign produced the signed Windows artifact; checksums were regenerated over
   the signed bytes before the draft was published.
 
-Status: In Progress
+Status: Complete

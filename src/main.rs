@@ -1409,9 +1409,18 @@ fn handle_docs() {
         info.language.cyan()
     );
 
-    if !download_file(&zip_url, &zip_path) {
-        eprintln!("{} Download failed.", icon_fail().red());
-        return;
+    if let Some(failure) = download_file_classified(&zip_url, &zip_path).into_failure() {
+        eprintln!(
+            "{} {}",
+            icon_fail().red(),
+            report_single_download_failure(
+                &zip_path,
+                &failure,
+                &zip_url,
+                &format!("the {} documentation", info.language),
+            )
+        );
+        std::process::exit(1);
     }
 
     // Extract to temp dir
@@ -1502,13 +1511,13 @@ fn handle_books() {
         icon_play().green()
     );
 
-    if !download_file(&zip_url, &zip_path) {
+    if let Some(failure) = download_file_classified(&zip_url, &zip_path).into_failure() {
         eprintln!(
-            "{} Download failed. Check your connection or visit:\n  https://github.com/{}",
+            "{} {}",
             icon_fail().red(),
-            BOOK_REPO
+            report_single_download_failure(&zip_path, &failure, &zip_url, "the Tina4 book")
         );
-        return;
+        std::process::exit(1);
     }
 
     // Extract the zip
@@ -1604,30 +1613,24 @@ fn handle_update() {
     };
 
     let tmp_path = current_exe.with_extension("tmp");
-    let mut downloaded = false;
 
-    for name in &candidates {
+    let downloaded = download_first_candidate(&candidates, |name| {
         let url = format!(
             "https://github.com/{}/releases/download/{}/{}",
             REPO, latest_tag, name
         );
-        println!(
-            "{} Trying {} ...",
-            icon_play().green(),
-            name.cyan()
-        );
-        if download_file(&url, &tmp_path) {
-            downloaded = true;
-            break;
-        }
-    }
+        println!("{} Trying {} ...", icon_play().green(), name.cyan());
+        download_file_classified(&url, &tmp_path)
+    });
 
-    if !downloaded {
+    if let Err(failure) = downloaded {
         eprintln!(
-            "{} Download failed (tried: {}). Download manually from:\n  https://github.com/{}/releases",
-            icon_fail().red(), candidates.join(", "), REPO
+            "{} {}",
+            icon_fail().red(),
+            report_failed_download(&tmp_path, &failure, &candidates, &latest_tag)
         );
-        return;
+        // A failed update must be visible to whatever ran it.
+        std::process::exit(1);
     }
 
     // Replace current binary
@@ -2021,7 +2024,289 @@ fn get_binary_name_candidates() -> Vec<String> {
     names
 }
 
-fn download_file(url: &str, dest: &std::path::Path) -> bool {
+/// What one download attempt did, and whether another asset name could help.
+///
+/// The distinction is the whole point of this type. `Http` means the server
+/// refused the URL -- under `curl -f` that is the 404 you get for an asset
+/// name a release does not publish, and the next candidate is worth trying.
+/// Anything else went wrong on this machine (no space, no permission, no
+/// route, curl killed), and no other asset name can change that. Retrying
+/// under one only buries the real error beneath a list of 404s.
+#[derive(Debug, PartialEq, Eq)]
+enum DownloadOutcome {
+    Ok,
+    Http,
+    Local(FailureCause),
+}
+
+/// What curl's exit status says about *why* it failed.
+///
+/// The update path only ever needed "would another asset name help?", and the
+/// answer to that is no for everything here. But every call site also has to
+/// tell the user something, and naming the wrong cause is the defect this
+/// change exists to remove -- the stock build printed "Check your connection"
+/// for a full disk, and the identical line for a real connection failure.
+///
+/// So the verdict is deliberately conservative. Codes that mean one thing get
+/// one, and everything else reports what curl said and stops there, rather
+/// than inventing a story that contradicts curl's own line further up the
+/// terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FailureCause {
+    /// The bytes never arrived: DNS, connect, TLS, timeout, transport.
+    Network(String),
+    /// They arrived and could not be stored: disk full, quota, file-size limit.
+    Write(String),
+    /// Some other failure, or an interruption. No verdict offered.
+    Unclassified(String),
+}
+
+impl FailureCause {
+    /// What went wrong, in curl's terms, for embedding in a sentence.
+    fn why(&self) -> &str {
+        match self {
+            FailureCause::Network(why)
+            | FailureCause::Write(why)
+            | FailureCause::Unclassified(why) => why,
+        }
+    }
+}
+
+/// Map a curl exit code onto a cause.
+///
+/// The network codes are curl's own documented set for "never got to the
+/// server or lost it mid-transfer". 23 is its write error. Everything else --
+/// including 56, which curl uses both for a receive error and for a failed
+/// write to the destination -- stays unclassified on purpose: a wrong verdict
+/// is worse than none, because the user acts on it.
+fn cause_for_curl_code(code: i32) -> FailureCause {
+    match code {
+        5 | 6 | 7 | 28 | 35 | 52 | 55 | 60 | 92 | 97 => FailureCause::Network(format!(
+            "curl exited {} -- it could not reach the server",
+            code
+        )),
+        23 => FailureCause::Write("curl exited 23 -- it could not write the file".to_string()),
+        _ => FailureCause::Unclassified(format!("curl exited {}", code)),
+    }
+}
+
+/// Why the walk over candidate names ended without a download.
+#[derive(Debug, PartialEq, Eq)]
+enum DownloadFailure {
+    /// Every candidate was refused by the server: this release genuinely has
+    /// no asset under any name we know for this platform.
+    NoAssetForPlatform,
+    /// A candidate failed before the server could refuse it. Carries the name
+    /// it was trying and why, because that is the part the user has to act on.
+    Local { name: String, cause: FailureCause },
+}
+
+/// Map curl's exit status onto whether a different asset name could help.
+///
+/// 22 is what `--fail` returns when the HTTP response was an error, so that
+/// and only that means "wrong name, try the next one". Every other code is a
+/// condition on this machine -- 23 write error, 7 connect failure, 6 DNS, and
+/// so on. A curl killed by a signal reports no code at all (SIGXFSZ when a
+/// file-size limit is hit, for instance), which is why this takes the whole
+/// `ExitStatus` and not `.code()`: treating "no code" as a server refusal
+/// would resume the loop over a failure that had already written a truncated
+/// file to disk.
+fn classify_curl_status(status: &std::process::ExitStatus) -> DownloadOutcome {
+    if status.success() {
+        return DownloadOutcome::Ok;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            // SIGXFSZ is 25 on Linux and macOS alike. It is what a file-size
+            // limit raises -- RLIMIT_FSIZE, and some container quotas -- and
+            // it is a write failure under another name. Any other signal is
+            // an interruption we should not pretend to understand.
+            const SIGXFSZ: i32 = 25;
+            return DownloadOutcome::Local(if signal == SIGXFSZ {
+                FailureCause::Write(
+                    "curl was killed by a file-size limit (SIGXFSZ)".to_string(),
+                )
+            } else {
+                FailureCause::Unclassified(format!("curl was killed by signal {}", signal))
+            });
+        }
+    }
+    match status.code() {
+        Some(22) => DownloadOutcome::Http,
+        Some(code) => DownloadOutcome::Local(cause_for_curl_code(code)),
+        None => DownloadOutcome::Local(FailureCause::Unclassified(
+            "curl was killed by a signal".to_string(),
+        )),
+    }
+}
+
+/// Try each candidate asset name in turn, stopping at the first that lands.
+///
+/// A local failure ends the walk immediately. That is the behaviour change:
+/// the bytes never reached the disk, so the remaining names would each fail
+/// the same way, and the only thing continuing achieves is to replace a real
+/// diagnosis with a list of missing platform binaries.
+fn download_first_candidate(
+    candidates: &[String],
+    mut attempt: impl FnMut(&str) -> DownloadOutcome,
+) -> Result<String, DownloadFailure> {
+    for name in candidates {
+        match attempt(name) {
+            DownloadOutcome::Ok => return Ok(name.clone()),
+            DownloadOutcome::Http => continue,
+            DownloadOutcome::Local(cause) => {
+                return Err(DownloadFailure::Local {
+                    name: name.clone(),
+                    cause,
+                })
+            }
+        }
+    }
+    Err(DownloadFailure::NoAssetForPlatform)
+}
+
+/// Clean up after a failed download and produce what to tell the user.
+///
+/// The partial file has to go: curl leaves whatever it managed to write, and
+/// a truncated binary sitting next to the real one is both confusing and, if
+/// anything ever installed it, dangerous.
+fn report_failed_download(
+    tmp_path: &std::path::Path,
+    failure: &DownloadFailure,
+    candidates: &[String],
+    tag: &str,
+) -> String {
+    std::fs::remove_file(tmp_path).ok();
+    match failure {
+        DownloadFailure::Local { name, cause } => {
+            let dir = tmp_path
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| ".".to_string());
+            // Common to every cause: the release asset is not the problem, so
+            // the fallback names are not the answer. What follows is the part
+            // that differs, and it is only ever as strong as the evidence.
+            let lead = format!(
+                "Could not download {} to {} ({}).\n  \
+                 The release asset is fine -- trying another asset name would not \
+                 have helped.\n  ",
+                name,
+                tmp_path.display(),
+                cause.why()
+            );
+            match cause {
+                FailureCause::Write(_) => format!(
+                    "{}This failed on this machine: check free space with `df -h` and \
+                     that you can write to {}.",
+                    lead, dir
+                ),
+                FailureCause::Network(_) => format!(
+                    "{}Check the connection, and any proxy or firewall between here \
+                     and github.com.",
+                    lead
+                ),
+                FailureCause::Unclassified(_) => {
+                    format!("{}curl printed its own reason above.", lead)
+                }
+            }
+        }
+        DownloadFailure::NoAssetForPlatform => format!(
+            "Release {} publishes no asset this build knows how to ask for (tried: {}).\n  \
+             Download manually from:\n  https://github.com/{}/releases",
+            tag,
+            candidates.join(", "),
+            REPO
+        ),
+    }
+}
+
+/// The two ways a download of a single, fixed URL can fail.
+///
+/// `DownloadOutcome` carries a success variant as well, and a function whose
+/// only job is to explain a failure should not have to pretend that case can
+/// reach it.
+#[derive(Debug, PartialEq, Eq)]
+enum SingleDownloadFailure {
+    /// The server refused it -- a 404 or another HTTP error under `curl --fail`.
+    Http,
+    /// It failed before the server refused it. Carries why, because that is
+    /// the part the user can act on.
+    Local(FailureCause),
+}
+
+impl DownloadOutcome {
+    /// `None` when the download succeeded.
+    fn into_failure(self) -> Option<SingleDownloadFailure> {
+        match self {
+            DownloadOutcome::Ok => None,
+            DownloadOutcome::Http => Some(SingleDownloadFailure::Http),
+            DownloadOutcome::Local(cause) => Some(SingleDownloadFailure::Local(cause)),
+        }
+    }
+}
+
+/// Clean up after a failed single-URL download and say what actually happened.
+///
+/// `tina4 docs` and `tina4 books` each have exactly one URL, so the only
+/// question is whether the server refused it or this machine could not write
+/// it -- and guessing was the whole defect. The stock build printed
+/// "Check your connection" for a full disk, and printed the byte-identical
+/// line for a genuine connection failure, so it told the user nothing either
+/// time. When curl has already printed its own diagnosis, a fixed guess also
+/// contradicts it on screen.
+///
+/// The partial file goes, for the same reason the update path deletes its
+/// temporary: curl leaves whatever it managed to write, and a truncated zip is
+/// worth nothing to anybody.
+fn report_single_download_failure(
+    tmp_path: &std::path::Path,
+    failure: &SingleDownloadFailure,
+    url: &str,
+    what: &str,
+) -> String {
+    std::fs::remove_file(tmp_path).ok();
+    match failure {
+        SingleDownloadFailure::Local(cause) => {
+            // A bare filename has an empty parent, and "check the permissions
+            // on ." helps nobody -- name the directory the user is standing in.
+            let dir = tmp_path
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.display().to_string())
+                .or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .map(|p| p.display().to_string())
+                })
+                .unwrap_or_else(|| "the current directory".to_string());
+            let lead = format!("Could not download {} ({}).\n  ", what, cause.why());
+            match cause {
+                FailureCause::Write(_) => format!(
+                    "{}Check the free space and write permissions on {}.",
+                    lead, dir
+                ),
+                FailureCause::Network(_) => format!(
+                    "{}Check the connection, and any proxy or firewall in the way. \
+                     The file is at:\n  {}",
+                    lead, url
+                ),
+                FailureCause::Unclassified(_) => format!(
+                    "{}curl printed its own reason above. The file is at:\n  {}",
+                    lead, url
+                ),
+            }
+        }
+        SingleDownloadFailure::Http => format!(
+            "The server refused the download of {}.\n  \
+             Try again later, or fetch it yourself from:\n  {}",
+            what, url
+        ),
+    }
+}
+
+fn download_file_classified(url: &str, dest: &std::path::Path) -> DownloadOutcome {
     let dest_str = dest.to_string_lossy();
 
     let status = if console::is_windows() {
@@ -2033,7 +2318,14 @@ fn download_file(url: &str, dest: &std::path::Path) -> bool {
                 .args(["-fsSL", "-o", &dest_str, url])
                 .status()
         } else {
-            // Fallback to PowerShell with TLS 1.2 forced
+            // Fallback to PowerShell with TLS 1.2 forced. Note the trade-off:
+            // Invoke-WebRequest exits 1 for everything, so on this branch a
+            // 404 and a full disk are indistinguishable and both come back as
+            // a local failure, which stops the walk. That loses the fallback
+            // names on Windows machines with no curl.exe -- worth it only
+            // because no release since v3.2.0 has used one of those names,
+            // while a misreported local failure costs every user who hits it.
+            // Untested: this path needs a Windows box without curl.exe.
             std::process::Command::new("powershell")
                 .args(["-NoProfile", "-Command",
                     &format!("[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing", url, dest_str)])
@@ -2045,7 +2337,15 @@ fn download_file(url: &str, dest: &std::path::Path) -> bool {
             .status()
     };
 
-    matches!(status, Ok(s) if s.success())
+    match status {
+        Ok(status) => classify_curl_status(&status),
+        // curl itself could not be started at all -- not a server problem.
+        // curl never started, so nothing was reached and nothing was written.
+        Err(e) => DownloadOutcome::Local(FailureCause::Unclassified(format!(
+            "the downloader could not be started: {}",
+            e
+        ))),
+    }
 }
 
 // ── Tina4-js AI context ─────────────────────────────────────────
@@ -2142,6 +2442,310 @@ Always read and follow `.claude/skills/tina4-js/SKILL.md` when working with this
 
 #[cfg(test)]
 mod tests {
+
+
+    // ---- download failure reporting --------------------------------------
+    //
+    // Every download in the CLI went through one function that returned a
+    // bool, so no caller could tell a refused HTTP response from a failure on
+    // this machine, and each invented a reason. `tina4 update` moved on to the
+    // next candidate name, 404'd through the rest, and summarised it as a list
+    // of platform binaries -- read by users as "there is no build for my
+    // machine" while the build was fine and their disk was not. `tina4 books`
+    // told them to check a connection that was working. `tina4 docs` said
+    // nothing at all.
+    //
+    // The bool is gone. What replaced it has to earn the diagnosis it prints,
+    // which is what these tests hold: the classification, the wording that
+    // follows from it, and the cases where the honest answer is that we do not
+    // know.
+
+    /// Real `ExitStatus` values, from real processes. Hand-built statuses
+    /// would only prove that the mapping matches itself.
+    fn status_of(script: &str) -> std::process::ExitStatus {
+        std::process::Command::new("sh")
+            .args(["-c", script])
+            .status()
+            .expect("sh should run")
+    }
+
+    #[test]
+    fn curl_http_failure_is_the_only_one_worth_another_asset_name() {
+        assert_eq!(classify_curl_status(&status_of("exit 0")), DownloadOutcome::Ok);
+        assert_eq!(classify_curl_status(&status_of("exit 22")), DownloadOutcome::Http);
+        // 23 is curl's write error -- the full-disk case.
+        assert!(matches!(
+            classify_curl_status(&status_of("exit 23")),
+            DownloadOutcome::Local(_)
+        ));
+        // 7 is a connect failure.
+        assert!(matches!(
+            classify_curl_status(&status_of("exit 7")),
+            DownloadOutcome::Local(_)
+        ));
+    }
+
+    #[test]
+    fn a_signalled_curl_is_local_not_a_missing_asset() {
+        // curl hitting RLIMIT_FSIZE dies on SIGXFSZ and reports no exit code
+        // at all, having already written a partial file. Reading that as a
+        // server refusal is exactly how a truncated download used to be
+        // followed by 404s for names nobody was ever going to get.
+        let status = status_of("kill -XFSZ $$");
+        assert!(status.code().is_none(), "expected a signalled status, got {:?}", status);
+        assert!(matches!(classify_curl_status(&status), DownloadOutcome::Local(_)));
+    }
+
+    #[test]
+    fn a_local_failure_stops_the_walk_instead_of_trying_more_names() {
+        let names: Vec<String> = ["real", "old-name", "older-name"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut tried: Vec<String> = Vec::new();
+        let result = download_first_candidate(&names, |name| {
+            tried.push(name.to_string());
+            DownloadOutcome::Local(FailureCause::Write(
+                "no space left on device".to_string(),
+            ))
+        });
+        assert_eq!(
+            tried,
+            vec!["real".to_string()],
+            "a local failure must not be followed by more candidates"
+        );
+        match result {
+            Err(DownloadFailure::Local { name, cause }) => {
+                assert_eq!(name, "real");
+                assert!(cause.why().contains("no space"));
+            }
+            other => panic!("expected a local failure, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn every_name_is_tried_when_the_server_refuses_each_one() {
+        let names: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let mut tried = 0;
+        let result = download_first_candidate(&names, |_| {
+            tried += 1;
+            DownloadOutcome::Http
+        });
+        assert_eq!(tried, 3, "an HTTP refusal is what the fallback names exist for");
+        assert_eq!(result, Err(DownloadFailure::NoAssetForPlatform));
+    }
+
+    #[test]
+    fn the_first_name_that_lands_wins_and_the_rest_are_left_alone() {
+        let names: Vec<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let mut tried: Vec<String> = Vec::new();
+        let result = download_first_candidate(&names, |name| {
+            tried.push(name.to_string());
+            if name == "b" { DownloadOutcome::Ok } else { DownloadOutcome::Http }
+        });
+        assert_eq!(result, Ok("b".to_string()));
+        assert_eq!(tried, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn a_failed_download_leaves_no_partial_file_behind() {
+        let dir = std::env::temp_dir().join(format!("tina4-dl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = dir.join("tina4.tmp");
+        std::fs::write(&tmp, vec![0u8; 65536]).unwrap();
+        assert!(tmp.is_file());
+
+        let names = vec!["tina4-linux-amd64".to_string()];
+        let failure = DownloadFailure::Local {
+            name: "tina4-linux-amd64".to_string(),
+            cause: cause_for_curl_code(23),
+        };
+        let message = report_failed_download(&tmp, &failure, &names, "v3.8.78");
+
+        assert!(!tmp.exists(), "the truncated download must be removed");
+        std::fs::remove_dir_all(&dir).ok();
+
+        // The message has to point at this machine, not at the release.
+        assert!(message.contains("this machine"), "message was: {}", message);
+        assert!(message.contains("df -h"), "message was: {}", message);
+        assert!(
+            !message.contains("Download manually"),
+            "a local failure must not send the user to the releases page: {}",
+            message
+        );
+    }
+
+    #[test]
+    fn a_genuinely_missing_asset_still_names_every_candidate() {
+        let dir = std::env::temp_dir().join(format!("tina4-dl2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = dir.join("tina4.tmp");
+        let names: Vec<String> = ["tina4-plan9-amd64", "tina4-plan9-x86_64"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let message =
+            report_failed_download(&tmp, &DownloadFailure::NoAssetForPlatform, &names, "v3.8.78");
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(message.contains("tina4-plan9-amd64"));
+        assert!(message.contains("tina4-plan9-x86_64"));
+        assert!(message.contains("v3.8.78"));
+        assert!(message.contains("Download manually"));
+    }
+
+    /// Every advice line has to match the cause it was given.
+    ///
+    /// This is the property the whole change turns on: the stock build printed
+    /// "Check your connection" for a full disk and the identical line for a
+    /// real connection failure, so the advice carried no information. Naming
+    /// the wrong remedy is worse than naming none, because the user acts on
+    /// it. Both message builders are checked against every cause, which is the
+    /// cell the earlier fix missed -- it classified the status and then gave
+    /// disk advice for all of them.
+    #[test]
+    fn no_message_recommends_a_remedy_that_does_not_match_its_cause() {
+        let dir = std::env::temp_dir().join(format!("tina4-dl3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = dir.join("tina4.tmp");
+        let names = vec!["tina4-linux-amd64".to_string()];
+
+        let disk = ["df -h", "free space"];
+        let net = ["connection", "proxy", "firewall"];
+
+        for cause in [
+            FailureCause::Write("curl exited 23".to_string()),
+            FailureCause::Network("curl exited 7".to_string()),
+            FailureCause::Unclassified("curl exited 56".to_string()),
+        ] {
+            let update = report_failed_download(
+                &tmp,
+                &DownloadFailure::Local {
+                    name: "tina4-linux-amd64".to_string(),
+                    cause: cause.clone(),
+                },
+                &names,
+                "v3.8.78",
+            );
+            let single = report_single_download_failure(
+                &tmp,
+                &SingleDownloadFailure::Local(cause.clone()),
+                "https://example.invalid/thing.zip",
+                "the Tina4 book",
+            );
+
+            for (label, message) in [("update", &update), ("single", &single)] {
+                let says_disk = disk.iter().any(|n| message.contains(n));
+                let says_net = net.iter().any(|n| message.contains(n));
+                match cause {
+                    FailureCause::Write(_) => {
+                        assert!(says_disk, "{} write message gave no disk advice: {}", label, message);
+                        assert!(!says_net, "{} write message blamed the network: {}", label, message);
+                    }
+                    FailureCause::Network(_) => {
+                        assert!(says_net, "{} network message gave no network advice: {}", label, message);
+                        assert!(!says_disk, "{} network message blamed the disk: {}", label, message);
+                    }
+                    FailureCause::Unclassified(_) => {
+                        assert!(
+                            !says_disk && !says_net,
+                            "{} unclassified message invented a cause: {}",
+                            label, message
+                        );
+                    }
+                }
+                // Whatever the cause, curl's own words have to survive into it.
+                assert!(
+                    message.contains(cause.why()),
+                    "{} message dropped what curl reported: {}",
+                    label, message
+                );
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// curl's exit codes carry the cause. Reading only "is it 22?" is what let
+    /// a connect failure be reported as a full disk.
+    #[test]
+    fn curl_exit_codes_are_mapped_to_the_cause_they_mean() {
+        assert!(matches!(cause_for_curl_code(23), FailureCause::Write(_)));
+        for network in [5, 6, 7, 28, 35, 52, 55, 60, 92, 97] {
+            assert!(
+                matches!(cause_for_curl_code(network), FailureCause::Network(_)),
+                "curl {} should read as a network failure",
+                network
+            );
+        }
+        // 56 is curl's code for both a receive error and a failed write to the
+        // destination -- the exact code from the report that started this. It
+        // must stay unclassified rather than pick one and be wrong half the time.
+        assert!(matches!(cause_for_curl_code(56), FailureCause::Unclassified(_)));
+        assert!(matches!(cause_for_curl_code(99), FailureCause::Unclassified(_)));
+    }
+
+    /// A file-size limit kills curl with SIGXFSZ and sets no exit code at all.
+    /// That is a write failure; any other signal is an interruption we should
+    /// not pretend to diagnose.
+    #[test]
+    #[cfg(unix)]
+    fn a_size_limit_signal_reads_as_a_write_failure_and_other_signals_do_not() {
+        let xfsz = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("kill -XFSZ $$")
+            .status()
+            .expect("sh should run");
+        assert!(
+            matches!(
+                classify_curl_status(&xfsz),
+                DownloadOutcome::Local(FailureCause::Write(_))
+            ),
+            "SIGXFSZ should read as a write failure"
+        );
+
+        let term = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("kill -TERM $$")
+            .status()
+            .expect("sh should run");
+        assert!(
+            matches!(
+                classify_curl_status(&term),
+                DownloadOutcome::Local(FailureCause::Unclassified(_))
+            ),
+            "an interrupted curl should not be diagnosed as anything"
+        );
+    }
+
+    /// The single-URL path is what `tina4 docs` and `tina4 books` use. A
+    /// success must produce no failure at all, and a failure must take the
+    /// partial file with it.
+    #[test]
+    fn a_successful_single_download_has_no_failure_and_a_failed_one_cleans_up() {
+        assert_eq!(DownloadOutcome::Ok.into_failure(), None);
+        assert_eq!(
+            DownloadOutcome::Http.into_failure(),
+            Some(SingleDownloadFailure::Http)
+        );
+
+        let dir = std::env::temp_dir().join(format!("tina4-dl4-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = dir.join("tina4-book.zip");
+        std::fs::write(&tmp, vec![0u8; 1024]).unwrap();
+
+        let message = report_single_download_failure(
+            &tmp,
+            &SingleDownloadFailure::Http,
+            "https://example.invalid/main.zip",
+            "the Tina4 book",
+        );
+        assert!(!tmp.exists(), "the truncated zip must be removed");
+        assert!(
+            message.contains("refused"),
+            "an HTTP failure should say the server refused it: {}",
+            message
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
     use super::*;
 
     /// Create a temp .env file and hand its path to the test. Each test

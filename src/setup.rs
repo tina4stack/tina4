@@ -823,23 +823,184 @@ fn skills_target_from_choice(choice: &str) -> &'static str {
     }
 }
 
+/// Where the AI-skills installer comes from: two independent CDNs serving the
+/// same bytes for the same path.
+///
+/// One host is not enough. On 2026-09-08 a developer's `tina4 update` died on
+/// "Error 503 Backend.max_conn reached" from the Varnish tier in front of
+/// raw.githubusercontent.com. The installer these URLs point at already
+/// survives that -- it retries three times and falls back to the jsDelivr
+/// mirror for every skill file it downloads. The one fetch with neither was
+/// the fetch of the installer itself.
+const SKILLS_INSTALLER_SOURCES_SH: [&str; 2] = [
+    "https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.sh",
+    "https://cdn.jsdelivr.net/gh/tina4stack/tina4@main/install-skills.sh",
+];
+const SKILLS_INSTALLER_SOURCES_PS1: [&str; 2] = [
+    "https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.ps1",
+    "https://cdn.jsdelivr.net/gh/tina4stack/tina4@main/install-skills.ps1",
+];
+
+/// Attempts per source, and the pause between them. The same numbers the
+/// installer scripts use for their own downloads.
+const SKILLS_FETCH_ATTEMPTS: u32 = 3;
+const SKILLS_FETCH_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// A ceiling on the whole walk.
+///
+/// `curl` is invoked here without a timeout, the same as everywhere else in
+/// this client, so a host that accepts a connection and then says nothing can
+/// hang for as long as the OS allows. Six attempts where the shipped code made
+/// one would multiply that wait by six. Once this much time has gone, no
+/// further attempt is started -- a slow update is a bug report of its own, and
+/// the point of the retries is a CDN that answers quickly and badly, which is
+/// what the reporter hit.
+const SKILLS_FETCH_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Fetch the installer into `dest`, trying every source in turn.
+///
+/// A *local* failure does not end this walk, and that is deliberate -- it is
+/// the opposite of `download_file`'s rule for release assets. That walk tries
+/// different asset names on one host, so a full disk or a dead route dooms
+/// every remaining name equally and continuing only buries the real error.
+/// These are two different hosts. "Could not reach raw.githubusercontent.com"
+/// says nothing at all about jsDelivr, so every source gets its turn and the
+/// last failure is what gets reported.
+fn fetch_skills_installer(sources: &[&str], dest: &Path) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    let mut last = "no source was tried".to_string();
+    let mut first = true;
+    for url in sources {
+        for attempt in 1..=SKILLS_FETCH_ATTEMPTS {
+            // The first attempt always runs, however long getting here took.
+            if !first && started.elapsed() >= SKILLS_FETCH_BUDGET {
+                return Err(format!("{last} (gave up after {}s)", started.elapsed().as_secs()));
+            }
+            first = false;
+            match crate::download_file_classified(url, dest) {
+                crate::DownloadOutcome::Ok => return Ok(()),
+                crate::DownloadOutcome::Http => {
+                    last = format!("{url} answered with an HTTP error")
+                }
+                crate::DownloadOutcome::Local(cause) => {
+                    last = format!("{url}: {}", cause.why())
+                }
+            }
+            // A refused download can still have left a partial or empty file.
+            let _ = fs::remove_file(dest);
+            if attempt < SKILLS_FETCH_ATTEMPTS {
+                std::thread::sleep(SKILLS_FETCH_DELAY);
+            }
+        }
+    }
+    Err(last)
+}
+
+/// A private directory to stage the installer in.
+///
+/// `create_dir` fails if the path already exists, so this can never be aimed at
+/// something another user planted in a world-writable temp directory -- and the
+/// name carries a timestamp as well as the pid so a recycled pid cannot make a
+/// stale directory block every future run. On Unix it is then narrowed to 0700,
+/// because the next thing that happens to its contents is that a shell runs
+/// them.
+fn skills_stage_dir() -> io::Result<PathBuf> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!("tina4-skills-{}-{}", std::process::id(), stamp));
+    fs::create_dir(&dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(dir)
+}
+
+/// Escape a path for embedding in a single-quoted PowerShell string.
+fn ps_single_quote(path: &Path) -> String {
+    path.display().to_string().replace('\'', "''")
+}
+
 fn install_skills_target(target: &str) -> bool {
     println!("  {} Installing tina4 AI skills for {}...", icon_play().green(), target);
-    let ok = if console::is_windows() {
+
+    let windows = console::is_windows();
+    let sources: &[&str] = if windows {
+        &SKILLS_INSTALLER_SOURCES_PS1
+    } else {
+        &SKILLS_INSTALLER_SOURCES_SH
+    };
+
+    let stage = match skills_stage_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            println!(
+                "  {} Could not create a temporary directory for the skills installer — {}",
+                icon_warn().yellow(),
+                e
+            );
+            println!(
+                "  {} Skills install skipped — run later: {}",
+                icon_warn().yellow(),
+                "tina4 ai".cyan()
+            );
+            return false;
+        }
+    };
+    let script = stage.join(if windows {
+        "install-skills.ps1"
+    } else {
+        "install-skills.sh"
+    });
+
+    // Download first, run second.
+    //
+    // The old shape was `curl -fsSL <url> | sh`, and it could not see a failed
+    // download at all: a pipeline exits with the status of its LAST command,
+    // and `sh` reading the empty stdin that `curl -f` leaves behind exits 0.
+    // So on macOS and Linux a 503 was reported as a successful refresh, with
+    // nothing installed and nothing said. Windows was luckier only because
+    // PowerShell exits non-zero when `irm` throws -- it printed a raw .NET
+    // exception, but it did at least say the refresh had failed.
+    if let Err(why) = fetch_skills_installer(sources, &script) {
+        let _ = fs::remove_dir_all(&stage);
+        println!(
+            "  {} Could not download the skills installer — {}",
+            icon_warn().yellow(),
+            why
+        );
+        println!(
+            "  {} Skills install skipped — run later: {}",
+            icon_warn().yellow(),
+            "tina4 ai".cyan()
+        );
+        return false;
+    }
+
+    let ok = if windows {
+        // Still `iex` over the file's contents, not `-File`. Running a
+        // downloaded .ps1 with `-File` has to clear the execution policy and
+        // the mark-of-the-web; a string handed to `iex` clears neither because
+        // neither applies to it. Only where the bytes come from has changed.
         run_status(
             "powershell",
             &[
                 "-NoProfile",
                 "-Command",
-                &format!("$env:TINA4_SKILLS_TARGET='{target}'; irm https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.ps1 | iex"),
+                &format!(
+                    "$ErrorActionPreference='Stop'; $env:TINA4_SKILLS_TARGET='{target}'; iex (Get-Content -Raw '{}')",
+                    ps_single_quote(&script)
+                ),
             ],
         )
     } else {
-        run_status(
-            "sh",
-            &["-c", &format!("curl -fsSL https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.sh | TINA4_SKILLS_TARGET={target} sh")],
-        )
+        run_status_env("sh", &[&script], &[("TINA4_SKILLS_TARGET", target)])
     };
+    let _ = fs::remove_dir_all(&stage);
+
     if !ok {
         println!(
             "  {} Skills install skipped — run later: {}",
@@ -1354,6 +1515,70 @@ mod tests {
     fn all_ai_choice_round_trips_in_setup_config() {
         assert_eq!(ai_from_str(ai_to_str(AiChoice::All)), AiChoice::All);
     }
+
+    /// The installer has to be reachable from more than one host. A single
+    /// source is what a 503 from raw.githubusercontent.com turned into a
+    /// failed `tina4 update`, and collapsing these lists back onto one host
+    /// -- or onto two URLs at the same host -- brings that back.
+    #[test]
+    fn the_skills_installer_has_a_second_host_to_fall_back_to() {
+        for sources in [&SKILLS_INSTALLER_SOURCES_SH, &SKILLS_INSTALLER_SOURCES_PS1] {
+            let hosts: std::collections::BTreeSet<&str> = sources
+                .iter()
+                .map(|url| url.split('/').nth(2).expect("every source is an absolute URL"))
+                .collect();
+            assert!(
+                hosts.len() > 1,
+                "every installer source resolves to one host: {:?}",
+                sources
+            );
+        }
+    }
+
+    /// Both platforms must fetch the same installer, or a fix proven on one
+    /// silently misses the other.
+    #[test]
+    fn both_platforms_draw_on_the_same_set_of_hosts() {
+        let hosts = |sources: &[&str]| -> Vec<String> {
+            sources
+                .iter()
+                .map(|url| url.split('/').nth(2).unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(
+            hosts(&SKILLS_INSTALLER_SOURCES_SH),
+            hosts(&SKILLS_INSTALLER_SOURCES_PS1)
+        );
+    }
+
+    /// The staged path is interpolated into a single-quoted PowerShell string.
+    /// A Windows username with an apostrophe would otherwise end the string and
+    /// leave the rest of the path to be parsed as code.
+    #[test]
+    fn a_quote_in_the_staging_path_cannot_escape_the_powershell_string() {
+        assert_eq!(ps_single_quote(Path::new("/tmp/plain")), "/tmp/plain");
+        assert_eq!(
+            ps_single_quote(Path::new("/tmp/o'brien/install-skills.ps1")),
+            "/tmp/o''brien/install-skills.ps1"
+        );
+    }
+
+    /// Retrying is worth the wait only while it stays bounded. `curl` is run
+    /// without a timeout here, so the ceiling is what keeps six attempts from
+    /// costing six hangs.
+    #[test]
+    fn the_fetch_walk_is_bounded() {
+        assert!(SKILLS_FETCH_ATTEMPTS >= 2, "one attempt is what broke");
+        let worst_case_sleep = SKILLS_FETCH_DELAY
+            * (SKILLS_FETCH_ATTEMPTS - 1)
+            * SKILLS_INSTALLER_SOURCES_SH.len() as u32;
+        assert!(
+            worst_case_sleep < SKILLS_FETCH_BUDGET,
+            "the sleeps alone exhaust the budget: {:?} >= {:?}",
+            worst_case_sleep,
+            SKILLS_FETCH_BUDGET
+        );
+    }
 }
 
 /// Is the runtime for this language already on the machine? Lets quick runs
@@ -1411,6 +1636,23 @@ fn prompt(label: &str, default: &str) -> String {
     } else {
         t.to_string()
     }
+}
+
+/// `run_status` with extra environment for the child, and paths passed as
+/// arguments rather than interpolated into a shell string -- a temp directory
+/// containing a space or a quote is then just a path, not a syntax error.
+fn run_status_env(cmd: &str, args: &[&Path], env: &[(&str, &str)]) -> bool {
+    let mut command = Command::new(cmd);
+    command.args(args);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn run_status(cmd: &str, args: &[&str]) -> bool {

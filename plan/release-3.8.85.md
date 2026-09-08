@@ -24,4 +24,4 @@ outage instead of dying on it.
 - SimplySign produced the signed Windows artifact; checksums regenerated over the
   signed bytes before the draft was published.
 
-Status: In Progress
+Status: Complete

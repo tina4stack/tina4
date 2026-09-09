@@ -20,7 +20,7 @@ set -eu
 
 # Pin skills to a released tag, not a moving branch, so an install is reproducible.
 # Bump this when the skills change in a new release. Override with TINA4_SKILLS_REF.
-ref="${TINA4_SKILLS_REF:-3.13.135}"
+ref="${TINA4_SKILLS_REF:-3.13.136}"
 target="${TINA4_SKILLS_TARGET:-}"
 skill_home="${TINA4_SKILLS_HOME:-$HOME}"
 # Three sources, tried in this order per file: tina4.com (Tina4's own infra),
@@ -160,9 +160,10 @@ install_skill tina4-nodejs  tina4-developer-nodejs  $DEV_REFS
 install_skill tina4-python  tina4-js          html-and-components.md signals-and-reactivity.md persistence.md rtc.md
 install_skill tina4-python  tina4-maintainer  cli-and-deployment.md frond-and-frontend.md routing-and-orm.md subsystems.md
 install_skill tina4-python  tina4-architect
+install_skill tina4-python  tina4-design
 
 verify_checksums
 publish_skills
 
 echo ""
-echo "  Done - seven skills installed for $target (ref $ref). Restart your coding tool to pick them up."
+echo "  Done - eight skills installed for $target (ref $ref). Restart your coding tool to pick them up."

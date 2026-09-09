@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 
 # Pin skills to a released tag, not a moving branch, so an install is reproducible.
 # Bump this when the skills change in a new release. Override with TINA4_SKILLS_REF.
-$ref = if ($env:TINA4_SKILLS_REF) { $env:TINA4_SKILLS_REF } else { "3.13.135" }
+$ref = if ($env:TINA4_SKILLS_REF) { $env:TINA4_SKILLS_REF } else { "3.13.136" }
 $target = $env:TINA4_SKILLS_TARGET
 $skillHome = if ($env:TINA4_SKILLS_HOME) { $env:TINA4_SKILLS_HOME } else { $HOME }
 # Three sources, tried in this order per file: tina4.com (Tina4's own infra),
@@ -48,6 +48,7 @@ $installs = @(
   @{ repo = "tina4-python"; skill = "tina4-js";               refs = @("html-and-components.md", "signals-and-reactivity.md", "persistence.md", "rtc.md") }
   @{ repo = "tina4-python"; skill = "tina4-maintainer";       refs = @("cli-and-deployment.md", "frond-and-frontend.md", "routing-and-orm.md", "subsystems.md") }
   @{ repo = "tina4-python"; skill = "tina4-architect";        refs = @() }
+  @{ repo = "tina4-python"; skill = "tina4-design";           refs = @() }
 )
 $legacySkills = @("tina4-developer")
 
@@ -176,13 +177,13 @@ try {
 }
 
 Write-Host ""
-Write-Host "  Done - seven skills installed for $target (ref $ref). Restart your coding tool to pick them up." -ForegroundColor Green
+Write-Host "  Done - eight skills installed for $target (ref $ref). Restart your coding tool to pick them up." -ForegroundColor Green
 
 # SIG # Begin signature block
 # MIIoPAYJKoZIhvcNAQcCoIIoLTCCKCkCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCD/XVe/yYGH6tpu
-# COoBoJqyk5WLH36cW5wJVV0XpL940qCCINgwggbNMIIEtaADAgECAhEAu/DMtbe4
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBYfGP0YsM4f2KN
+# XyKZEp1+MhhubWl8IyAOa5mM663VXKCCINgwggbNMIIEtaADAgECAhEAu/DMtbe4
 # Mf0hrjJ3iuQMiTANBgkqhkiG9w0BAQwFADCBgDELMAkGA1UEBhMCUEwxIjAgBgNV
 # BAoTGVVuaXpldG8gVGVjaG5vbG9naWVzIFMuQS4xJzAlBgNVBAsTHkNlcnR1bSBD
 # ZXJ0aWZpY2F0aW9uIEF1dGhvcml0eTEkMCIGA1UEAxMbQ2VydHVtIFRydXN0ZWQg
@@ -362,36 +363,36 @@ Write-Host "  Done - seven skills installed for $target (ref $ref). Restart your
 # LjE4MDYGA1UEAxMvQ2VydHVtIEV4dGVuZGVkIFZhbGlkYXRpb24gQ29kZSBTaWdu
 # aW5nIDIwMjEgQ0ECEFIdiL99yRWe40RYYdsSYcYwDQYJYIZIAWUDBAIBBQCggYgw
 # GQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYJKoZIhvcNAQkFMQ8XDTI2MDkw
-# OTEwNDQwNlowHAYKKwYBBAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcN
-# AQkEMSIEIDwMSI4GpgjM+h4ZxV3INei6YDs3wevZ07NMkGhdzofcMA0GCSqGSIb3
-# DQEBAQUABIIBgFVfEnM0Xcv5roRA7yCclkwksQBVv38+/8eKgRSHJbCygp41X1x8
-# J9cVBxP3NHC1bXxWJAh6gTt4NzfLT/RY6xtcshttbdyaPLLUf46ReKFU+HT2n4aM
-# AY4yAX/QH7ZhpJuZstiKmITiRPzN09mMtCgUrKSIncBzcukBCjFyxFCgonKQITYW
-# +CbBKc+5H/BHaByWtsPk1ABETFeuy+PL/5K6syYRpYgVxkd2kd9mOfyqkHOPDi4m
-# PWCkfdjd1G3freh73VHp3z7kxnrdD+zRBugC2opLEzgGYqOymK4WAacRKr2vm2nx
-# CB2IaFNscL2JhlECnxD80V3dY0u4MiHfax30BwhYLhl4CTCf9ZyHDJwpb9caWRvG
-# cvt2Jha9SbSXm2rCKVBXf7PgLk7tCYxZkWq0fQky6LS6O8HyGt6R8ezj6ixpnAUL
-# zIS5figSCQpESQI3SIRS8N1K6H6vnGfLHpgedJHI3vGIXocfih9ceNAU4BJieoSE
-# iOn1GKY3Q7E766GCBAIwggP+BgkqhkiG9w0BCQYxggPvMIID6wIBATBqMFYxCzAJ
+# OTE2NTgyN1owHAYKKwYBBAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcN
+# AQkEMSIEIJ5cRea5/g/zo8gw4bmSQlNJk4LQH8Ng/QQ6jLXVmVoEMA0GCSqGSIb3
+# DQEBAQUABIIBgAvqjMbVnF87fpr2BqZsC+wC13G1G1BOy4HgqUJz+0MPRGs8sHS6
+# N9uLS/GDk1erd8xMNtnc8e3fxL+Eiaqt4C2CAdAm+AKb2QHKLHDTk1dVbZlOJMcG
+# ZvRUYAoW/B7nVTpMhU0frqOBfHnkrBpSNsq8ASfDBnO0Vad5lzcH6mzAft/GQP+x
+# C0YjoycCALeKXsg4e8PqJSo9fu/J23JT3BtWGYSk6ukpqU7/nxmc911L2rhtj2ci
+# 1GSyHEgSiYCyBJmAD90alRz8IYtbduKSYRRE2J2FL73APu7HhEv0scfGTyh2IJFE
+# 3INOZfvu1SYouRI3SBTTg7k/oR9H02mp7CdqBAMcEMIn4ciZbJ/GOvIoktPpf3Et
+# OT0fe6iPMBORx2Vq4H/kbJoacG2HNjnIjD5BuIwy+2kGgG9h1X4LCaWOdfFqLs2o
+# DMqsn6Vpz7hPCthBaHBGq25so79C6YrRo/T526WNH1FMvTx9yHnt9BJv+7QZdl+P
+# 0erQlIPm0p8UUKGCBAIwggP+BgkqhkiG9w0BCQYxggPvMIID6wIBATBqMFYxCzAJ
 # BgNVBAYTAlBMMSEwHwYDVQQKExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAi
 # BgNVBAMTG0NlcnR1bSBUaW1lc3RhbXBpbmcgMjAyMSBDQQIQKPB3wRw2vf5fdDJH
 # cCcuAzANBglghkgBZQMEAgIFAKCCAVYwGgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJ
-# EAEEMBwGCSqGSIb3DQEJBTEPFw0yNjA5MDkxMDQ0MTBaMDcGCyqGSIb3DQEJEAIv
+# EAEEMBwGCSqGSIb3DQEJBTEPFw0yNjA5MDkxNjU4MzFaMDcGCyqGSIb3DQEJEAIv
 # MSgwJjAkMCIEIIW+kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EFJcQ8MD8GCSqG
-# SIb3DQEJBDEyBDBv48jAdW+XUPLE/f+p7GhM7PxW6hmK2CPIiKoHDTLRvo8FoIV0
-# aTE+jfeRfZXxWOUwgZ8GCyqGSIb3DQEJEAIMMYGPMIGMMIGJMIGGBBRXFGhBDKha
+# SIb3DQEJBDEyBDCk4pc8k4uWDuJbPRd8AHKRboDwq+kEQ4SYLZzwpTgUyNiYZ/qI
+# IapJDKveWE8ZLDswgZ8GCyqGSIb3DQEJEAIMMYGPMIGMMIGJMIGGBBRXFGhBDKha
 # 80JO+RZKUTYQ9NONmDBuMFqkWDBWMQswCQYDVQQGEwJQTDEhMB8GA1UEChMYQXNz
 # ZWNvIERhdGEgU3lzdGVtcyBTLkEuMSQwIgYDVQQDExtDZXJ0dW0gVGltZXN0YW1w
 # aW5nIDIwMjEgQ0ECECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcNAQEBBQAEggIA
-# bFKuGB6vge6SoI2elqQKtNxfrjzBWIAQWju0b4+w1fqSBLYAZao4OaAV5igypbka
-# xyQB2DkXCVXk1myXlYKZNPOUGii/v3MGqKhKHUKyps+S1wX3JBhvtMeuhpmqHYZW
-# s7+y7zbKa2NLQLk8zzJU32N/qvonk89qEhiSBxHLVgT+nFjKW4IRjN2XchWgqbJ1
-# V2A7cftFtpspTr6qevGaOXSfVtdD69ww1jzXHieod/7elPjXyxQAzND5OauYa5/J
-# MAjUQKbw7dMzlGW5XyjsESPLqRHShRhpvsmZP5PFzRfWeKnzdIoZgBY7vfEsLDdk
-# Qaz7Xz7IPgVS9AMX1xoZJH9qthTQ2DqQYRZnUV8HB1zMVkWp5jr+xj6TH38BGCuZ
-# 4WDRpnQr5aV0nxAyT22fyra7hQQN9iZTiimEoWU69NiohZn1saW7JeunvmBHdSLs
-# ygifbG/C62Ju1VaQ3yVsWabQheudKi2vtvZRd7qgDutADNBkcDBoFxItjaV1h+EJ
-# FEtAih3ufkBbBkyFvSup3jDa2eztDZ8CWI5iafnEOnA5kNyfHQVjXL0VGfqewzlf
-# qApV6rHRxp0S1wHiOA0lvPOaxVUm84Bhi/3PuoqJMSRp0V2pqv34xva+x47vCXJn
-# utI1kn9zlGwvdAe5b0PFqR3CJsQAnjCvQUyHlPFm7SA=
+# Z9HFskFS57/Z3QXDYpFKH+4IxthLKb7RIS2nHCfaGF3GUEDwB8gmN9tkdi58AGU8
+# VR1SOORGT/6Q47S2xoztkX97sIAmURJjNADDFdu+GcZ2WOBdeWoJPMhtb7+JzXR4
+# BubtgG/GBPlK2Wx4UnnCuOh04ILFoJmrtJluo0LWPFSJ0z7JtnLJg2hZLPg1QgWC
+# y06H1dIIc/rhJUoIbZ5IX5+uWVut4v2bsT/f+hCztGCsYMwqFPBqqqHnr2xBur57
+# wgELLEyhAZR3tK4taG6xJ2zyY0hndIaNqLsimdd37NVnQS9/ea5bGyagCYc4SrJq
+# dBEMR0EgwK4Kc4Ji3ISDauxa31Az3QHxT/gtl9+dd0XiBDvpUN4h6tAHL3A+3XXw
+# jPQk8rfASqs0dVafYDn9XyJRnQ/oLli0bWtJVx9W7oIDOiqVPYAWt5x4eKYxVXE7
+# D5hyo1jnGp38twdKEivd0cH9xgRrxhgTx3mPho6nKxGbYDR8jot0aK91ntGfpqxP
+# 3L68LB/fNiEr3EX2UjXcztXBn9gjBBeS1DO0osW5Ln4zYubzExTYQuEnAg6QqlNc
+# TZV7xTpuDicgV+V8E5PL0m9CQIYhE4urK02f9eM3VKOUYGmq78uYuPugT3S5ephl
+# ASemHv4ONkkbuJeNJ76OwoA0TZ/vg8iaOxL5t/KW4E0=
 # SIG # End signature block

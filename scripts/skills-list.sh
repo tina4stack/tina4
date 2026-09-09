@@ -19,8 +19,8 @@
 skills_dev_refs="auth-and-services.md data-and-orm.md deployment.md routes-and-api.md templates-and-frontend.md realtime.md web-push.md ai-coder-rule-path.svg"
 
 # Per-language developer skills come from their own framework repo. The shared
-# skills (tina4-js, tina4-maintainer, tina4-architect) have a canonical copy in
-# tina4-python and are served from there.
+# skills (tina4-js, tina4-maintainer, tina4-architect, tina4-design) have a
+# canonical copy in tina4-python and are served from there.
 skills_entries() {
   cat <<EOF
 tina4-python|tina4-developer-python|$skills_dev_refs
@@ -30,5 +30,6 @@ tina4-nodejs|tina4-developer-nodejs|$skills_dev_refs
 tina4-python|tina4-js|html-and-components.md signals-and-reactivity.md persistence.md rtc.md
 tina4-python|tina4-maintainer|cli-and-deployment.md frond-and-frontend.md routing-and-orm.md subsystems.md
 tina4-python|tina4-architect|
+tina4-python|tina4-design|
 EOF
 }

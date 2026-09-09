@@ -449,7 +449,7 @@ fn parse_ref_from_installer(script: &str) -> Option<String> {
 fn is_version(v: &str) -> bool {
     let mut parts = v.split('.');
     let is_num = |p: Option<&str>| {
-        p.map_or(false, |s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+        p.is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
     };
     is_num(parts.next()) && is_num(parts.next()) && is_num(parts.next()) && parts.next().is_none()
 }

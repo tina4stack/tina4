@@ -12,8 +12,16 @@ $ErrorActionPreference = "Stop"
 $ref = if ($env:TINA4_SKILLS_REF) { $env:TINA4_SKILLS_REF } else { "3.13.135" }
 $target = $env:TINA4_SKILLS_TARGET
 $skillHome = if ($env:TINA4_SKILLS_HOME) { $env:TINA4_SKILLS_HOME } else { $HOME }
-$primaryRoot = if ($env:TINA4_SKILLS_PRIMARY_ROOT) { $env:TINA4_SKILLS_PRIMARY_ROOT } else { "https://raw.githubusercontent.com/tina4stack" }
-$mirrorRoot = if ($env:TINA4_SKILLS_MIRROR_ROOT) { $env:TINA4_SKILLS_MIRROR_ROOT } else { "https://cdn.jsdelivr.net/gh/tina4stack" }
+# Three sources, tried in this order per file: tina4.com (Tina4's own infra),
+# jsDelivr (a cached CDN mirror), then raw.githubusercontent (the GitHub origin).
+# tina4.com is FIRST so the common path never depends on GitHub raw, which 503s
+# during GitHub incidents; jsDelivr and raw remain automatic fallbacks and the
+# sha256 manifest still gates every downloaded file. Each source has its OWN path
+# shape (tina4.com is flat; jsDelivr uses repo@ref; raw uses repo/ref), composed
+# per-tier in Get-Tina4SkillUrls. Override any tier for a mirror or an air-gap.
+$tina4Root = if ($env:TINA4_SKILLS_TINA4_ROOT) { $env:TINA4_SKILLS_TINA4_ROOT } else { "https://tina4.com/skills" }
+$jsdelivrRoot = if ($env:TINA4_SKILLS_JSDELIVR_ROOT) { $env:TINA4_SKILLS_JSDELIVR_ROOT } else { "https://cdn.jsdelivr.net/gh/tina4stack" }
+$rawRoot = if ($env:TINA4_SKILLS_RAW_ROOT) { $env:TINA4_SKILLS_RAW_ROOT } else { "https://raw.githubusercontent.com/tina4stack" }
 $retryCount = if ($env:TINA4_SKILLS_RETRY_COUNT) { [int]$env:TINA4_SKILLS_RETRY_COUNT } else { 3 }
 $retryDelay = if ($env:TINA4_SKILLS_RETRY_DELAY) { [int]$env:TINA4_SKILLS_RETRY_DELAY } else { 2 }
 $destinations = switch ($target) {
@@ -67,6 +75,21 @@ function Invoke-Tina4Download {
   throw "Every download source failed for $Destination"
 }
 
+function Get-Tina4SkillUrls {
+  # Candidate URLs for one skill file, in priority order: tina4.com (flat,
+  # stage-relative), jsDelivr, raw.
+  param(
+    [Parameter(Mandatory = $true)][string]$Repo,
+    [Parameter(Mandatory = $true)][string]$Skill,
+    [Parameter(Mandatory = $true)][string]$Relative
+  )
+  @(
+    "$tina4Root/$ref/$Skill/$Relative",
+    "$jsdelivrRoot/${Repo}@$ref/.claude/skills/$Skill/$Relative",
+    "$rawRoot/$Repo/$ref/.claude/skills/$Skill/$Relative"
+  )
+}
+
 function Test-Tina4Checksums {
   # Verify every staged file against skills.sha256 (published in tina4 at $ref by
   # scripts/gen-skills-sha256.sh) BEFORE anything is installed, so a tampered or
@@ -78,8 +101,9 @@ function Test-Tina4Checksums {
   $sha256 = [System.Security.Cryptography.SHA256]::Create()
   try {
     Invoke-Tina4Download -Urls @(
-      "$primaryRoot/tina4/$ref/skills.sha256",
-      "$mirrorRoot/tina4@$ref/skills.sha256"
+      "$tina4Root/$ref/skills.sha256",
+      "$jsdelivrRoot/tina4@$ref/skills.sha256",
+      "$rawRoot/tina4/$ref/skills.sha256"
     ) -Destination $manifest
     $lines = @(Get-Content -LiteralPath $manifest | Where-Object { $_ -match '\S' })
     if ($lines.Count -eq 0) {
@@ -114,19 +138,13 @@ Write-Host ""
 
 try {
   foreach ($i in $installs) {
-    $base = "$primaryRoot/$($i.repo)/$ref/.claude/skills"
-    $mirror = "$mirrorRoot/$($i.repo)@$ref/.claude/skills"
     $refdir = Join-Path $stage "$($i.skill)\references"
     New-Item -ItemType Directory -Path $refdir -Force | Out-Null
-    Invoke-Tina4Download -Urls @(
-      "$base/$($i.skill)/SKILL.md",
-      "$mirror/$($i.skill)/SKILL.md"
-    ) -Destination (Join-Path $stage "$($i.skill)\SKILL.md")
+    Invoke-Tina4Download -Urls (Get-Tina4SkillUrls $i.repo $i.skill "SKILL.md") `
+      -Destination (Join-Path $stage "$($i.skill)\SKILL.md")
     foreach ($reference in $i.refs) {
-      Invoke-Tina4Download -Urls @(
-        "$base/$($i.skill)/references/$reference",
-        "$mirror/$($i.skill)/references/$reference"
-      ) -Destination (Join-Path $refdir $reference)
+      Invoke-Tina4Download -Urls (Get-Tina4SkillUrls $i.repo $i.skill "references/$reference") `
+        -Destination (Join-Path $refdir $reference)
     }
     Write-Host "  + $($i.skill)  ($($i.repo))" -ForegroundColor Green
   }
@@ -163,8 +181,8 @@ Write-Host "  Done - seven skills installed for $target (ref $ref). Restart your
 # SIG # Begin signature block
 # MIIoPAYJKoZIhvcNAQcCoIIoLTCCKCkCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCD2upZY/3byGu7G
-# AukI0MESnM7l/I6RjoTI8Cd3pAPFJKCCINgwggbNMIIEtaADAgECAhEAu/DMtbe4
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCD/XVe/yYGH6tpu
+# COoBoJqyk5WLH36cW5wJVV0XpL940qCCINgwggbNMIIEtaADAgECAhEAu/DMtbe4
 # Mf0hrjJ3iuQMiTANBgkqhkiG9w0BAQwFADCBgDELMAkGA1UEBhMCUEwxIjAgBgNV
 # BAoTGVVuaXpldG8gVGVjaG5vbG9naWVzIFMuQS4xJzAlBgNVBAsTHkNlcnR1bSBD
 # ZXJ0aWZpY2F0aW9uIEF1dGhvcml0eTEkMCIGA1UEAxMbQ2VydHVtIFRydXN0ZWQg
@@ -344,36 +362,36 @@ Write-Host "  Done - seven skills installed for $target (ref $ref). Restart your
 # LjE4MDYGA1UEAxMvQ2VydHVtIEV4dGVuZGVkIFZhbGlkYXRpb24gQ29kZSBTaWdu
 # aW5nIDIwMjEgQ0ECEFIdiL99yRWe40RYYdsSYcYwDQYJYIZIAWUDBAIBBQCggYgw
 # GQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYJKoZIhvcNAQkFMQ8XDTI2MDkw
-# OTA5MzI1MlowHAYKKwYBBAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcN
-# AQkEMSIEINN2/F/rKjwEQPEa2lWIybiDYhAeqVpRt7vzvwCQBq78MA0GCSqGSIb3
-# DQEBAQUABIIBgMsdUAkI4cuh6283AFj5hSsMpC++18eaIFu+L2PgGMIlKcvF84NY
-# RaCSjyt1qcWLZEdqFDkYK6ztm5yge35qhqf5jjrAtQaPK57dIFfy/yMQYtZJVW0X
-# mZeu2Ez+bl3s66dCR14whx3hD8F6Vfa02nViXF9eVNQdBEIPiD8mfkYtFdz7d3ED
-# ZNnn+8upymd5ALRNUJJ71lSOFLnWAOs3F1YVOM18DQmxWSMEWeOexgd+hbKJCrFf
-# X/n5CBEELEAVZqeWC0ATedjIdNJROiQeXgwubomV1ZPcKvrhZ60l0ilVgjYho420
-# MhhnnXUuxZ6HhHrFNBzhkYawgnreU5LSwKYc4fHtoycclX3zNuieNQbXo0wnqJ4/
-# xY+2/GO0/eLObS+LKPW8VoHSvyUikfIj36hmEzgG+vwSJ7U5RnFjn+W18seDDKvQ
-# czv6EM+oppPCRt7/6sT3TXvnpIx0J9l2w88dQiZArZ4kwkYeo0MJjTeZMXVlUMZE
-# R4CSi3R+oHHoi6GCBAIwggP+BgkqhkiG9w0BCQYxggPvMIID6wIBATBqMFYxCzAJ
+# OTEwNDQwNlowHAYKKwYBBAGCNwIBCzEOMAwGCisGAQQBgjcCARUwLwYJKoZIhvcN
+# AQkEMSIEIDwMSI4GpgjM+h4ZxV3INei6YDs3wevZ07NMkGhdzofcMA0GCSqGSIb3
+# DQEBAQUABIIBgFVfEnM0Xcv5roRA7yCclkwksQBVv38+/8eKgRSHJbCygp41X1x8
+# J9cVBxP3NHC1bXxWJAh6gTt4NzfLT/RY6xtcshttbdyaPLLUf46ReKFU+HT2n4aM
+# AY4yAX/QH7ZhpJuZstiKmITiRPzN09mMtCgUrKSIncBzcukBCjFyxFCgonKQITYW
+# +CbBKc+5H/BHaByWtsPk1ABETFeuy+PL/5K6syYRpYgVxkd2kd9mOfyqkHOPDi4m
+# PWCkfdjd1G3freh73VHp3z7kxnrdD+zRBugC2opLEzgGYqOymK4WAacRKr2vm2nx
+# CB2IaFNscL2JhlECnxD80V3dY0u4MiHfax30BwhYLhl4CTCf9ZyHDJwpb9caWRvG
+# cvt2Jha9SbSXm2rCKVBXf7PgLk7tCYxZkWq0fQky6LS6O8HyGt6R8ezj6ixpnAUL
+# zIS5figSCQpESQI3SIRS8N1K6H6vnGfLHpgedJHI3vGIXocfih9ceNAU4BJieoSE
+# iOn1GKY3Q7E766GCBAIwggP+BgkqhkiG9w0BCQYxggPvMIID6wIBATBqMFYxCzAJ
 # BgNVBAYTAlBMMSEwHwYDVQQKExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAi
 # BgNVBAMTG0NlcnR1bSBUaW1lc3RhbXBpbmcgMjAyMSBDQQIQKPB3wRw2vf5fdDJH
 # cCcuAzANBglghkgBZQMEAgIFAKCCAVYwGgYJKoZIhvcNAQkDMQ0GCyqGSIb3DQEJ
-# EAEEMBwGCSqGSIb3DQEJBTEPFw0yNjA5MDkwOTMyNTdaMDcGCyqGSIb3DQEJEAIv
+# EAEEMBwGCSqGSIb3DQEJBTEPFw0yNjA5MDkxMDQ0MTBaMDcGCyqGSIb3DQEJEAIv
 # MSgwJjAkMCIEIIW+kOEK0kONfMkotq9IsJqyCBd87PiwEmxY05EFJcQ8MD8GCSqG
-# SIb3DQEJBDEyBDCSRXVhJdBl4mQmEU3Tv6Ke5jpUd0XaaccEyINq+BfJYig28Zz2
-# Gbqw4uyEaU1q+3gwgZ8GCyqGSIb3DQEJEAIMMYGPMIGMMIGJMIGGBBRXFGhBDKha
+# SIb3DQEJBDEyBDBv48jAdW+XUPLE/f+p7GhM7PxW6hmK2CPIiKoHDTLRvo8FoIV0
+# aTE+jfeRfZXxWOUwgZ8GCyqGSIb3DQEJEAIMMYGPMIGMMIGJMIGGBBRXFGhBDKha
 # 80JO+RZKUTYQ9NONmDBuMFqkWDBWMQswCQYDVQQGEwJQTDEhMB8GA1UEChMYQXNz
 # ZWNvIERhdGEgU3lzdGVtcyBTLkEuMSQwIgYDVQQDExtDZXJ0dW0gVGltZXN0YW1w
 # aW5nIDIwMjEgQ0ECECjwd8EcNr3+X3QyR3AnLgMwDQYJKoZIhvcNAQEBBQAEggIA
-# qOdpublnx68N5jYe/Ptku4rRo1xFEI3sQwClD7whmuH9Kvx3SwEdynkLHNyG0KTo
-# xJqswfmqBr6mdnc9gYqT3rFYy8ubFimbwU7IWShW0oDjkh8kVvI0RBjhIep5dF6a
-# Y+GUbouU0mafvnSoMTcYuo5/mGmEOij0xQ8/07TBIeazTDKQrlo2fZqLgdq3c4em
-# pwn2yMlioGc/QXIATk6v5veUUks3EjM5RzRmLDL+wPYG41Z/VHjZ3YzvZVI06QuF
-# RfKQCD19e8rcHPds33Y7ZuAVAAy0tMt3MzDZppuBs/OWSuyGxzXtsMiULi0C/OxX
-# VwyKXlb21zclenc6tpsn4K+Vm1pl7n8RGG/DeZU8PAnaQHy7rc6AuMBePHXkT4Ny
-# ZSgoEEzPZ+jUJQ6ZtRjidklGYBzUVTYFa+0bqYHbXtxvF2sHn7DjmCLAtbZHMsat
-# XnvXvKuKAefWfAdUIzs85d3URx4jDpohq9m2P3h4wGMoKLkmoAq3ZdCyzD5jFQRn
-# tb0QF12GF9+NFgz9r6cvkGYpOMYnCnKU20Q8o6EELCUhirjUlnycK0uQFAU8zNY0
-# ahcOMzKC9sq2WVX1bqGCtyQRw9gWCrEv9HRxKWDOuwn+UKv4x1YKBXguASx9CV4m
-# hth5TQxCNClLccYqgDXxGSTZTZ/KNLtpxnqwT3JyxEA=
+# bFKuGB6vge6SoI2elqQKtNxfrjzBWIAQWju0b4+w1fqSBLYAZao4OaAV5igypbka
+# xyQB2DkXCVXk1myXlYKZNPOUGii/v3MGqKhKHUKyps+S1wX3JBhvtMeuhpmqHYZW
+# s7+y7zbKa2NLQLk8zzJU32N/qvonk89qEhiSBxHLVgT+nFjKW4IRjN2XchWgqbJ1
+# V2A7cftFtpspTr6qevGaOXSfVtdD69ww1jzXHieod/7elPjXyxQAzND5OauYa5/J
+# MAjUQKbw7dMzlGW5XyjsESPLqRHShRhpvsmZP5PFzRfWeKnzdIoZgBY7vfEsLDdk
+# Qaz7Xz7IPgVS9AMX1xoZJH9qthTQ2DqQYRZnUV8HB1zMVkWp5jr+xj6TH38BGCuZ
+# 4WDRpnQr5aV0nxAyT22fyra7hQQN9iZTiimEoWU69NiohZn1saW7JeunvmBHdSLs
+# ygifbG/C62Ju1VaQ3yVsWabQheudKi2vtvZRd7qgDutADNBkcDBoFxItjaV1h+EJ
+# FEtAih3ufkBbBkyFvSup3jDa2eztDZ8CWI5iafnEOnA5kNyfHQVjXL0VGfqewzlf
+# qApV6rHRxp0S1wHiOA0lvPOaxVUm84Bhi/3PuoqJMSRp0V2pqv34xva+x47vCXJn
+# utI1kn9zlGwvdAe5b0PFqR3CJsQAnjCvQUyHlPFm7SA=
 # SIG # End signature block

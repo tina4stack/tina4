@@ -56,11 +56,15 @@ $docs_dir/docs/public/install-skills.sh
 $docs_dir/docs/public/install-skills.ps1
 "
 
-# Pull either the canonical content pin or the public bootstrap tag.
+# Pull either the canonical content pin or the public bootstrap tag. The bootstrap
+# wrappers now fetch the inner installer from tina4.com FIRST, so its
+# tina4.com/skills/<ver>/install-skills URL carries the pin too and must be read
+# and bumped alongside the jsDelivr/raw ones.
 current_ref() {
   sed -nE \
     -e 's/.*TINA4_SKILLS_REF:-([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' \
     -e 's/.*else \{ "([0-9]+\.[0-9]+\.[0-9]+)" \}.*/\1/p' \
+    -e 's|.*tina4\.com/skills/([0-9]+\.[0-9]+\.[0-9]+)/install-skills.*|\1|p' \
     -e 's|.*tina4stack/tina4[@/]([0-9]+\.[0-9]+\.[0-9]+)/install-skills.*|\1|p' \
     "$1" | head -1
 }
@@ -91,6 +95,7 @@ for f in $files; do
   sed -i.bak -E \
     -e "s/(TINA4_SKILLS_REF:-)[0-9]+\.[0-9]+\.[0-9]+/\1$version/g" \
     -e "s/(else \{ \")[0-9]+\.[0-9]+\.[0-9]+(\")/\1$version\2/g" \
+    -e "s|(tina4\.com/skills/)[0-9]+\.[0-9]+\.[0-9]+(/install-skills)|\1$version\2|g" \
     -e "s|(tina4stack/tina4[@/])[0-9]+\.[0-9]+\.[0-9]+(/install-skills)|\1$version\2|g" \
     "$f"
   rm -f "$f.bak"
@@ -115,4 +120,6 @@ echo
 echo "Pin bumped to $version. Next:"
 echo "  1. sign and commit tina4/install-skills.ps1 after its final edit"
 echo "  2. create the bare $version tag in tina4 and all framework repos"
-echo "  3. commit and deploy tina4-documentation/docs/public/install-skills.{sh,ps1}"
+echo "  3. stage the tina4.com bundle:  scripts/gen-skills-bundle.sh $version"
+echo "  4. commit + deploy tina4-documentation: docs/public/install-skills.{sh,ps1}"
+echo "     AND docs/public/skills/$version/  (Jenkins publishes to tina4.com/skills/$version/)"

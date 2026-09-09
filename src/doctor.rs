@@ -421,13 +421,37 @@ fn classify_skills(dir_exists: bool, installed: Option<String>, latest: LatestRe
 
 /// Pull the pinned version out of the installer script's
 /// `ref="${TINA4_SKILLS_REF:-X.Y.Z}"` default. Pure - unit-tested.
+///
+/// Scans EVERY occurrence of the marker and returns the first one followed by a
+/// real MAJOR.MINOR.PATCH version. Prose that merely names the override token
+/// (a comment above the real assignment, with no version after it) is skipped,
+/// so a doc comment can never fool the parser into reading a non-version.
 fn parse_ref_from_installer(script: &str) -> Option<String> {
     let marker = "TINA4_SKILLS_REF:-";
-    let start = script.find(marker)? + marker.len();
-    let rest = &script[start..];
-    let end = rest.find(|c: char| c == '}' || c == '"' || c == '\'' || c.is_whitespace())?;
-    let v = rest[..end].trim();
-    if v.is_empty() { None } else { Some(v.to_string()) }
+    let mut from = 0;
+    while let Some(rel) = script[from..].find(marker) {
+        let start = from + rel + marker.len();
+        let rest = &script[start..];
+        let end = rest
+            .find(|c: char| c == '}' || c == '"' || c == '\'' || c.is_whitespace())
+            .unwrap_or(rest.len());
+        let v = rest[..end].trim();
+        if is_version(v) {
+            return Some(v.to_string());
+        }
+        from = start;
+    }
+    None
+}
+
+/// True for a bare MAJOR.MINOR.PATCH of ASCII digits (e.g. `3.13.135`). Keeps the
+/// ref parser from latching onto a marker mention that has no version after it.
+fn is_version(v: &str) -> bool {
+    let mut parts = v.split('.');
+    let is_num = |p: Option<&str>| {
+        p.map_or(false, |s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+    };
+    is_num(parts.next()) && is_num(parts.next()) && is_num(parts.next()) && parts.next().is_none()
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -742,6 +766,24 @@ mod tests {
     #[test]
     fn parse_ref_none_when_absent() {
         assert_eq!(parse_ref_from_installer("nothing to see"), None);
+    }
+
+    #[test]
+    fn parse_ref_skips_a_comment_that_names_the_token() {
+        // The tina4.com bootstrap carries a comment naming the override token
+        // ABOVE the real `ref=` assignment. The first raw `find` would read the
+        // comment's `<ver>` placeholder; the parser must skip it (no version) and
+        // return the real pin from the assignment below.
+        let s = "# doctor reads the TINA4_SKILLS_REF:-<ver> default here\n\
+                 ref=\"${TINA4_SKILLS_REF:-3.13.135}\"\n";
+        assert_eq!(parse_ref_from_installer(s), Some("3.13.135".to_string()));
+    }
+
+    #[test]
+    fn parse_ref_ignores_marker_with_no_version() {
+        // A marker mention with a non-version token and nothing else -> None,
+        // never a garbage "ref" like "<ver>".
+        assert_eq!(parse_ref_from_installer("see TINA4_SKILLS_REF:-latest\n"), None);
     }
 
     #[test]

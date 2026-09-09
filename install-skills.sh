@@ -23,8 +23,17 @@ set -eu
 ref="${TINA4_SKILLS_REF:-3.13.135}"
 target="${TINA4_SKILLS_TARGET:-}"
 skill_home="${TINA4_SKILLS_HOME:-$HOME}"
-primary_root="${TINA4_SKILLS_PRIMARY_ROOT:-https://raw.githubusercontent.com/tina4stack}"
-mirror_root="${TINA4_SKILLS_MIRROR_ROOT:-https://cdn.jsdelivr.net/gh/tina4stack}"
+# Three sources, tried in this order per file: tina4.com (Tina4's own infra),
+# jsDelivr (a cached CDN mirror), then raw.githubusercontent (the GitHub origin).
+# tina4.com is FIRST so the common path never depends on GitHub raw, which 503s
+# during GitHub incidents; jsDelivr and raw remain as automatic fallbacks and the
+# sha256 manifest still gates every downloaded file. Each source has its OWN path
+# shape (tina4.com is flat; jsDelivr uses repo@ref; raw uses repo/ref), composed
+# per-tier in skill_urls and in verify_checksums rather than by swapping one root
+# prefix. Override any tier for a self-hosted mirror or an air-gapped install.
+tina4_root="${TINA4_SKILLS_TINA4_ROOT:-https://tina4.com/skills}"
+jsdelivr_root="${TINA4_SKILLS_JSDELIVR_ROOT:-https://cdn.jsdelivr.net/gh/tina4stack}"
+raw_root="${TINA4_SKILLS_RAW_ROOT:-https://raw.githubusercontent.com/tina4stack}"
 retry_count="${TINA4_SKILLS_RETRY_COUNT:-3}"
 retry_delay="${TINA4_SKILLS_RETRY_DELAY:-2}"
 
@@ -59,17 +68,24 @@ download_file() {
   return 1
 }
 
+# skill_urls <repo> <skill> <relative-path>
+# Echo the candidate URLs for one skill file, in priority order: tina4.com (flat,
+# stage-relative), jsDelivr, raw. Whitespace-safe because URLs never contain a
+# space, so the caller can pass the result unquoted to download_file.
+skill_urls() {
+  echo "${tina4_root}/${ref}/$2/$3"
+  echo "${jsdelivr_root}/$1@${ref}/.claude/skills/$2/$3"
+  echo "${raw_root}/$1/${ref}/.claude/skills/$2/$3"
+}
+
 # install_skill <repo> <skill> <reference.md ...>
 install_skill() {
   repo="$1"; skill="$2"; shift 2
-  base="${primary_root}/${repo}/${ref}/.claude/skills"
-  mirror="${mirror_root}/${repo}@${ref}/.claude/skills"
   mkdir -p "$stage/$skill/references"
-  download_file "$stage/$skill/SKILL.md" \
-    "$base/$skill/SKILL.md" "$mirror/$skill/SKILL.md"
+  download_file "$stage/$skill/SKILL.md" $(skill_urls "$repo" "$skill" "SKILL.md")
   for reference in "$@"; do
     download_file "$stage/$skill/references/$reference" \
-      "$base/$skill/references/$reference" "$mirror/$skill/references/$reference"
+      $(skill_urls "$repo" "$skill" "references/$reference")
   done
   echo "  + $skill  ($repo)"
 }
@@ -80,8 +96,9 @@ install_skill() {
 # installed. install-skills.sh needs no code signature; this is its integrity layer.
 verify_checksums() {
   download_file "$manifest_file" \
-    "${primary_root}/tina4/${ref}/skills.sha256" \
-    "${mirror_root}/tina4@${ref}/skills.sha256"
+    "${tina4_root}/${ref}/skills.sha256" \
+    "${jsdelivr_root}/tina4@${ref}/skills.sha256" \
+    "${raw_root}/tina4/${ref}/skills.sha256"
   if [ ! -s "$manifest_file" ]; then
     echo "error: skills checksum manifest is empty -- refusing to install" >&2
     return 1

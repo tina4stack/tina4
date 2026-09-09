@@ -11,22 +11,14 @@
 # install-skills.sh stages before it verifies.
 set -eu
 
-ideacloneroot="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+ideacloneroot="${1:-$(cd "$script_dir/../.." && pwd)}"
 
-# Mirror install-skills.sh's skill + reference list EXACTLY. Keep the two in sync:
-# a file here that the installer does not fetch (or vice versa) fails verification.
-dev_refs="auth-and-services.md data-and-orm.md deployment.md routes-and-api.md templates-and-frontend.md realtime.md web-push.md ai-coder-rule-path.svg"
-
-# entry = "repo|skill|space separated references"
-entries="
-tina4-python|tina4-developer-python|$dev_refs
-tina4-php|tina4-developer-php|$dev_refs
-tina4-ruby|tina4-developer-ruby|$dev_refs
-tina4-nodejs|tina4-developer-nodejs|$dev_refs
-tina4-python|tina4-js|html-and-components.md signals-and-reactivity.md persistence.md rtc.md
-tina4-python|tina4-maintainer|cli-and-deployment.md frond-and-frontend.md routing-and-orm.md subsystems.md
-tina4-python|tina4-architect|
-"
+# The skill + reference list is shared with gen-skills-bundle.sh so the manifest
+# and the tina4.com bundle can never disagree. install-skills.sh keeps its own
+# copy (it ships standalone); the installer verifies against THIS manifest, so a
+# drifted installer fails loud at `sha256 -c` rather than silently.
+. "$script_dir/skills-list.sh"
 
 if command -v sha256sum >/dev/null 2>&1; then
   hash_of() { sha256sum "$1" | awk '{print $1}'; }
@@ -43,7 +35,7 @@ emit() {   # emit <source-file> <stage-relative-path>
 }
 
 {
-  printf '%s\n' "$entries" | while IFS='|' read -r repo skill refs; do
+  skills_entries | while IFS='|' read -r repo skill refs; do
     [ -n "$skill" ] || continue
     root="$ideacloneroot/$repo/.claude/skills/$skill"
     emit "$root/SKILL.md" "$skill/SKILL.md"

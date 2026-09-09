@@ -54,15 +54,85 @@ stage="$(mktemp -d)"
 manifest_file="$(mktemp)"
 trap 'rm -rf "$stage" "$manifest_file"' EXIT
 
-# download_file <destination> <primary-url> <fallback-url>
+# Hosts that have stopped answering during THIS run, as "scheme://host".
+#
+# A host that is down stays down for the seconds an install takes, and there are 48
+# files to fetch from three tiers. Without this, an outage costs a full retry walk
+# per file per dead tier -- (retry_count + 1) doomed requests and
+# retry_count x retry_delay seconds, 48 times over -- to re-establish something the
+# first file already proved.
+dead_hosts=""
+
+# The unit that goes down is the host, not the path. Two tiers pointed at the same
+# host therefore share its fate, which is what an outage actually looks like; a
+# self-hosted setup that puts several tiers on one machine simply gets no benefit
+# from this rather than a wrong answer.
+host_of() {
+  # Falls back to the whole URL rather than the empty string: an empty key would
+  # collide with every other empty key in the dead list and skip sources at random.
+  echo "$1" | sed -n 's,^\([A-Za-z][A-Za-z0-9+.-]*://[^/]*\).*,\1,p' | grep . || echo "$1"
+}
+
+host_is_dead() {
+  case " $dead_hosts " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+# fetch_one <destination> <url> -- one full retry walk against one URL.
+#
+#   0  got it
+#   1  this path is not on this host (4xx) -- says nothing about the next file, and
+#      is expected while a tier is still catching up with a freshly published ref
+#   2  the host is not answering (5xx, or no answer at all) -- which is equally true
+#      for every file still to come, and is the only thing worth remembering
+#
+# curl -f collapses every HTTP error into exit 22, so the status has to come from
+# --write-out, which is printed on failure too. A refused connection, a DNS failure
+# and a timeout all report 000, and all mean the same thing here.
+fetch_one() {
+  code="$(curl -fsSL --retry "$retry_count" --retry-delay "$retry_delay" \
+            --write-out '%{http_code}' "$2" -o "$1")" && return 0
+  rm -f "$1"
+  case "$code" in
+    000|5??) return 2 ;;
+    *) return 1 ;;
+  esac
+}
+
+# download_file <destination> <url ...>  -- sources in priority order.
+#
+# Two passes. The first skips hosts already known to be down, which is what makes an
+# outage cost one retry walk instead of 48. The second tries exactly those skipped
+# hosts, so nothing is ever lost: a host is only skipped while another source is
+# still worth trying, and if every remaining source fails, the run still attempts the
+# skipped one before giving up.
 download_file() {
   destination="$1"; shift
+  skipped=""
   for url in "$@"; do
-    if curl -fsSL --retry "$retry_count" --retry-delay "$retry_delay" "$url" -o "$destination"; then
+    host="$(host_of "$url")"
+    if host_is_dead "$host"; then
+      skipped="$skipped $url"
+      continue
+    fi
+    if fetch_one "$destination" "$url"; then
+      return 0
+    else
+      status=$?
+    fi
+    if [ "$status" -eq 2 ]; then
+      dead_hosts="$dead_hosts $host"
+      echo "  ! $host is not answering; using the next source for the rest of this run" >&2
+    else
+      echo "  ! not served by $host, trying next source: $url" >&2
+    fi
+  done
+  for url in $skipped; do
+    if fetch_one "$destination" "$url"; then
       return 0
     fi
-    rm -f "$destination"
-    echo "  ! download failed, trying next source: $url" >&2
   done
   echo "error: every download source failed for $destination" >&2
   return 1

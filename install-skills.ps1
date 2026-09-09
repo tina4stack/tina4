@@ -52,25 +52,117 @@ $installs = @(
 )
 $legacySkills = @("tina4-developer")
 
+# Hosts that have stopped answering during THIS run.
+#
+# A host that is down stays down for the seconds an install takes, and there are 48
+# files to fetch from three tiers. Without this, an outage costs a full retry walk
+# per file per dead tier -- ($retryCount + 1) doomed requests and
+# $retryCount x $retryDelay seconds, 48 times over -- to re-establish something the
+# first file already proved.
+$script:tina4DeadHosts = @()
+
+# The unit that goes down is the host, not the path.
+function Get-Tina4Host {
+  param([Parameter(Mandatory = $true)][string]$Url)
+
+  try {
+    $parsed = [uri]$Url
+    return "$($parsed.Scheme)://$($parsed.Authority)"
+  } catch {
+    return $Url
+  }
+}
+
+# 0 when the request never got an HTTP answer at all -- refused, DNS, timeout.
+function Get-Tina4StatusCode {
+  param($ErrorRecord)
+
+  # Both guards matter under Set-StrictMode, which a caller can have set: the
+  # bootstrap runs this script through iex, in the caller's scope.
+  $response = $null
+  try {
+    $response = $ErrorRecord.Exception.Response
+  } catch {
+    $response = $null
+  }
+  if ($null -eq $response) { return 0 }
+
+  $code = 0
+  try {
+    $code = [int]$response.StatusCode
+  } catch {
+    $code = 0
+  }
+  return $code
+}
+
+# One full retry walk against one URL.
+#
+#   0  got it
+#   1  this path is not on this host (4xx) -- says nothing about the next file, and
+#      is expected while a tier is still catching up with a freshly published ref
+#   2  the host is not answering (5xx, or no answer at all) -- which is equally true
+#      for every file still to come, and is the only thing worth remembering
+function Invoke-Tina4Fetch {
+  param(
+    [Parameter(Mandatory = $true)][string]$Url,
+    [Parameter(Mandatory = $true)][string]$Destination
+  )
+
+  $code = 0
+  for ($attempt = 0; $attempt -le $retryCount; $attempt++) {
+    try {
+      Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination
+      return 0
+    } catch {
+      Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
+      $code = Get-Tina4StatusCode $_
+      if ($attempt -lt $retryCount) {
+        Start-Sleep -Seconds $retryDelay
+      }
+    }
+  }
+  if ($code -eq 0 -or ($code -ge 500 -and $code -le 599)) {
+    return 2
+  }
+  return 1
+}
+
+# Two passes. The first skips hosts already known to be down, which is what makes an
+# outage cost one retry walk instead of 48. The second tries exactly those skipped
+# hosts, so nothing is ever lost: a host is only skipped while another source is
+# still worth trying, and if every remaining source fails, the run still attempts the
+# skipped one before giving up.
 function Invoke-Tina4Download {
   param(
     [Parameter(Mandatory = $true)][string[]]$Urls,
     [Parameter(Mandatory = $true)][string]$Destination
   )
 
+  $skipped = @()
   foreach ($url in $Urls) {
-    for ($attempt = 0; $attempt -le $retryCount; $attempt++) {
-      try {
-        Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $Destination
-        return
-      } catch {
-        Remove-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
-        if ($attempt -lt $retryCount) {
-          Start-Sleep -Seconds $retryDelay
-        }
-      }
+    # Not $host: PowerShell already owns that name.
+    $urlHost = Get-Tina4Host -Url $url
+    if ($script:tina4DeadHosts -contains $urlHost) {
+      $skipped += $url
+      continue
     }
-    Write-Warning "Download failed, trying next source: $url"
+    $status = Invoke-Tina4Fetch -Url $url -Destination $Destination
+    if ($status -eq 0) {
+      return
+    }
+    if ($status -eq 2) {
+      $script:tina4DeadHosts += $urlHost
+      Write-Warning "$urlHost is not answering; using the next source for the rest of this run"
+    } else {
+      Write-Warning "Not served by $urlHost, trying next source: $url"
+    }
+  }
+
+  foreach ($url in $skipped) {
+    if ((Invoke-Tina4Fetch -Url $url -Destination $Destination) -eq 0) {
+      return
+    }
   }
 
   throw "Every download source failed for $Destination"

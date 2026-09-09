@@ -71,17 +71,27 @@ removed the TINA4_SKILLS_REF marker from the bootstrap); restored + parser harde
       the CLI parser to skip a marker mention with no version + 2 lock-in tests.
 
 ## Commits
-- (pending: tina4 main + tina4-documentation main -- staged, awaiting ps1 re-sign)
+- tina4 main `3ca8c23`  installers 3-tier + scripts + doctor fix (pushed)
+- tina4-documentation main `2edd764`  bundle + bootstraps + .gitattributes + audit skip (pushed)
 
-## Release steps (remaining -- blocked only on SimplySign for the ps1 re-sign)
-1. [ ] SimplySign logged in -> re-sign tina4/install-skills.ps1
-       (`sh scripts/sign-installers-mac.sh install-skills.ps1`)
-2. [ ] commit tina4 main: scripts/{skills-list,gen-skills-bundle,gen-skills-sha256,bump-skills-ref}.sh,
-       install-skills.{sh,ps1}, src/doctor.rs, plan/  (no new bare tag needed)
-3. [ ] regenerate bundle into REAL tree: scripts/gen-skills-bundle.sh 3.13.135
-4. [ ] commit + push tina4-documentation main: docs/public/install-skills.{sh,ps1}
-       + docs/public/skills/3.13.135/  -> Jenkins deploys to tina4.com  (needs approval)
-5. [ ] verify live: curl tina4.com/install-skills.sh | ... TINA4_SKILLS_TARGET=claude sh
+## Release steps (DONE)
+1. [x] re-signed tina4/install-skills.ps1 (EV; SimplySign lapsed twice, re-auth then Succeeded;
+       osslsigncode verify ok, digest match)
+2. [x] committed + pushed tina4 main (no new bare tag)
+3. [x] regenerated bundle into the real tree
+4. [x] committed + pushed tina4-documentation main -> Jenkins deployed to tina4.com (~4.3 min)
+5. [x] verified live:
+       - tina4.com/skills/3.13.135/skills.sha256 == committed manifest (47 files)
+       - bootstrap is the new 3-tier + ref pin
+       - served install-skills.ps1 byte-identical to the signed source (Windows sig intact)
+       - real `curl tina4.com/install-skills.sh | sh` -> 47 verified, 7 skills, marker 3.13.135
+       - with BOTH GitHub tiers dead, tina4.com ALONE installs all 7 (self-sufficient)
 
-## Status: mechanism BUILT + VERIFIED (17/17 E2E, 17/17 doctor). Release: option f
-## chosen; blocked on SimplySign (ps1 re-sign) + push/deploy approval.
+## Traps caught (see [[reference_signed_served_bundle_traps]])
+- git normalized CRLF->LF on the committed bundle -> would have broken the ps1 signature AND
+  the skill checksums. Fixed: docs/.gitattributes `docs/public/skills/** binary`.
+- `docs/public/`-only push STILL triggered the Jenkins deploy (~4.3 min) -- the old
+  "public-only push doesn't deploy" was the VitePress/Apache era; tina4press+Jenkins deploys
+  on any main push.
+
+## Status: DONE + LIVE. tina4.com is the primary skills source; jsDelivr/raw are fallbacks.

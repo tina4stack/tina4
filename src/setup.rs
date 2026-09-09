@@ -823,22 +823,27 @@ fn skills_target_from_choice(choice: &str) -> &'static str {
     }
 }
 
-/// Where the AI-skills installer comes from: two independent CDNs serving the
-/// same bytes for the same path.
+/// Where the AI-skills installer comes from: tina4.com FIRST, then two
+/// independent GitHub-backed CDNs, all serving the same bytes for the path.
 ///
-/// One host is not enough. On 2026-09-08 a developer's `tina4 update` died on
-/// "Error 503 Backend.max_conn reached" from the Varnish tier in front of
-/// raw.githubusercontent.com. The installer these URLs point at already
-/// survives that -- it retries three times and falls back to the jsDelivr
-/// mirror for every skill file it downloads. The one fetch with neither was
-/// the fetch of the installer itself.
-const SKILLS_INSTALLER_SOURCES_SH: [&str; 2] = [
-    "https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.sh",
+/// One host is not enough, and the FIRST host must not be GitHub. On 2026-09-08
+/// a developer's `tina4 update` died on "Error 503 Backend.max_conn reached"
+/// from the Varnish tier in front of raw.githubusercontent.com; a later raw
+/// incident 503'd every skill file because the jsDelivr `@main` fallback was
+/// serving a STALE raw-first installer from cache. The installer these URLs
+/// point at is itself tina4.com-first for the skill files, so leading here with
+/// the tina4.com bootstrap keeps the whole `tina4 update` walk -- installer AND
+/// files -- off GitHub on the common path. jsDelivr and raw stay as fallbacks
+/// (retried three times each) for the rare case tina4.com is down.
+const SKILLS_INSTALLER_SOURCES_SH: [&str; 3] = [
+    "https://tina4.com/install-skills.sh",
     "https://cdn.jsdelivr.net/gh/tina4stack/tina4@main/install-skills.sh",
+    "https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.sh",
 ];
-const SKILLS_INSTALLER_SOURCES_PS1: [&str; 2] = [
-    "https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.ps1",
+const SKILLS_INSTALLER_SOURCES_PS1: [&str; 3] = [
+    "https://tina4.com/install-skills.ps1",
     "https://cdn.jsdelivr.net/gh/tina4stack/tina4@main/install-skills.ps1",
+    "https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.ps1",
 ];
 
 /// Attempts per source, and the pause between them. The same numbers the

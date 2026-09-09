@@ -2,9 +2,9 @@
 # Tina4 AI skills installer for macOS / Linux.
 #
 # Choose a target explicitly:
-#   curl -fsSL https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.sh | TINA4_SKILLS_TARGET=claude sh
-#   curl -fsSL https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.sh | TINA4_SKILLS_TARGET=codex sh
-#   curl -fsSL https://raw.githubusercontent.com/tina4stack/tina4/main/install-skills.sh | TINA4_SKILLS_TARGET=cursor sh
+#   curl -fsSL https://tina4.com/install-skills.sh | TINA4_SKILLS_TARGET=claude sh
+#   curl -fsSL https://tina4.com/install-skills.sh | TINA4_SKILLS_TARGET=codex sh
+#   curl -fsSL https://tina4.com/install-skills.sh | TINA4_SKILLS_TARGET=cursor sh
 # Use TINA4_SKILLS_TARGET=all only when every supported tool should receive the skills.
 #
 # POSIX sh ONLY -- no bashisms. Every example above pipes into `sh`, and on

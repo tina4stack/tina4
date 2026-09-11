@@ -46,9 +46,18 @@ INSTALLS = {
         "subsystems.md",
     ),
     "tina4-architect": (),
+    "tina4-design": (),
 }
 
 SKILLS_MARKER = "/.claude/skills/"
+
+# Kept low so the outage case stays quick; the contract it proves does not depend on
+# the value, only on the count being a function of the retry walk and NOT of the
+# number of files.
+RETRY_COUNT = 1
+
+# One file the first tier will be missing in "gap" mode.
+GAP_FILE = "tina4-developer-php/references/realtime.md"
 
 
 def stage_relpaths() -> list[str]:
@@ -78,25 +87,60 @@ def manifest_bytes() -> bytes:
     return ("\n".join(lines) + "\n").encode()
 
 
+# One prefix per tier the installer fetches from, in the installer's own order.
+# These MUST stay in step with the TINA4_SKILLS_*_ROOT names install-skills.sh and
+# install-skills.ps1 read: when the installer went three-tier its variables were
+# renamed, this file was not, and the whole suite quietly started testing the real
+# internet instead of this server -- green, and asserting nothing.
+TIERS = ("tina4", "jsdelivr", "raw")
+
+
 class SkillHandler(http.server.BaseHTTPRequestHandler):
     attempts: dict[str, int] = {}
+    hits: dict[str, int] = {tier: 0 for tier in TIERS}
     primary_mode = "retry"
+    tier = "tina4"
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib callback name
         path = urlparse(self.path).path
         count = self.attempts.get(path, 0) + 1
         self.attempts[path] = count
 
+        tier = self.tier
+        self.hits[tier] = self.hits.get(tier, 0) + 1
+
         target = path.endswith("/tina4-developer-python/SKILL.md")
-        if path.startswith("/primary/"):
+        if tier == "tina4":
             retry_failure = self.primary_mode == "retry" and target and count == 1
             fallback_failure = self.primary_mode == "fallback" and target
-            if retry_failure or fallback_failure:
+            # "outage": the first tier is down for everything, for the whole run --
+            # the shape of a real CDN incident, and the one that shows whether the
+            # installer remembers a dead host or re-proves it once per file.
+            outage_failure = self.primary_mode == "outage"
+            if retry_failure or fallback_failure or outage_failure:
                 self.send_response(503)
                 self.end_headers()
                 self.wfile.write(b"temporary upstream failure")
                 return
-        elif not path.startswith("/mirror/"):
+            # "gap": this tier is healthy but does not have one file -- the shape of a
+            # mirror that has not finished catching up with a freshly published ref.
+            # A missing file says nothing about the next one, so a tier must NOT be
+            # written off for it. Without that distinction one 404 costs the tier for
+            # the rest of the run, which is the fallback disabling itself.
+            if self.primary_mode == "gap" and path.endswith(GAP_FILE):
+                self.send_response(404)
+                self.end_headers()
+                return
+            # "revival": this tier fails its first walk -- long enough to be written
+            # off -- and is healthy afterwards, while BOTH other tiers are missing one
+            # file. Only the written-off tier can serve it. Skipping a source must
+            # never lose it, so the run has to come back and ask anyway.
+            if self.primary_mode == "revival" and self.hits["tina4"] <= RETRY_COUNT + 1:
+                self.send_response(503)
+                self.end_headers()
+                self.wfile.write(b"temporary upstream failure")
+                return
+        elif self.primary_mode == "revival" and path.endswith(GAP_FILE):
             self.send_response(404)
             self.end_headers()
             return
@@ -104,8 +148,15 @@ class SkillHandler(http.server.BaseHTTPRequestHandler):
         if path.endswith("/skills.sha256"):
             body = manifest_bytes()
         else:
+            # Each tier has its own path shape: jsDelivr and raw carry the skills
+            # directory in the URL, tina4.com serves the stage-relative path flat
+            # under the ref. Resolving both is what makes this server stand in for
+            # all three.
             marker = path.find(SKILLS_MARKER)
-            relpath = path[marker + len(SKILLS_MARKER):] if marker != -1 else path
+            if marker != -1:
+                relpath = path[marker + len(SKILLS_MARKER):]
+            else:
+                relpath = path.lstrip("/").split("/", 1)[-1]
             body = fixture_bytes(relpath)
 
         self.send_response(200)
@@ -138,13 +189,73 @@ def verify_install(skill_home: Path, expected_ref: str) -> None:
             )
 
 
+def assert_dead_tier_written_off(mode: str) -> None:
+    """An unreachable tier costs one retry walk per RUN, not one per file.
+
+    The installer fetches 40-odd files from three tiers. Nothing in the old walk
+    remembered that a tier had already failed, so a tier that was down was re-proven
+    for every single file: (RETRY_COUNT + 1) doomed requests and RETRY_COUNT x
+    retry_delay seconds each time. The bound below is what separates "asked once" from
+    "asked once per file" -- against the unfixed installer this count is in the
+    hundreds, and one file's worth of slack keeps it from being brittle.
+    """
+    if mode == "revival":
+        # The only proof that matters is that the install completed at all, which
+        # verify_install has already asserted; this pins where the file came from.
+        # It is asked once more, for the one file only it has -- not once per file,
+        # which would be the defect this whole change is about coming back.
+        walk = RETRY_COUNT + 1
+        hits = SkillHandler.hits["tina4"]
+        assert hits > walk, (
+            "the written-off tier was never asked again, so the file that only it had "
+            "could not have been installed"
+        )
+        assert hits <= walk + 2, (
+            f"the written-off tier was asked {hits} times; coming back for one file "
+            f"costs at most {walk + 2}"
+        )
+        return
+    if mode == "gap":
+        # One 404 must cost exactly one fallback, not the whole tier.
+        assert SkillHandler.hits["jsdelivr"] == 1, (
+            f"a single missing file sent {SkillHandler.hits['jsdelivr']} requests to "
+            "the fallback tier; the first tier was written off for a 404"
+        )
+        assert SkillHandler.hits["tina4"] > 10, (
+            "the first tier stopped being used after one missing file"
+        )
+        return
+    if mode != "outage":
+        return
+    walk = RETRY_COUNT + 1
+    budget = walk * 2
+    hits = SkillHandler.hits["tina4"]
+    assert hits <= budget, (
+        f"the down tier was asked {hits} times; a run that remembers it asks at most "
+        f"{budget} ({walk} per retry walk). It is being re-proven per file."
+    )
+    assert SkillHandler.hits["jsdelivr"] > 0, "the fallback tier was never reached"
+
+
 def run_installer(kind: str, mode: str, repo: Path) -> None:
     SkillHandler.attempts = {}
+    SkillHandler.hits = {tier: 0 for tier in TIERS}
     SkillHandler.primary_mode = mode
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), SkillHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    port = server.server_address[1]
+    # One server per tier, on its own port. In production the three tiers are three
+    # different origins, and a fix that writes off a host it has just watched fail can
+    # only be measured when they are actually distinct -- share one port between them
+    # and the test proves nothing about which of them was skipped.
+    servers = {}
+    threads = []
+    for tier in TIERS:
+        handler = type(f"{tier}Handler", (SkillHandler,), {"tier": tier})
+        servers[tier] = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(target=servers[tier].serve_forever, daemon=True)
+        thread.start()
+        threads.append(thread)
+    roots = {
+        tier: f"http://127.0.0.1:{servers[tier].server_address[1]}" for tier in TIERS
+    }
 
     try:
         with tempfile.TemporaryDirectory(prefix="tina4-skills-test-") as temp:
@@ -155,9 +266,11 @@ def run_installer(kind: str, mode: str, repo: Path) -> None:
                     "HOME": str(skill_home),
                     "TINA4_SKILLS_HOME": str(skill_home),
                     "TINA4_SKILLS_TARGET": "codex",
-                    "TINA4_SKILLS_PRIMARY_ROOT": f"http://127.0.0.1:{port}/primary",
-                    "TINA4_SKILLS_MIRROR_ROOT": f"http://127.0.0.1:{port}/mirror",
+                    "TINA4_SKILLS_TINA4_ROOT": roots["tina4"],
+                    "TINA4_SKILLS_JSDELIVR_ROOT": roots["jsdelivr"],
+                    "TINA4_SKILLS_RAW_ROOT": roots["raw"],
                     "TINA4_SKILLS_RETRY_DELAY": "0",
+                    "TINA4_SKILLS_RETRY_COUNT": str(RETRY_COUNT),
                 }
             )
             if kind == "shell":
@@ -178,9 +291,11 @@ def run_installer(kind: str, mode: str, repo: Path) -> None:
                     "HOME",
                     "TINA4_SKILLS_HOME",
                     "TINA4_SKILLS_TARGET",
-                    "TINA4_SKILLS_PRIMARY_ROOT",
-                    "TINA4_SKILLS_MIRROR_ROOT",
+                    "TINA4_SKILLS_TINA4_ROOT",
+                    "TINA4_SKILLS_JSDELIVR_ROOT",
+                    "TINA4_SKILLS_RAW_ROOT",
                     "TINA4_SKILLS_RETRY_DELAY",
+                    "TINA4_SKILLS_RETRY_COUNT",
                 ):
                     command.extend(("-e", name))
                 command.extend(
@@ -204,10 +319,13 @@ def run_installer(kind: str, mode: str, repo: Path) -> None:
             print(f"running {kind} installer in {mode} mode", flush=True)
             subprocess.run(command, cwd=repo, env=env, check=True)
             verify_install(skill_home, installer_default_ref(repo))
+            assert_dead_tier_written_off(mode)
     finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+        for tier in TIERS:
+            servers[tier].shutdown()
+            servers[tier].server_close()
+        for thread in threads:
+            thread.join(timeout=5)
 
 
 def main() -> None:
@@ -215,9 +333,9 @@ def main() -> None:
     parser.add_argument("kind", choices=("shell", "powershell"))
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
-    for mode in ("retry", "fallback"):
+    for mode in ("retry", "fallback", "outage", "gap", "revival"):
         run_installer(args.kind, mode, repo)
-    print(f"{args.kind}: retry and fallback contracts passed")
+    print(f"{args.kind}: retry, fallback, outage, gap and revival contracts passed")
 
 
 if __name__ == "__main__":

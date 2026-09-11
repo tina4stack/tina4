@@ -929,6 +929,25 @@ fn ps_single_quote(path: &Path) -> String {
     path.display().to_string().replace('\'', "''")
 }
 
+/// The PowerShell one-liner that runs the downloaded skills installer.
+///
+/// It reads the installer's TEXT and hands it to `iex`, rather than running the
+/// file with `-File`. `-File` on a downloaded .ps1 has to clear the execution
+/// policy and the mark-of-the-web; a string handed to `iex` clears neither
+/// because neither applies to it.
+///
+/// The text is read with `[System.IO.File]::ReadAllText`, NOT `Get-Content -Raw`.
+/// On a real Windows box `Get-Content -Raw` handed `iex` a `[byte[]]` and it
+/// refused with "Cannot convert 'System.Byte[]' to the type 'System.String'
+/// required by parameter 'Command'". `ReadAllText` always returns a String and
+/// auto-detects the BOM, so the (EV-signed) installer runs whatever its encoding.
+fn windows_skills_command(target: &str, script: &Path) -> String {
+    format!(
+        "$ErrorActionPreference='Stop'; $env:TINA4_SKILLS_TARGET='{target}'; iex ([System.IO.File]::ReadAllText('{}'))",
+        ps_single_quote(script)
+    )
+}
+
 fn install_skills_target(target: &str) -> bool {
     println!("  {} Installing tina4 AI skills for {}...", icon_play().green(), target);
 
@@ -986,19 +1005,16 @@ fn install_skills_target(target: &str) -> bool {
     }
 
     let ok = if windows {
-        // Still `iex` over the file's contents, not `-File`. Running a
-        // downloaded .ps1 with `-File` has to clear the execution policy and
-        // the mark-of-the-web; a string handed to `iex` clears neither because
-        // neither applies to it. Only where the bytes come from has changed.
+        // Still `iex` over the installer's text, not `-File` (see
+        // windows_skills_command for why). The text is read with
+        // [System.IO.File]::ReadAllText, not `Get-Content -Raw`, which handed
+        // `iex` a [byte[]] on a real Windows box and was refused.
         run_status(
             "powershell",
             &[
                 "-NoProfile",
                 "-Command",
-                &format!(
-                    "$ErrorActionPreference='Stop'; $env:TINA4_SKILLS_TARGET='{target}'; iex (Get-Content -Raw '{}')",
-                    ps_single_quote(&script)
-                ),
+                &windows_skills_command(target, &script),
             ],
         )
     } else {
@@ -1565,6 +1581,44 @@ mod tests {
         assert_eq!(
             ps_single_quote(Path::new("/tmp/o'brien/install-skills.ps1")),
             "/tmp/o''brien/install-skills.ps1"
+        );
+    }
+
+    /// A real Windows box refused the installer with "Cannot convert
+    /// 'System.Byte[]' to the type 'System.String' required by parameter
+    /// 'Command'": `Get-Content -Raw` had handed `iex` a byte array. The
+    /// command must read the installer as TEXT via [System.IO.File]::ReadAllText
+    /// (always a String), still over `iex` (not `-File`), and never reach for
+    /// Get-Content again.
+    #[test]
+    fn the_windows_installer_is_read_as_text_not_bytes() {
+        let cmd = windows_skills_command("codex", Path::new("/tmp/t/install-skills.ps1"));
+        assert!(
+            cmd.contains("iex ([System.IO.File]::ReadAllText('/tmp/t/install-skills.ps1'))"),
+            "must read text and iex it: {cmd}"
+        );
+        assert!(
+            !cmd.contains("Get-Content"),
+            "Get-Content -Raw can yield a byte[] that iex refuses: {cmd}"
+        );
+        assert!(
+            !cmd.contains("-File"),
+            "-File would reimpose execution policy + mark-of-the-web: {cmd}"
+        );
+        assert!(
+            cmd.contains("$env:TINA4_SKILLS_TARGET='codex'"),
+            "target must reach the installer: {cmd}"
+        );
+    }
+
+    /// The staged path is single-quoted inside the command, so a Windows
+    /// username with an apostrophe cannot end the string and run the tail as code.
+    #[test]
+    fn the_windows_command_single_quotes_the_installer_path() {
+        let cmd = windows_skills_command("all", Path::new("/tmp/o'brien/install-skills.ps1"));
+        assert!(
+            cmd.contains("ReadAllText('/tmp/o''brien/install-skills.ps1')"),
+            "apostrophe must be doubled inside the single-quoted arg: {cmd}"
         );
     }
 

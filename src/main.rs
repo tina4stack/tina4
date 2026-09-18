@@ -2376,7 +2376,14 @@ fn download_file_classified(url: &str, dest: &std::path::Path) -> DownloadOutcom
             // because no release since v3.2.0 has used one of those names,
             // while a misreported local failure costs every user who hits it.
             // Untested: this path needs a Windows box without curl.exe.
-            std::process::Command::new("powershell")
+            // Resolved, not named. This site sits BEFORE the skills spawn on the
+            // same code path, and it is reached exactly when the hardcoded
+            // `C:\Windows\System32\curl.exe` above is absent -- which includes
+            // a Windows installed to a SystemRoot other than `C:\Windows`, the
+            // machine the resolution exists for. Left bare, the download would
+            // die first and a local PATH fault would be reported as a download
+            // problem.
+            std::process::Command::new(setup::windows_powershell())
                 .args(["-NoProfile", "-Command",
                     &format!("[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing", url, dest_str)])
                 .status()

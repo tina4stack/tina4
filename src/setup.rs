@@ -475,7 +475,11 @@ fn elevate_for_install(lang: &str, ai: AiChoice, projects_dir: &Path, name: &str
         "Start-Process -FilePath '{exe}' -ArgumentList {arglist} -Verb RunAs",
         exe = q(&exe.display().to_string()),
     );
-    let launched = Command::new("powershell")
+    // Resolved, not named -- see windows_powershell. A spawn that fails here is
+    // reported below as "No Administrator rights", which would be the wrong
+    // cause. The reporting is deliberately NOT changed: a declined UAC prompt is
+    // a normal outcome and has to stay quiet.
+    let launched = Command::new(windows_powershell())
         .args(["-NoProfile", "-Command", &cmd])
         .status()
         .map(|s| s.success())
@@ -735,7 +739,7 @@ fn ensure_claude_code() {
     // Native installer — does NOT depend on Node.js. (npm install -g is only
     // for users who already have Node and prefer it.)
     if console::is_windows() {
-        let _ = Command::new("powershell")
+        let _ = Command::new(windows_powershell())
             .args(["-NoProfile", "-Command", "irm https://claude.ai/install.ps1 | iex"])
             .status();
     } else {
@@ -948,6 +952,100 @@ fn windows_skills_command(target: &str, script: &Path) -> String {
     )
 }
 
+/// Which PowerShell to spawn on Windows, as an absolute path.
+///
+/// `powershell.exe` does not live in `System32`. It lives in
+/// `System32\WindowsPowerShell\v1.0\`, and `CreateProcess` given a bare program
+/// name searches the application directory, the current directory, `System32`,
+/// the Windows directory and then `PATH` -- so the bare name `powershell` can
+/// only ever be found through `PATH`. A `PATH` that has lost that one directory
+/// fails the spawn outright, with no process and nothing printed.
+///
+/// The canonical location is tried FIRST, and `PATH` only as a fallback. That
+/// ordering is deliberate and is the same shape `download_file_classified` uses
+/// for `curl.exe`: the job is to run the real Windows PowerShell, not whatever
+/// an earlier `PATH` entry happens to be called. Resolving through `which`
+/// first would have been worse than the bug -- `which` accepts any extension in
+/// `PATHEXT`, so a `powershell.cmd` in a user-writable directory would win
+/// where `CreateProcess`, which only ever appends `.exe`, could not see it at
+/// all. `refresh_local_bin_path` prepends exactly such a directory to this
+/// process's `PATH` before `ensure_claude_code` spawns.
+///
+/// Deliberately NOT preferring `pwsh`: choosing a different PowerShell would
+/// change which interpreter runs an installer verified against Windows
+/// PowerShell 5.1. Finding the same program is the whole job here.
+pub(crate) fn windows_powershell() -> String {
+    let on_path = which::which("powershell").ok();
+    choose_powershell(
+        std::env::var("SystemRoot").ok().as_deref(),
+        on_path.as_deref(),
+        &|candidate| candidate.exists(),
+    )
+}
+
+/// A path Windows will resolve without consulting anything: `X:\...`.
+///
+/// Checked explicitly rather than with `Path::is_absolute`, which answers for
+/// the platform the code is running on and would call `C:\Windows` relative on
+/// Linux -- so the check could never be tested away from Windows.
+///
+/// UNC (`\\server\share`) is deliberately rejected: `%SystemRoot%` is never a
+/// UNC path on a real machine, and spawning an interpreter from one would run
+/// code from whatever answers that name.
+fn is_windows_drive_absolute(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
+/// The decision behind `windows_powershell`, with every lookup passed in so it
+/// can be tested away from Windows.
+///
+/// The two candidates take different types on purpose. They were previously
+/// both `Option<String>` and could be swapped at the call site without the
+/// compiler or any test noticing, which would have returned `%SystemRoot%`
+/// itself -- a directory -- as the program to spawn.
+fn choose_powershell(
+    system_root: Option<&str>,
+    found_on_path: Option<&Path>,
+    exists: &dyn Fn(&Path) -> bool,
+) -> String {
+    // 1. The canonical location, built from %SystemRoot% and confirmed to be
+    //    there. An unset, empty, relative or UNC %SystemRoot% falls through
+    //    rather than producing a path: an empty one yields
+    //    `\System32\...\powershell.exe`, which is drive-RELATIVE and would
+    //    resolve against whatever drive the process happens to be on.
+    if let Some(root) = system_root {
+        // Normalised, not just trimmed: a `C:/Windows` root would otherwise
+        // produce a mixed-separator path. Windows accepts it, but the value is
+        // also what gets printed back to the user when the spawn fails.
+        let root = root.replace('/', "\\");
+        let root = root.trim_end_matches('\\');
+        if is_windows_drive_absolute(root) {
+            let canonical = format!("{root}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+            if exists(Path::new(&canonical)) {
+                return canonical;
+            }
+        }
+    }
+    // 2. PATH, but only an absolute `.exe` -- the one thing `CreateProcess`
+    //    would also have accepted.
+    if let Some(found) = found_on_path {
+        let text = found.to_string_lossy();
+        let is_exe = found
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("exe"));
+        if is_windows_drive_absolute(&text) && is_exe {
+            return text.into_owned();
+        }
+    }
+    // Nothing resolved. Keep the bare name: the spawn fails as it always did,
+    // but now it fails with a reason attached.
+    "powershell".to_string()
+}
+
 fn install_skills_target(target: &str) -> bool {
     println!("  {} Installing tina4 AI skills for {}...", icon_play().green(), target);
 
@@ -1004,13 +1102,15 @@ fn install_skills_target(target: &str) -> bool {
         return false;
     }
 
-    let ok = if windows {
+    let outcome = if windows {
         // Still `iex` over the installer's text, not `-File` (see
         // windows_skills_command for why). The text is read with
         // [System.IO.File]::ReadAllText, not `Get-Content -Raw`, which handed
         // `iex` a [byte[]] on a real Windows box and was refused.
-        run_status(
-            "powershell",
+        //
+        // The program is resolved rather than named: see windows_powershell.
+        run_status_reason(
+            &windows_powershell(),
             &[
                 "-NoProfile",
                 "-Command",
@@ -1018,18 +1118,27 @@ fn install_skills_target(target: &str) -> bool {
             ],
         )
     } else {
-        run_status_env("sh", &[&script], &[("TINA4_SKILLS_TARGET", target)])
+        run_status_env_reason("sh", &[&script], &[("TINA4_SKILLS_TARGET", target)])
     };
     let _ = fs::remove_dir_all(&stage);
 
-    if !ok {
+    if let Err(why) = &outcome {
+        // This line is the whole point of RunFailure. Without it a refresh that
+        // died at the spawn printed the skip below and nothing else, and the
+        // report that reached us had no cause attached to diagnose.
+        //
+        // No lead of its own: `why` already names the program and says whether
+        // it ran. A fixed lead read "The skills installer did not run" over the
+        // top of "sh ran and exited 127", which contradicted itself and was
+        // wrong about the machine whenever the installer had in fact started.
+        println!("  {} {}", icon_warn().yellow(), why);
         println!(
             "  {} Skills install skipped — run later: {}",
             icon_warn().yellow(),
             "tina4 ai".cyan()
         );
     }
-    ok
+    outcome.is_ok()
 }
 
 fn ensure_codex() {
@@ -1697,29 +1806,272 @@ fn prompt(label: &str, default: &str) -> String {
     }
 }
 
-/// `run_status` with extra environment for the child, and paths passed as
+/// Why a child process did not succeed.
+///
+/// A program that could never be started and a program that ran and failed are
+/// different facts about the machine, and a caller that wants to tell the user
+/// what went wrong has to be able to say which one happened. The older shape,
+/// `.map(|s| s.success()).unwrap_or(false)`, collapsed both into one bare
+/// `false` -- which is why a skills refresh that died at the spawn printed its
+/// skip line with no cause, on the one platform where nobody could read it.
+#[derive(Debug)]
+enum RunFailure {
+    /// No process was ever created. On Windows this is what a `PATH` that
+    /// cannot resolve the program looks like.
+    NotStarted { program: String, source: io::Error },
+    /// It ran, and came back non-zero.
+    Exited { program: String, code: Option<i32> },
+}
+
+impl std::fmt::Display for RunFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RunFailure::NotStarted { program, source } => {
+                write!(f, "{program} could not be started: {source}")
+            }
+            RunFailure::Exited {
+                program,
+                code: Some(code),
+            } => write!(f, "{program} ran and exited {code}"),
+            RunFailure::Exited { program, code: None } => {
+                write!(f, "{program} was terminated before it could exit")
+            }
+        }
+    }
+}
+
+/// Run `command`, inheriting both streams, and keep the reason it failed.
+fn run_to_completion(program: &str, command: &mut Command) -> Result<(), RunFailure> {
+    match command
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+    {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(RunFailure::Exited {
+            program: program.to_string(),
+            code: status.code(),
+        }),
+        Err(source) => Err(RunFailure::NotStarted {
+            program: program.to_string(),
+            source,
+        }),
+    }
+}
+
+/// `run_status_reason` with extra environment for the child, and paths passed as
 /// arguments rather than interpolated into a shell string -- a temp directory
 /// containing a space or a quote is then just a path, not a syntax error.
-fn run_status_env(cmd: &str, args: &[&Path], env: &[(&str, &str)]) -> bool {
+fn run_status_env_reason(
+    cmd: &str,
+    args: &[&Path],
+    env: &[(&str, &str)],
+) -> Result<(), RunFailure> {
     let mut command = Command::new(cmd);
     command.args(args);
     for (key, value) in env {
         command.env(key, value);
     }
-    command
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    run_to_completion(cmd, &mut command)
 }
 
+fn run_status_reason(cmd: &str, args: &[&str]) -> Result<(), RunFailure> {
+    let mut command = Command::new(cmd);
+    command.args(args);
+    run_to_completion(cmd, &mut command)
+}
+
+/// For callers with nothing to say about the failure beyond that there was one.
 fn run_status(cmd: &str, args: &[&str]) -> bool {
-    Command::new(cmd)
-        .args(args)
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    run_status_reason(cmd, args).is_ok()
+}
+
+#[cfg(test)]
+mod spawn_tests {
+    use super::{choose_powershell, run_status_reason, RunFailure};
+    use std::path::Path;
+
+    const ABSENT: &str = "tina4-no-such-program-b9f2c1";
+    const CANONICAL: &str = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
+
+    /// A shell that exists on both platforms the tests run on, and a way to
+    /// make it fail. Both failure kinds must use the SAME program: comparing a
+    /// missing program against a failing one lets a difference in the NAME
+    /// satisfy the assertion, and the kinds could then collapse undetected.
+    fn failing_shell() -> (&'static str, &'static [&'static str]) {
+        if cfg!(windows) {
+            ("cmd", &["/C", "exit 3"])
+        } else {
+            ("sh", &["-c", "exit 3"])
+        }
+    }
+
+    // ── the failure kinds ───────────────────────────────────────────────
+
+    #[test]
+    fn a_program_that_cannot_start_is_reported_as_not_started() {
+        let err = run_status_reason(ABSENT, &[]).expect_err("an absent program appeared to succeed");
+        match &err {
+            RunFailure::NotStarted { program, .. } => assert_eq!(program, ABSENT),
+            other => panic!("a missing program was reported as {other:?}"),
+        }
+        assert!(
+            err.to_string().starts_with(ABSENT),
+            "the message does not lead with the program that failed: {err}"
+        );
+    }
+
+    #[test]
+    fn a_program_that_runs_and_fails_is_reported_as_exited_and_named() {
+        let (cmd, args) = failing_shell();
+        let err = run_status_reason(cmd, args).expect_err("`exit 3` appeared to succeed");
+        match &err {
+            // `program` is asserted, not discarded: without this the field can
+            // be filled with anything and the user-facing line degrades to
+            // "<unknown> ran and exited 3" with every test still green.
+            RunFailure::Exited { program, code } => {
+                assert_eq!(*code, Some(3));
+                assert_eq!(program, cmd);
+            }
+            other => panic!("a failing program was reported as {other:?}"),
+        }
+        assert!(err.to_string().contains(cmd), "{err}");
+    }
+
+    /// A child killed before it could exit -- what antivirus or a policy that
+    /// terminates the interpreter looks like. `code()` is `None` there, and
+    /// that must not read as an ordinary non-zero exit.
+    #[test]
+    #[cfg(unix)]
+    fn a_child_killed_by_a_signal_does_not_read_as_an_exit() {
+        let err = run_status_reason("sh", &["-c", "kill -9 $$"]).expect_err("kill -9 looked like success");
+        match &err {
+            RunFailure::Exited { code, .. } => assert_eq!(*code, None, "a killed child carried an exit code"),
+            other => panic!("a killed child was reported as {other:?}"),
+        }
+        let rendered = err.to_string();
+        // Each of these on its own is satisfiable by an empty string, which is
+        // how a blanked Display arm survived a mutation run.
+        assert!(rendered.contains("sh"), "the message does not name the program: {rendered:?}");
+        assert!(rendered.contains("terminated"), "the message does not say it was terminated: {rendered:?}");
+        assert!(!rendered.contains("exited"), "a killed child reads as an exit: {rendered}");
+    }
+
+    /// The defect itself. Same program on both sides, so only the KIND can
+    /// make these differ.
+    #[test]
+    fn the_two_failure_kinds_do_not_read_alike() {
+        let (cmd, args) = failing_shell();
+        let started = run_status_reason(cmd, args).unwrap_err().to_string();
+        let never = RunFailure::NotStarted {
+            program: cmd.to_string(),
+            source: std::io::Error::from(std::io::ErrorKind::NotFound),
+        }
+        .to_string();
+        assert_ne!(started, never, "a spawn failure and a non-zero exit still render identically");
+        assert!(never.contains("could not be started"), "{never}");
+        assert!(started.contains("ran and exited"), "{started}");
+    }
+
+    #[test]
+    fn a_program_that_succeeds_is_not_a_failure() {
+        let (cmd, args): (&str, &[&str]) = if cfg!(windows) {
+            ("cmd", &["/C", "exit 0"])
+        } else {
+            ("sh", &["-c", "exit 0"])
+        };
+        assert!(run_status_reason(cmd, args).is_ok());
+    }
+
+    // ── choosing a PowerShell ───────────────────────────────────────────
+
+    /// The canonical location beats PATH. The PATH candidate here is one the
+    /// %SystemRoot% branch could never construct, so the two branches cannot be
+    /// confused for each other.
+    #[test]
+    fn the_canonical_location_is_preferred_over_path() {
+        let on_path = Path::new(r"D:\tools\ps\powershell.exe");
+        assert_eq!(
+            choose_powershell(Some(r"C:\Windows"), Some(on_path), &|_| true),
+            CANONICAL
+        );
+    }
+
+    /// ...but only when it is actually there.
+    #[test]
+    fn path_is_used_when_the_canonical_location_is_absent() {
+        let on_path = Path::new(r"D:\tools\ps\powershell.exe");
+        assert_eq!(
+            choose_powershell(Some(r"C:\Windows"), Some(on_path), &|_| false),
+            r"D:\tools\ps\powershell.exe"
+        );
+    }
+
+    /// The reported failure: PATH has lost the PowerShell directory, so `which`
+    /// finds nothing and only the canonical location can save the spawn.
+    #[test]
+    fn nothing_on_path_falls_back_to_the_canonical_location() {
+        assert_eq!(choose_powershell(Some(r"C:\Windows"), None, &|_| true), CANONICAL);
+    }
+
+    #[test]
+    fn a_non_default_system_root_is_honoured_rather_than_hardcoded() {
+        let chosen = choose_powershell(Some(r"D:\OtherWindows"), None, &|_| true);
+        assert!(chosen.starts_with(r"D:\OtherWindows\"), "the fallback ignored %SystemRoot%: {chosen}");
+    }
+
+    #[test]
+    fn a_trailing_separator_on_system_root_does_not_double_up() {
+        assert_eq!(choose_powershell(Some(r"C:\Windows\"), None, &|_| true), CANONICAL);
+        assert_eq!(choose_powershell(Some("C:/Windows/"), None, &|_| true), CANONICAL);
+    }
+
+    /// An empty %SystemRoot% would build `\System32\...\powershell.exe`, which
+    /// is drive-RELATIVE: Windows resolves it against whatever drive the
+    /// process is on, which may be removable or a mapped share.
+    #[test]
+    fn an_empty_system_root_never_becomes_a_drive_relative_path() {
+        let chosen = choose_powershell(Some(""), None, &|_| true);
+        assert_eq!(chosen, "powershell");
+        assert!(!chosen.starts_with('\\'), "built a drive-relative program path: {chosen}");
+    }
+
+    #[test]
+    fn a_relative_or_unc_system_root_is_refused() {
+        for root in ["Windows", r"..\Windows", r"\\server\share\Windows", r"\Windows"] {
+            assert_eq!(
+                choose_powershell(Some(root), None, &|_| true),
+                "powershell",
+                "a {root} SystemRoot was turned into a program path"
+            );
+        }
+    }
+
+    /// `which` accepts every extension in PATHEXT; `CreateProcess` only ever
+    /// appends `.exe`. Honouring a `.cmd` would run a different program than
+    /// the one the bare name could ever have reached -- and
+    /// `refresh_local_bin_path` puts a user-writable directory on PATH first.
+    #[test]
+    fn a_path_result_that_is_not_an_exe_is_refused() {
+        for bad in [r"C:\Users\x\.local\bin\powershell.cmd", r"C:\x\powershell.bat", r"C:\x\powershell"] {
+            assert_eq!(
+                choose_powershell(None, Some(Path::new(bad)), &|_| false),
+                "powershell",
+                "{bad} was accepted as the program to spawn"
+            );
+        }
+    }
+
+    /// An empty PATH entry makes `which` answer with a cwd-relative name.
+    #[test]
+    fn a_path_result_that_is_not_absolute_is_refused() {
+        for bad in ["powershell.exe", r".\powershell.exe", r"sub\powershell.exe"] {
+            assert_eq!(choose_powershell(None, Some(Path::new(bad)), &|_| false), "powershell", "{bad} was accepted");
+        }
+    }
+
+    #[test]
+    fn with_nothing_to_go_on_the_bare_name_survives() {
+        assert_eq!(choose_powershell(None, None, &|_| true), "powershell");
+    }
 }

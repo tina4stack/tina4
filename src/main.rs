@@ -1671,6 +1671,25 @@ fn handle_update() {
 
     let tmp_path = current_exe.with_extension("tmp");
 
+    // Everything below writes into the directory holding the binary: the
+    // download lands beside it and the replace renames over it. Find that out
+    // now rather than after a 9MB transfer. install.sh already makes exactly
+    // this decision before it installs -- `[ -w "$INSTALL_DIR" ]`, then say so
+    // and elevate -- and the default install directory is /usr/local/bin, which
+    // is root-owned, so `tina4 update` as a normal user could never finish.
+    let install_dir = current_exe
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_path_buf();
+    if !can_create_file_in(&install_dir) {
+        eprintln!(
+            "{} {}",
+            icon_fail().red(),
+            unwritable_install_dir_message(&install_dir)
+        );
+        std::process::exit(1);
+    }
+
     let downloaded = download_first_candidate(&candidates, |name| {
         let url = format!(
             "https://github.com/{}/releases/download/{}/{}",
@@ -2224,6 +2243,50 @@ fn download_first_candidate(
     Err(DownloadFailure::NoAssetForPlatform)
 }
 
+/// Can this process create a file in `dir`?
+///
+/// Probed by actually creating one, not by reading permission bits. Bits give
+/// the wrong answer under root, with a POSIX ACL, on a read-only mount, and on
+/// Windows, and this decides whether to tell someone to re-run under sudo --
+/// a wrong answer either strands a user who could have updated or sends one
+/// who could not chasing free disk space.
+fn can_create_file_in(dir: &std::path::Path) -> bool {
+    let probe = dir.join(format!(".tina4-write-probe-{}", std::process::id()));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(file) => {
+            drop(file);
+            std::fs::remove_file(&probe).ok();
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// What to say when the binary lives somewhere this user cannot write.
+///
+/// Names the directory, because the reason is a property of that directory and
+/// not of the release, the network, or the disk -- all three of which the old
+/// message left open. The remedy differs by platform and there is no point
+/// offering `sudo` to someone on Windows.
+fn unwritable_install_dir_message(install_dir: &std::path::Path) -> String {
+    let remedy = if cfg!(windows) {
+        "Re-run it from a terminal opened with \"Run as administrator\".".to_string()
+    } else {
+        "Re-run it with: sudo tina4 update".to_string()
+    };
+    format!(
+        "Cannot update: {} is not writable by this user.\n  \
+         The new binary is downloaded into that directory and then renamed over \
+         the current one, so the update needs to write there.\n  {}",
+        install_dir.display(),
+        remedy
+    )
+}
+
 /// Clean up after a failed download and produce what to tell the user.
 ///
 /// The partial file has to go: curl leaves whatever it managed to write, and
@@ -2534,6 +2597,50 @@ mod tests {
         assert!(prog.contains("npx"), "{prog}");
         assert_eq!(args.first().map(String::as_str), Some("vite"));
     }
+
+    #[test]
+    fn write_probe_answers_both_ways_and_leaves_nothing_behind() {
+        let dir = std::env::temp_dir().join(format!("tina4-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(can_create_file_in(&dir), "a fresh temp dir must be writable");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+            assert!(
+                !can_create_file_in(&dir),
+                "a directory with no write bit must read as unwritable"
+            );
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        // The probe must not leave its own file behind: this directory is the
+        // one holding the binary, and a stray dotfile there is our litter.
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            0,
+            "the probe left a file behind"
+        );
+        assert!(
+            !can_create_file_in(&dir.join("does-not-exist")),
+            "a missing directory is not writable"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unwritable_message_names_the_directory_and_the_remedy() {
+        let message = unwritable_install_dir_message(std::path::Path::new("/usr/local/bin"));
+        assert!(message.contains("/usr/local/bin"), "{message}");
+        assert!(message.contains("not writable"), "{message}");
+        if cfg!(windows) {
+            assert!(message.contains("administrator"), "{message}");
+        } else {
+            assert!(message.contains("sudo tina4 update"), "{message}");
+        }
+    }
+
 
 
     // ---- download failure reporting --------------------------------------

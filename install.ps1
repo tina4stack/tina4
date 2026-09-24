@@ -35,43 +35,71 @@ if (-not (Test-Path $installDir)) {
     New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 }
 
-# Download
+# Download to a TEMP file first. The binary reaches its final path
+# ($installDir\tina4.exe) ONLY after both the checksum and the Authenticode
+# signature pass, so a tampered or unverified download can never land as the
+# installed CLI.
 $dest = "$installDir\tina4.exe"
+$tmp = Join-Path $installDir ([IO.Path]::GetRandomFileName() + ".exe")
+try {
 Write-Host "Downloading $binary..."
-Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $dest
+Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $tmp
 
 # Verify integrity against the release SHA256SUMS before trusting the binary.
-# Releases from 3.8.53 publish SHA256SUMS; verify strictly when present, and
-# warn + continue for older releases that predate it.
+# FAIL CLOSED: if SHA256SUMS is not published we cannot prove the download is
+# the published binary, so we refuse to install rather than skip the check.
 # (Keep all output ASCII-only - see the cp1252 note further down.)
 $sumsAsset = $release.assets | Where-Object { $_.name -eq "SHA256SUMS" }
-if ($sumsAsset) {
-    # GitHub serves release assets as application/octet-stream, so
-    # Invoke-WebRequest returns .Content as a byte[] (NOT a string). Splitting a
-    # byte[] on "`n" yields per-byte garbage, the regex never matches, and every
-    # lookup wrongly reports "is not listed". Decode to UTF-8 text first. (Guard
-    # the type so a future string response still works.)
-    $sumsRaw = (Invoke-WebRequest -Uri $sumsAsset.browser_download_url -UseBasicParsing).Content
-    $sums = if ($sumsRaw -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($sumsRaw) } else { $sumsRaw }
-    $line = $sums -split "`n" | Where-Object { $_ -match "\s\*?$([regex]::Escape($binary))\s*$" } | Select-Object -First 1
-    if (-not $line) {
-        Remove-Item $dest -Force
-        Write-Error "$binary is not listed in SHA256SUMS for $tag"
-        exit 1
-    }
-    $expected = (($line -split '\s+')[0]).ToLower()
-    $actual = (Get-FileHash $dest -Algorithm SHA256).Hash.ToLower()
-    if ($expected -ne $actual) {
-        Remove-Item $dest -Force
-        Write-Host ""
-        Write-Host "  Error: checksum mismatch for $binary - refusing to install" -ForegroundColor Red
-        Write-Host "    expected: $expected" -ForegroundColor Red
-        Write-Host "    actual:   $actual" -ForegroundColor Red
-        exit 1
-    }
-    Write-Host "Checksum verified (sha256)." -ForegroundColor Green
-} else {
-    Write-Host "Note: no SHA256SUMS published for $tag - skipping integrity check (older release)." -ForegroundColor Yellow
+if (-not $sumsAsset) {
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    Write-Error "SHA256SUMS is not available for $tag - refusing to install an unverified binary."
+    exit 1
+}
+# GitHub serves release assets as application/octet-stream, so
+# Invoke-WebRequest returns .Content as a byte[] (NOT a string). Splitting a
+# byte[] on "`n" yields per-byte garbage, the regex never matches, and every
+# lookup wrongly reports "is not listed". Decode to UTF-8 text first. (Guard
+# the type so a future string response still works.)
+$sumsRaw = (Invoke-WebRequest -Uri $sumsAsset.browser_download_url -UseBasicParsing).Content
+$sums = if ($sumsRaw -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($sumsRaw) } else { $sumsRaw }
+$lines = @($sums -split "`n" | Where-Object { $_ -match "^[0-9a-fA-F]{64} [ *]$([regex]::Escape($binary))\s*$" })
+$line = if ($lines.Count -eq 1) { $lines[0] } else { $null }
+if (-not $line) {
+    Remove-Item $tmp -Force
+    Write-Error "$binary is not listed in SHA256SUMS for $tag"
+    exit 1
+}
+$expected = (($line -split '\s+')[0]).ToLower()
+$actual = (Get-FileHash $tmp -Algorithm SHA256).Hash.ToLower()
+if ($expected -ne $actual) {
+    Remove-Item $tmp -Force
+    Write-Host ""
+    Write-Host "  Error: checksum mismatch for $binary - refusing to install" -ForegroundColor Red
+    Write-Host "    expected: $expected" -ForegroundColor Red
+    Write-Host "    actual:   $actual" -ForegroundColor Red
+    exit 1
+}
+Write-Host "Checksum verified (sha256)." -ForegroundColor Green
+
+# Verify the Authenticode signature: the released .exe is EV-signed by Code
+# Infinity (scripts/sign-release.ps1). A valid checksum only proves the bytes
+# match SHA256SUMS; the signature proves WHO produced them. Refuse anything not
+# validly signed by Code Infinity.
+$sig = Get-AuthenticodeSignature $tmp
+if ($sig.Status -ne 'Valid' -or $null -eq $sig.SignerCertificate -or $sig.SignerCertificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) -ne 'Code Infinity (Pty) Ltd') {
+    Remove-Item $tmp -Force
+    Write-Host ""
+    Write-Host "  Error: Authenticode verification failed for $binary - refusing to install" -ForegroundColor Red
+    Write-Host "    status: $($sig.Status)" -ForegroundColor Red
+    Write-Host "    signer: $($sig.SignerCertificate.Subject)" -ForegroundColor Red
+    exit 1
+}
+Write-Host "Signature verified: $($sig.SignerCertificate.Subject)" -ForegroundColor Green
+
+# Both checks passed - promote the verified download to its final path.
+Move-Item -Path $tmp -Destination $dest -Force
+} finally {
+    if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force }
 }
 
 # Put the install dir FIRST on the user PATH so a fresh install always wins
@@ -129,8 +157,8 @@ Write-Host ""
 # SIG # Begin signature block
 # MIIoHQYJKoZIhvcNAQcCoIIoDjCCKAoCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBMlyLuMbvXsM0m
-# K6ZHEGbThOUp4ifODMWazm4Qopf/z6CCINgwggXJMIIEsaADAgECAhAbtY8lKt8j
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDeqo9T0UYKe67l
+# 3nRVZwRYZx4TO5KPKrXYauDeczQLq6CCINgwggXJMIIEsaADAgECAhAbtY8lKt8j
 # AEkoya49fu0nMA0GCSqGSIb3DQEBDAUAMH4xCzAJBgNVBAYTAlBMMSIwIAYDVQQK
 # ExlVbml6ZXRvIFRlY2hub2xvZ2llcyBTLkEuMScwJQYDVQQLEx5DZXJ0dW0gQ2Vy
 # dGlmaWNhdGlvbiBBdXRob3JpdHkxIjAgBgNVBAMTGUNlcnR1bSBUcnVzdGVkIE5l
@@ -310,36 +338,36 @@ Write-Host ""
 # LjE4MDYGA1UEAxMvQ2VydHVtIEV4dGVuZGVkIFZhbGlkYXRpb24gQ29kZSBTaWdu
 # aW5nIDIwMjEgQ0ECEFIdiL99yRWe40RYYdsSYcYwDQYJYIZIAWUDBAIBBQCgajAZ
 # BgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYB
-# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgVVqQnpv8rC5g9kzkwoCIPpz93nrfmRR1
-# NEJwunUeloQwDQYJKoZIhvcNAQEBBQAEggGAh5WJzUxVNP26bTdURY8+1qcHcNaB
-# uZOrIoX8SHN4TXLHgbvSPsu3+fy8o/DLINvBsQd6RrHBrY8vXpOQWqPIl7jkYh+X
-# a0TYMDIAMZEOpgzexuclBuSbJOc9En2ZJGXJm+/fcGNUBfv08DGzN9Uw5zZ8yBEo
-# rMn6t1ZbYatGngoGYlsbT6hyQzTyUJAeHMYDsrgDMB58iK2/XLIO4CU7DxQBnFvB
-# Sf/g2zEuRTHZr7N8FA+UQW6xfnuFMuPvfd1ndpe8BYB9LMm9DQgCN+79cIaVwnEE
-# 8MYcmBM/wZm7rkSi2plG5m1TMLiQ6VaJ4eITIGiX9a0OjNjDXXx5lSh8xxA7zkdM
-# 24BrBtd1dNja10LBWBTIzcfL6gzwyA8KmnOAgWak/Mk+rYWTD+HgiZS1Iks4qTSO
-# 9krSAh27ierJxGirjnO3AfB3StKZOrtFAaJrHo5zaLDPjCcQvDJgHMasaNieVyoB
-# d7jmYuy6ABGkFUcg5RluA4S3PPIUzX5m5ssdoYIEAjCCA/4GCSqGSIb3DQEJBjGC
+# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQg3aac16MM9gnO3bYGdZ8DCET4vpDMJmDa
+# mIzugCJ3W50wDQYJKoZIhvcNAQEBBQAEggGAQYZP0RcMOvZ53ncyHcOBRrP8EO8u
+# IBrjqt5QOH4n4ixa6tXr6ifjzVRF7zN+Zk9gy24AA4PCBy7Vk6WLPHozmkTCfk/o
+# bH1lRje4gMvz23NB0Cef5euESZAht0YqvZW6o6pUGGSz6ak3e4Krf6Kpu0AAqv2u
+# Ba7VlnO3j1ZEP0gXmmab8bqoLt/NGp9ueAVbLGRjSK4cNr9KlZIZcTJgMDQOtuHI
+# 49D7OVajrXVw+2mfAueWCQv2evYAso2brmtyBZAwoHHbR68v3xXijPq+rJFY/0g6
+# DqK2MYK/P6GCWoRv8C+mB5L8659hILe9UjmMIZD97Hu0rxJoD9mYkJ0tTK+Y7BV2
+# kSNv36iEuKv3aQhBY3qVoX4zgaP53Ysfdfdq1h+i9mrtmHXUgxcIa9ra/taa96V0
+# Wd0HeMcZmUzEaOExWXe+4hPpTTvWuIMKLHiaMM4TzuRsSdOb1m4Aa+gJ4jdLB1xO
+# /ltRZgIln3o5SiE8+NYjq3LnIxO5wwpSO2OuoYIEAjCCA/4GCSqGSIb3DQEJBjGC
 # A+8wggPrAgEBMGowVjELMAkGA1UEBhMCUEwxITAfBgNVBAoTGEFzc2VjbyBEYXRh
 # IFN5c3RlbXMgUy5BLjEkMCIGA1UEAxMbQ2VydHVtIFRpbWVzdGFtcGluZyAyMDIx
 # IENBAhAo8HfBHDa9/l90MkdwJy4DMA0GCWCGSAFlAwQCAgUAoIIBVjAaBgkqhkiG
-# 9w0BCQMxDQYLKoZIhvcNAQkQAQQwHAYJKoZIhvcNAQkFMQ8XDTI2MDkyNDEzMjUx
-# MVowNwYLKoZIhvcNAQkQAi8xKDAmMCQwIgQghb6Q4QrSQ418ySi2r0iwmrIIF3zs
-# +LASbFjTkQUlxDwwPwYJKoZIhvcNAQkEMTIEMEEdJkHTvTzlSA5vbI0WZd5LxhYO
-# FYu+IX9karBL0Tm/Q+5GCB+a73XAKdVcq6D7MjCBnwYLKoZIhvcNAQkQAgwxgY8w
+# 9w0BCQMxDQYLKoZIhvcNAQkQAQQwHAYJKoZIhvcNAQkFMQ8XDTI2MDkyNDE3MzU1
+# NlowNwYLKoZIhvcNAQkQAi8xKDAmMCQwIgQghb6Q4QrSQ418ySi2r0iwmrIIF3zs
+# +LASbFjTkQUlxDwwPwYJKoZIhvcNAQkEMTIEMN6qcPI18yT5POpndSyfsfChfqTh
+# SX23uMC5h2PYV5dn6xBzJ0ugV2Whp0E8QOroAjCBnwYLKoZIhvcNAQkQAgwxgY8w
 # gYwwgYkwgYYEFFcUaEEMqFrzQk75FkpRNhD0042YMG4wWqRYMFYxCzAJBgNVBAYT
 # AlBMMSEwHwYDVQQKExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMT
 # G0NlcnR1bSBUaW1lc3RhbXBpbmcgMjAyMSBDQQIQKPB3wRw2vf5fdDJHcCcuAzAN
-# BgkqhkiG9w0BAQEFAASCAgCUNSOtkVBGySae5/TA9vGB6vpnBlYBUaRXivfPpMbV
-# ASzVTQukSoBMLACypVzUAZoDNOvkRlQKAtyvBHQOquT3BjoOD5NPOuMafxBP2/W5
-# Q8Wi/lhctVx+qjwuiokoUBpq4o8HVhSAffq4pIdGCmP37/fA7JOudlDo56qMreQ/
-# LxeEDLq6aZdkGVdfero5RYwHiqURU9b1Lo56idixHYeK/Db70LdFvIodUA9G1mbc
-# jSnccsZzPkcW9xZltbqjVfHZ2ABSNPX3FrP7DeS316BYWp0mzDf/JTGK0Ll/9Haf
-# BjL7nkshGQhGgpGSJQGrZIJagjp65cMN9EoDbFN7smhP4AuCxqBh17aU3U5Vliuq
-# cozEiIqQ1DxqqVtGXwwoRbNNkb2eiBXVTjPIpedgjalvuUdu6DAccy95XI6aNab2
-# KVyT809L23bRyXROeYJthSPWUfulUbZrh6jumwJaJqJfyWIJkyYD1fr3fj3MA6m8
-# fIGCmtl96K+j7E6HLBOImT+xyDe8GoZkLJFfpOsXW+XtXmJRHK/a7Y24gh/W2RGl
-# Zam9yXDNW3+6NK2eznFc7SddIqbgpDQND3CWmAg3nuiMRE1GLY1yKY1vcl26+Ww6
-# LeB+YR9TTFekq3Ri0mLrxfbJxU12b5EtkGTXd5kspZ+3zQeStL/1Ce4rs1bjBE6d
-# 9A==
+# BgkqhkiG9w0BAQEFAASCAgB/klfMkySubssnidAtByfueRqGr/qOWNWhDH+3TLi5
+# k+El9Qo+N24U77jJ4VWP5bJZm5jEGfP3r5edm5oS89pDasQeistBbzFc0SmFPmho
+# LGtoqihKcQXe+P5o5L46tOwi7JsUQITdDxA0MWq2Dz0A6/ZtuqaFT0N5rmgvUAbP
+# ZdLl/dMfviEJik3fR4VxnwcWhyT9Q7RI4xUl7Ey/eS1oZwYRQe4PF1h1Jseggi2D
+# 2EIs+VnRZieqJMBQo9a5OLc0MbLKrO4Rgxea4pnSSAQoLHa6ep335GIVG0dqJ6Xi
+# S7m2xjG0+Uqcen8jEQtjVEJdnhfpLNVJnaniH3IdgJnFk4N42ZM1JghyYQXV2cIu
+# 2luBV++7FndbL3DhdHO3+jk/o3I1yC3rojlkYfIvksnCOVHMXQWLJ+03HLGi75Rz
+# iapzuTL5c3GCcO3a81NHPsCNadgJYb8rRlQ9yeBYR2tiSp7Cfa1UcVOTnJlRtWcp
+# EQcpJKVrRF4jHmNxCKzoA3bu7p/Im1u9/idrWrNHQ5cXRLj1dQ0loOHAIAphnCg8
+# sSTyV0QIpAWeQk/20KSp9RUpNHafdniM/4ZCnc3XdGbaWlCx1JNv8sCp0qf89sLZ
+# IEKs1WXxJJrR/UGRl42ba5Mors60e0lEANJkhJDzWUME+VwF7yLsSMDkD+1+lQtE
+# eA==
 # SIG # End signature block

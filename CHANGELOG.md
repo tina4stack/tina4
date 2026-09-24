@@ -1,5 +1,13 @@
 # Changelog
 
+## 3.8.91 — 2026-09-24
+
+- Verify self-update downloads against mandatory SHA256SUMS before replacement and refuse downgrades. Pass Windows hash paths as data rather than PowerShell code.
+- Fail closed when installer integrity data is absent; Windows promotes a temporary download only after checksum and Code Infinity Authenticode verification.
+- Preserve checksum lines for unchanged release assets when signing Windows binaries.
+- Generate Node examples using tina4-nodejs and migrate retired scoped dependencies through parsed JSON without changing unrelated fields.
+- Validate both canonical PowerShell installer signatures in Windows CI. Pin the Zig release build tool and limit the build job to read-only repository access.
+
 ## 3.8.90 — 2026-09-24
 
 - Update locked quinn-proto to 0.11.15 and rand 0.8 to 0.8.6 for RUSTSEC-2026-0185 and RUSTSEC-2026-0097. Audit the complete lockfile and transitive unsoundness advisories in PR CI and before release builds.

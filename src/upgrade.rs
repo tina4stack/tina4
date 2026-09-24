@@ -265,16 +265,31 @@ fn upgrade_gemfile() -> usize {
 fn upgrade_package_json() -> usize {
     let path = "package.json";
     let Ok(content) = fs::read_to_string(path) else { return 0 };
-    let updated = content
-        .replace("\"@tina4/core\": \"^2", "\"@tina4/core\": \"^3")
-        .replace("\"@tina4/core\": \"~2", "\"@tina4/core\": \"^3")
-        .replace("\"@tina4/orm\": \"^2", "\"@tina4/orm\": \"^3")
-        .replace("\"@tina4/orm\": \"~2", "\"@tina4/orm\": \"^3");
+    let updated = migrate_nodejs_package_json(&content);
     if updated != content && fs::write(path, &updated).is_ok() {
-        println!("  {} Updated package.json — @tina4/* ^3.0", icon_ok().green());
+        println!("  {} Updated package.json — tina4-nodejs ^3.0", icon_ok().green());
         return 1;
     }
     0
+}
+
+/// Rename the retired scoped dependencies using parsed JSON, preserving all
+/// unrelated values and an existing tina4-nodejs version constraint.
+fn migrate_nodejs_package_json(content: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(content) else { return content.to_string() };
+    let mut changed = false;
+    for section in ["dependencies", "devDependencies", "optionalDependencies", "peerDependencies"] {
+        if let Some(deps) = value.get_mut(section).and_then(|v| v.as_object_mut()) {
+            let core = deps.remove("@tina4/core").is_some();
+            let orm = deps.remove("@tina4/orm").is_some();
+            if core || orm {
+                deps.entry("tina4-nodejs").or_insert_with(|| serde_json::json!("^3.0.0"));
+                changed = true;
+            }
+        }
+    }
+    if !changed { return content.to_string(); }
+    format!("{}\n", serde_json::to_string_pretty(&value).expect("JSON value serializes"))
 }
 
 /// Delegate language-specific code upgrades to the language CLI if available.
@@ -340,6 +355,28 @@ fn delegate_upgrade(lang: &str) {
                 "  {} Language CLI upgrade not available — structural migration done",
                 icon_info().blue()
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::migrate_nodejs_package_json;
+    #[test]
+    fn migrate_compact_json_preserves_strings_and_existing_version() {
+        let input = r#"{"description":"literal,} stays","dependencies":{"@tina4/core":"^2","@tina4/orm":"~2","tina4-nodejs":"^3.13.138","other":"^1"},"devDependencies":{"@tina4/core":"^2"}}"#;
+        let out: serde_json::Value = serde_json::from_str(&migrate_nodejs_package_json(input)).unwrap();
+        assert_eq!(out["description"], "literal,} stays");
+        assert_eq!(out["dependencies"]["tina4-nodejs"], "^3.13.138");
+        assert_eq!(out["dependencies"]["other"], "^1");
+        assert_eq!(out["devDependencies"]["tina4-nodejs"], "^3.0.0");
+        assert!(out["dependencies"].get("@tina4/core").is_none());
+        assert!(out["dependencies"].get("@tina4/orm").is_none());
+    }
+    #[test]
+    fn migration_does_not_touch_unrelated_or_invalid_json() {
+        for input in [r#"{"description":"@tina4/core","dependencies":{"other":"1"}}"#, "not JSON"] {
+            assert_eq!(migrate_nodejs_package_json(input), input);
         }
     }
 }

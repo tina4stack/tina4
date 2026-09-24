@@ -142,13 +142,12 @@ fn known_vars() -> Vec<(&'static str, &'static str, &'static str, &'static str)>
         ("TINA4_MAIL_PASSWORD", "", "SMTP password", "Mail"),
         ("TINA4_MAIL_FROM", "", "Default from address (default: inherits username or noreply@localhost)", "Mail"),
         ("TINA4_MAIL_FROM_NAME", "", "Default from display name", "Mail"),
-        ("TINA4_MAIL_ENCRYPTION", "tls", "SMTP encryption: none, tls, ssl", "Mail"),
+        ("TINA4_MAIL_ENCRYPTION", "tls", "SMTP encryption: ssl (implicit TLS, any port), tls/starttls (required STARTTLS), none", "Mail"),
         ("TINA4_MAIL_IMAP_HOST", "", "IMAP server host (default: empty)", "Mail"),
         ("TINA4_MAIL_IMAP_PORT", "993", "IMAP port", "Mail"),
         ("TINA4_MAIL_IMAP_USERNAME", "", "IMAP username (default: inherits TINA4_MAIL_USERNAME)", "Mail"),
         ("TINA4_MAIL_IMAP_PASSWORD", "", "IMAP password (default: inherits TINA4_MAIL_PASSWORD)", "Mail"),
-        ("TINA4_MAIL_IMAP_ENCRYPTION", "tls", "IMAP encryption: none, tls, ssl", "Mail"),
-        ("TINA4_MAIL_TLS_INSECURE", "false", "Allow insecure TLS certificates", "Mail"),
+        ("TINA4_MAIL_IMAP_ENCRYPTION", "tls", "IMAP encryption: tls/ssl (implicit TLS), starttls (required), none", "Mail"),
         ("TINA4_MAILBOX_DIR", "data/mailbox", "Dev mailbox directory", "Mail"),
 
         // Queue
@@ -758,7 +757,14 @@ pub fn run(sync: bool, example_only: bool, list_only: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{quote_env_value, unquote_env_value};
+    use super::{known_vars, quote_env_value, unquote_env_value};
+
+    // ADR-0071: mail certificates are always verified, so the switch that
+    // turned verification off is withdrawn and never written to a new .env.
+    #[test]
+    fn known_vars_no_longer_offer_the_mail_tls_insecure_switch() {
+        assert!(known_vars().iter().all(|(name, _, _, _)| *name != "TINA4_MAIL_TLS_INSECURE"));
+    }
 
     /// Values a `.env` file can hold on one line, including every shape the old
     /// `trim_matches` chain destroyed. Excludes the one documented shape that

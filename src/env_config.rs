@@ -142,13 +142,12 @@ fn known_vars() -> Vec<(&'static str, &'static str, &'static str, &'static str)>
         ("TINA4_MAIL_PASSWORD", "", "SMTP password", "Mail"),
         ("TINA4_MAIL_FROM", "", "Default from address (default: inherits username or noreply@localhost)", "Mail"),
         ("TINA4_MAIL_FROM_NAME", "", "Default from display name", "Mail"),
-        ("TINA4_MAIL_ENCRYPTION", "tls", "SMTP encryption: none, tls, ssl", "Mail"),
+        ("TINA4_MAIL_ENCRYPTION", "tls", "SMTP encryption: ssl (implicit TLS, any port), tls/starttls (required STARTTLS), none", "Mail"),
         ("TINA4_MAIL_IMAP_HOST", "", "IMAP server host (default: empty)", "Mail"),
         ("TINA4_MAIL_IMAP_PORT", "993", "IMAP port", "Mail"),
         ("TINA4_MAIL_IMAP_USERNAME", "", "IMAP username (default: inherits TINA4_MAIL_USERNAME)", "Mail"),
         ("TINA4_MAIL_IMAP_PASSWORD", "", "IMAP password (default: inherits TINA4_MAIL_PASSWORD)", "Mail"),
-        ("TINA4_MAIL_IMAP_ENCRYPTION", "tls", "IMAP encryption: none, tls, ssl", "Mail"),
-        ("TINA4_MAIL_TLS_INSECURE", "false", "Allow insecure TLS certificates", "Mail"),
+        ("TINA4_MAIL_IMAP_ENCRYPTION", "tls", "IMAP encryption: tls/ssl (implicit TLS), starttls (required), none", "Mail"),
         ("TINA4_MAILBOX_DIR", "data/mailbox", "Dev mailbox directory", "Mail"),
 
         // Queue

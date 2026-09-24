@@ -126,15 +126,23 @@ osslsigncode verify "$BINARY"
 echo "Uploading signed $BINARY ..."
 gh release upload "$TAG" "$BINARY" --repo "$REPO" --clobber
 
-echo "Regenerating SHA256SUMS over the signed assets ..."
-rm -f SHA256SUMS
+# Update ONLY the signed exe's line in the CI-produced SHA256SUMS. Every other
+# line was already verified byte-for-byte against the CI checksums and CI
+# provenance above (verify-release-inputs.py), so we keep those exact CI bytes
+# and re-hash just the one file whose bytes changed — the EV-signed .exe.
+# Rebuilding the whole manifest locally would re-derive lines the verification
+# already trusted, reopening the gap that verification just closed.
+echo "Updating the ${BINARY} line in SHA256SUMS (signed bytes) ..."
 if command -v sha256sum >/dev/null 2>&1; then
-  for f in $(ls -1 | grep -v '^SHA256SUMS$' | sort); do sha256sum "$f"; done > SHA256SUMS
+  NEWHASH="$(sha256sum "$BINARY" | awk '{print $1}')"
 else
-  for f in $(ls -1 | grep -v '^SHA256SUMS$' | sort); do
-    printf '%s  %s\n' "$(shasum -a 256 "$f" | awk '{print $1}')" "$f"
-  done > SHA256SUMS
+  NEWHASH="$(shasum -a 256 "$BINARY" | awk '{print $1}')"
 fi
+grep -qE "[[:space:]][*]?${BINARY}\$" SHA256SUMS \
+  || { echo "Error: ${BINARY} missing from SHA256SUMS — refusing to publish" >&2; exit 1; }
+TMP_SUMS="$(mktemp)"
+awk -v b="$BINARY" -v h="$NEWHASH" '{ n=$2; sub(/^[*]/,"",n); if (n==b) print h"  "b; else print $0 }' \
+  SHA256SUMS > "$TMP_SUMS" && mv -f "$TMP_SUMS" SHA256SUMS
 cat SHA256SUMS
 gh release upload "$TAG" SHA256SUMS --repo "$REPO" --clobber
 

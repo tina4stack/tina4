@@ -47,8 +47,14 @@ jobs:
 
   build:
     needs: audit
+    # Least privilege: this job builds, smoke-tests, attests and stashes the
+    # binaries as workflow artifacts. It deliberately does NOT touch the GitHub
+    # release (the single-writer `release-assets` job does), so it needs no
+    # contents:write. Only the attestation needs id-token/attestations. GitHub
+    # scopes permissions per JOB, not per step, so this is the finest grain
+    # available — the token-holding work lives in its own job.
     permissions:
-      contents: write       # upload assets to the GitHub release
+      contents: read        # checkout only
       id-token: write       # OIDC, for build-provenance attestation
       attestations: write   # write the provenance attestation
     strategy:
@@ -128,7 +134,10 @@ jobs:
       - name: Install zig (aarch64 linux)
         if: contains(matrix.target, 'aarch64-unknown-linux')
         run: |
-          python3 -m pip install --user ziglang
+          # Pin ziglang so a privileged, cross-compiling release job never floats
+          # onto a newly published (possibly breaking) zig. Bump deliberately,
+          # never let it float — same discipline as RUST_VERSION above.
+          python3 -m pip install --user ziglang==0.16.0
           python3 -m ziglang version
 
       # --locked forces the committed Cargo.lock - the build can't silently
@@ -374,6 +383,12 @@ jobs:
     # run can exercise the binary pipeline without pushing to crates.io.
     if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     runs-on: ubuntu-latest
+    # Gate the registry publish behind a protected environment. Configure
+    # required reviewers / a tag deployment-branch rule on the `release`
+    # environment in repo Settings -> Environments (ADR-0081); the CRATES_IO_TOKEN
+    # secret should live on the environment, not the repo, so no other workflow
+    # can read it.
+    environment: release
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
@@ -418,6 +433,9 @@ jobs:
     needs: [build, release-assets]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    # Same protected environment as publish-crate (ADR-0081): gate the GHCR push
+    # behind required reviewers / a tag deployment-branch rule in repo Settings.
+    environment: release
     permissions:
       contents: read
       packages: write

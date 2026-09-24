@@ -104,13 +104,24 @@ try {
     gh release upload $Tag $Binary --repo $Repo --clobber
     if ($LASTEXITCODE -ne 0) { Write-Error "upload of signed binary failed"; exit 1 }
 
-    # Regenerate SHA256SUMS over the SIGNED set (sha256sum format: "<hash>  <name>").
-    Write-Host "Regenerating SHA256SUMS over the signed assets ..."
-    Remove-Item "SHA256SUMS" -ErrorAction SilentlyContinue
-    $lines = Get-ChildItem -File | Where-Object { $_.Name -ne "SHA256SUMS" } | Sort-Object Name | ForEach-Object {
-        $h = (Get-FileHash $_.Name -Algorithm SHA256).Hash.ToLower()
-        "$h  $($_.Name)"
+    # Update ONLY the signed exe's line in the CI-produced SHA256SUMS. Every other
+    # line was already verified byte-for-byte against the CI checksums and CI
+    # provenance above (verify-release-inputs.py), so we keep those exact CI bytes
+    # and re-hash just the one file whose bytes changed - the EV-signed .exe.
+    # Rebuilding the whole manifest locally would re-derive lines the verification
+    # already trusted, reopening the gap that verification just closed.
+    Write-Host "Updating the $Binary line in SHA256SUMS (signed bytes) ..."
+    if (-not (Test-Path "SHA256SUMS")) { Write-Error "SHA256SUMS missing - refusing to publish"; exit 1 }
+    $newHash = (Get-FileHash $Binary -Algorithm SHA256).Hash.ToLower()
+    $existing = Get-Content "SHA256SUMS"
+    $matched = $false
+    $lines = $existing | ForEach-Object {
+        # sha256sum format: "<hash>  <name>", name optionally prefixed with '*'.
+        $name = ($_ -split '\s+', 2)[1]
+        if ($name) { $name = $name.TrimStart('*') }
+        if ($name -eq $Binary) { $matched = $true; "$newHash  $Binary" } else { $_ }
     }
+    if (-not $matched) { Write-Error "$Binary missing from SHA256SUMS - refusing to publish"; exit 1 }
     # LF line endings + trailing newline, like sha256sum.
     [System.IO.File]::WriteAllText((Join-Path $work "SHA256SUMS"), (($lines -join "`n") + "`n"))
     Get-Content "SHA256SUMS"

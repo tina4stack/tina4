@@ -758,7 +758,14 @@ pub fn run(sync: bool, example_only: bool, list_only: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{quote_env_value, unquote_env_value};
+    use super::{known_vars, quote_env_value, unquote_env_value};
+
+    // ADR-0071: mail certificates are always verified, so the switch that
+    // turned verification off is withdrawn and never written to a new .env.
+    #[test]
+    fn known_vars_no_longer_offer_the_mail_tls_insecure_switch() {
+        assert!(known_vars().iter().all(|(name, _, _, _)| *name != "TINA4_MAIL_TLS_INSECURE"));
+    }
 
     /// Values a `.env` file can hold on one line, including every shape the old
     /// `trim_matches` chain destroyed. Excludes the one documented shape that

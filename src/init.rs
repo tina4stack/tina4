@@ -11,6 +11,32 @@ use std::process::Command;
 
 use crate::console::{self, icon_fail, icon_ok, icon_play, icon_warn};
 
+/// A random 64-hex-character (256-bit) secret for a freshly scaffolded project,
+/// so no two scaffolds share a JWT signing key and `tina4 env --migrate` can
+/// never promote a publicly known placeholder into a live secret.
+///
+/// Zero crypto dependency: entropy comes from the OS RNG via `RandomState`,
+/// whose SipHash keys are seeded from the operating system's randomness source
+/// (getrandom / BCryptGenRandom) — each `RandomState::new()` is a fresh OS draw.
+/// Mixed with time and pid so repeated calls in one process still differ.
+fn generate_secret() -> String {
+    use std::hash::{BuildHasher, Hasher, RandomState};
+    let mut secret = String::with_capacity(64);
+    for round in 0..4u64 {
+        let mut hasher = RandomState::new().build_hasher();
+        hasher.write_u64(round);
+        hasher.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        );
+        hasher.write_u32(std::process::id());
+        secret.push_str(&format!("{:016x}", hasher.finish()));
+    }
+    secret
+}
+
 /// Run the full init flow: check runtime, check package manager, scaffold, install deps.
 pub fn run(lang: Option<&str>, path: Option<&str>) {
     let lang_str: String;
@@ -588,7 +614,21 @@ fn scaffold_project(language: &str, path: &str) {
         // serves immediately — without it the ORM raises "No database bound" on
         // the first request. SQLite ships with the runtime (no driver install);
         // Postgres/MySQL/etc. stay opt-in (see pyproject/composer notes).
-        write_file(path, ".env", "TINA4_DEBUG=true\nTINA4_LOG_LEVEL=ALL\nTINA4_DATABASE_URL=sqlite:///app.db\n");
+        //
+        // TINA4_SECRET is a per-scaffold RANDOM value, never a fixed placeholder
+        // (F8): it is the JWT signing key all four backends read, so a constant
+        // would be a publicly known key, and `tina4 env --migrate` (which renames
+        // a legacy SECRET -> TINA4_SECRET keeping the value) would promote it.
+        // Writing the canonical TINA4_SECRET directly also means the app never
+        // has to auto-generate one at first run.
+        write_file(
+            path,
+            ".env",
+            &format!(
+                "TINA4_DEBUG=true\nTINA4_LOG_LEVEL=ALL\nTINA4_SECRET={}\nTINA4_DATABASE_URL=sqlite:///app.db\n",
+                generate_secret()
+            ),
+        );
     }
 
     // Language-specific files
@@ -687,13 +727,11 @@ $app->handle();
 "#,
     );
 
-    write_file(
-        path,
-        ".env",
-        // Default SQLite so a scaffolded resource works out of the box (see the
-        // common .env above). Overrides the shared template for PHP.
-        "TINA4_DEBUG=true\nSECRET=change-me-in-production\nTINA4_DATABASE_URL=sqlite:///app.db\n",
-    );
+    // NOTE: no PHP-specific .env is written here. scaffold_project() already
+    // wrote the shared .env (SQLite binding + a random TINA4_SECRET) before this
+    // runs, and write_file() skips a file that already exists — so an override
+    // here would be dead code. It previously "set" SECRET=change-me-in-production
+    // and never reached disk (F8); the real secret now lives in the shared .env.
 
     write_file(
         path,
@@ -1539,6 +1577,36 @@ mod tests {
             );
             let _ = fs::remove_dir_all(&dir);
         }
+    }
+
+    #[test]
+    fn scaffold_writes_a_random_canonical_secret_not_a_placeholder() {
+        // F8: the scaffolded .env must carry a per-scaffold RANDOM TINA4_SECRET
+        // (the key all four backends read), never the known placeholder that
+        // `tina4 env --migrate` would otherwise promote into a live signing key.
+        let read_secret = |lang: &str, suffix: &str| -> String {
+            let dir = std::env::temp_dir()
+                .join(format!("tina4_init_secret_{lang}_{suffix}_{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            scaffold_project(lang, dir.to_str().unwrap());
+            let env = fs::read_to_string(dir.join(".env")).expect("scaffold wrote a .env");
+            let _ = fs::remove_dir_all(&dir);
+            assert!(!env.contains("change-me-in-production"), "shipped the placeholder secret:\n{env}");
+            assert!(!env.contains("\nSECRET="), "shipped the legacy SECRET key, not TINA4_SECRET:\n{env}");
+            env.lines()
+                .find_map(|l| l.strip_prefix("TINA4_SECRET="))
+                .expect("backend .env must set TINA4_SECRET")
+                .to_string()
+        };
+        // Present, random and high-entropy for every backend language.
+        for lang in ["python", "php", "ruby", "nodejs"] {
+            let s = read_secret(lang, "a");
+            assert_eq!(s.len(), 64, "{lang}: expected a 256-bit hex secret, got: {s}");
+            assert!(s.chars().all(|c| c.is_ascii_hexdigit()), "{lang}: secret must be hex, got: {s}");
+        }
+        // Two scaffolds must not share a secret.
+        assert_ne!(read_secret("php", "x"), read_secret("php", "y"), "two scaffolds shared a secret");
     }
 
     #[test]

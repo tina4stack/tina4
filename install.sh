@@ -137,7 +137,12 @@ if fetch_to "https://github.com/${REPO}/releases/download/${LATEST}/SHA256SUMS" 
   fi
   echo "Checksum verified (sha256)."
 else
-  echo "Note: no SHA256SUMS published for ${LATEST} - skipping integrity check (older release)." >&2
+  # Fail closed: a missing SHA256SUMS means we cannot prove the download is the
+  # published binary, so we do NOT install it. (Every release from 3.8.53 on
+  # publishes SHA256SUMS; a build old enough to lack it can be installed by
+  # pinning an explicit older asset by hand.)
+  echo "Error: SHA256SUMS is not available for ${LATEST} - refusing to install an unverified binary." >&2
+  rm -f "$TMP" "$SUMS_TMP"; exit 1
 fi
 rm -f "$SUMS_TMP"
 

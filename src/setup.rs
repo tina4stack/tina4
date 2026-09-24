@@ -1334,7 +1334,7 @@ end
         "nodejs" => {
             s.push_str("`src/routes/hello/get.ts` — **file-based**: the directory is the URL path, the FILENAME is the HTTP method (`get.ts` = `GET /hello`):\n\n");
             s.push_str("```ts\n");
-            s.push_str(r#"import type { Tina4Request, Tina4Response } from "@tina4/core";
+            s.push_str(r#"import type { Tina4Request, Tina4Response } from "tina4-nodejs";
 
 export default async function (req: Tina4Request, res: Tina4Response) {
   return res.json({ message: "Hello from Tina4" });

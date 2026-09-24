@@ -1018,11 +1018,15 @@ const CI_ENV_VARS: [&str; 8] = [
     "TEAMCITY_VERSION",
 ];
 
+/// The values that mean "not CI" (ADR-0070 `ci_not_set_values`), compared
+/// trimmed and lower-cased. An empty value is not CI either.
+const CI_NOT_SET_VALUES: [&str; 4] = ["false", "0", "no", "off"];
+
 /// One CI variable's verdict: set to a value that, trimmed and lower-cased,
-/// is non-empty and is neither `false` nor `0`. The rule tina4-php ships.
+/// is non-empty and not in `CI_NOT_SET_VALUES`.
 fn ci_marker_set(value: &str) -> bool {
     let v = value.trim().to_ascii_lowercase();
-    !v.is_empty() && v != "false" && v != "0"
+    !v.is_empty() && !CI_NOT_SET_VALUES.contains(&v.as_str())
 }
 
 /// What `tina4 serve` is running: the development server or a production one.
@@ -3407,7 +3411,7 @@ mod tests {
 
     #[test]
     fn browser_never_opens_under_ci() {
-        for v in ["true", "1", "TRUE", "yes", "no", "off", "woodpecker"] {
+        for v in ["true", "1", "TRUE", "yes", "woodpecker"] {
             let pairs = [("CI", v)];
             assert!(
                 !should_open_browser(env_of(&pairs), false, DEV),
@@ -3419,7 +3423,7 @@ mod tests {
     #[test]
     fn browser_opens_when_ci_is_empty_or_falsy() {
         for name in CI_ENV_VARS {
-            for v in ["", "  ", "false", "0", "FALSE", " False "] {
+            for v in ["", "  ", "false", "0", "FALSE", " False ", "no", "NO", "off", " Off "] {
                 let pairs = [(name, v)];
                 assert!(
                     should_open_browser(env_of(&pairs), false, DEV),
@@ -3471,6 +3475,8 @@ mod tests {
         for (i, (ours, theirs)) in CI_ENV_VARS.iter().zip(fixture.iter()).enumerate() {
             assert_eq!(ours, theirs, "CI_ENV_VARS[{i}] drifted from the fixture");
         }
+        // ...and its `ci_not_set_values` array.
+        assert_eq!(CI_NOT_SET_VALUES, ["false", "0", "no", "off"]);
     }
 
     #[test]

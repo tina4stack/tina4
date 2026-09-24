@@ -35,44 +35,67 @@ if (-not (Test-Path $installDir)) {
     New-Item -ItemType Directory -Path $installDir -Force | Out-Null
 }
 
-# Download
+# Download to a TEMP file first. The binary reaches its final path
+# ($installDir\tina4.exe) ONLY after both the checksum and the Authenticode
+# signature pass, so a tampered or unverified download can never land as the
+# installed CLI.
 $dest = "$installDir\tina4.exe"
+$tmp = "$dest.download"
 Write-Host "Downloading $binary..."
-Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $dest
+Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $tmp
 
 # Verify integrity against the release SHA256SUMS before trusting the binary.
-# Releases from 3.8.53 publish SHA256SUMS; verify strictly when present, and
-# warn + continue for older releases that predate it.
+# FAIL CLOSED: if SHA256SUMS is not published we cannot prove the download is
+# the published binary, so we refuse to install rather than skip the check.
 # (Keep all output ASCII-only - see the cp1252 note further down.)
 $sumsAsset = $release.assets | Where-Object { $_.name -eq "SHA256SUMS" }
-if ($sumsAsset) {
-    # GitHub serves release assets as application/octet-stream, so
-    # Invoke-WebRequest returns .Content as a byte[] (NOT a string). Splitting a
-    # byte[] on "`n" yields per-byte garbage, the regex never matches, and every
-    # lookup wrongly reports "is not listed". Decode to UTF-8 text first. (Guard
-    # the type so a future string response still works.)
-    $sumsRaw = (Invoke-WebRequest -Uri $sumsAsset.browser_download_url -UseBasicParsing).Content
-    $sums = if ($sumsRaw -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($sumsRaw) } else { $sumsRaw }
-    $line = $sums -split "`n" | Where-Object { $_ -match "\s\*?$([regex]::Escape($binary))\s*$" } | Select-Object -First 1
-    if (-not $line) {
-        Remove-Item $dest -Force
-        Write-Error "$binary is not listed in SHA256SUMS for $tag"
-        exit 1
-    }
-    $expected = (($line -split '\s+')[0]).ToLower()
-    $actual = (Get-FileHash $dest -Algorithm SHA256).Hash.ToLower()
-    if ($expected -ne $actual) {
-        Remove-Item $dest -Force
-        Write-Host ""
-        Write-Host "  Error: checksum mismatch for $binary - refusing to install" -ForegroundColor Red
-        Write-Host "    expected: $expected" -ForegroundColor Red
-        Write-Host "    actual:   $actual" -ForegroundColor Red
-        exit 1
-    }
-    Write-Host "Checksum verified (sha256)." -ForegroundColor Green
-} else {
-    Write-Host "Note: no SHA256SUMS published for $tag - skipping integrity check (older release)." -ForegroundColor Yellow
+if (-not $sumsAsset) {
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    Write-Error "SHA256SUMS is not available for $tag - refusing to install an unverified binary."
+    exit 1
 }
+# GitHub serves release assets as application/octet-stream, so
+# Invoke-WebRequest returns .Content as a byte[] (NOT a string). Splitting a
+# byte[] on "`n" yields per-byte garbage, the regex never matches, and every
+# lookup wrongly reports "is not listed". Decode to UTF-8 text first. (Guard
+# the type so a future string response still works.)
+$sumsRaw = (Invoke-WebRequest -Uri $sumsAsset.browser_download_url -UseBasicParsing).Content
+$sums = if ($sumsRaw -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($sumsRaw) } else { $sumsRaw }
+$line = $sums -split "`n" | Where-Object { $_ -match "\s\*?$([regex]::Escape($binary))\s*$" } | Select-Object -First 1
+if (-not $line) {
+    Remove-Item $tmp -Force
+    Write-Error "$binary is not listed in SHA256SUMS for $tag"
+    exit 1
+}
+$expected = (($line -split '\s+')[0]).ToLower()
+$actual = (Get-FileHash $tmp -Algorithm SHA256).Hash.ToLower()
+if ($expected -ne $actual) {
+    Remove-Item $tmp -Force
+    Write-Host ""
+    Write-Host "  Error: checksum mismatch for $binary - refusing to install" -ForegroundColor Red
+    Write-Host "    expected: $expected" -ForegroundColor Red
+    Write-Host "    actual:   $actual" -ForegroundColor Red
+    exit 1
+}
+Write-Host "Checksum verified (sha256)." -ForegroundColor Green
+
+# Verify the Authenticode signature: the released .exe is EV-signed by Code
+# Infinity (scripts/sign-release.ps1). A valid checksum only proves the bytes
+# match SHA256SUMS; the signature proves WHO produced them. Refuse anything not
+# validly signed by Code Infinity.
+$sig = Get-AuthenticodeSignature $tmp
+if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notlike '*Code Infinity*') {
+    Remove-Item $tmp -Force
+    Write-Host ""
+    Write-Host "  Error: Authenticode verification failed for $binary - refusing to install" -ForegroundColor Red
+    Write-Host "    status: $($sig.Status)" -ForegroundColor Red
+    Write-Host "    signer: $($sig.SignerCertificate.Subject)" -ForegroundColor Red
+    exit 1
+}
+Write-Host "Signature verified: $($sig.SignerCertificate.Subject)" -ForegroundColor Green
+
+# Both checks passed - promote the verified download to its final path.
+Move-Item -Path $tmp -Destination $dest -Force
 
 # Put the install dir FIRST on the user PATH so a fresh install always wins
 # over a stale tina4.exe sitting earlier on PATH (e.g. an old copy dropped in a

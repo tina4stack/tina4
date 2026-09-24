@@ -265,16 +265,74 @@ fn upgrade_gemfile() -> usize {
 fn upgrade_package_json() -> usize {
     let path = "package.json";
     let Ok(content) = fs::read_to_string(path) else { return 0 };
-    let updated = content
-        .replace("\"@tina4/core\": \"^2", "\"@tina4/core\": \"^3")
-        .replace("\"@tina4/core\": \"~2", "\"@tina4/core\": \"^3")
-        .replace("\"@tina4/orm\": \"^2", "\"@tina4/orm\": \"^3")
-        .replace("\"@tina4/orm\": \"~2", "\"@tina4/orm\": \"^3");
+    let updated = migrate_nodejs_package_json(&content);
     if updated != content && fs::write(path, &updated).is_ok() {
-        println!("  {} Updated package.json — @tina4/* ^3.0", icon_ok().green());
+        println!("  {} Updated package.json — tina4-nodejs ^3.0", icon_ok().green());
         return 1;
     }
     0
+}
+
+/// Rewrite a v2 tina4-nodejs `package.json` dependency set to v3.
+///
+/// In v2 the package was the scoped `@tina4/core` (with `@tina4/orm` as a
+/// separate dependency); in v3 it is the single unscoped `tina4-nodejs` package,
+/// and the ORM ships as its `tina4-nodejs/orm` subpath export, NOT a separate
+/// dependency. The `@tina4` npm scope is no longer ours, so bumping
+/// `@tina4/core` to `^3` would resolve to someone else's package — the name has
+/// to change, not just the version. Any `@tina4/*` line collapses into one
+/// `tina4-nodejs` dependency. Returns the input unchanged when there is nothing
+/// tina4-scoped to migrate.
+fn migrate_nodejs_package_json(content: &str) -> String {
+    if !content.contains("\"@tina4/") {
+        return content.to_string();
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut wrote_tina4 = false;
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("\"@tina4/core\"") || trimmed.starts_with("\"@tina4/orm\"") {
+            if !wrote_tina4 {
+                let indent = &line[..line.len() - trimmed.len()];
+                let comma = if line.trim_end().ends_with(',') { "," } else { "" };
+                out.push(format!("{indent}\"tina4-nodejs\": \"^3.0.0\"{comma}"));
+                wrote_tina4 = true;
+            }
+            // Any further @tina4/* line is folded into the single tina4-nodejs dep.
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    let mut result = out.join("\n");
+    if content.ends_with('\n') {
+        result.push('\n');
+    }
+    strip_trailing_json_commas(&result)
+}
+
+/// Remove a comma that a dropped last entry may have left before a closing `}`
+/// or `]`, so the rewritten JSON stays valid. Char-safe (never splits a
+/// multibyte character) and only touches a comma followed solely by whitespace
+/// and then a closer.
+fn strip_trailing_json_commas(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == ',' {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < chars.len() && (chars[j] == '}' || chars[j] == ']') {
+                i += 1; // drop the comma, keep the whitespace that follows
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
 }
 
 /// Delegate language-specific code upgrades to the language CLI if available.
@@ -341,5 +399,46 @@ fn delegate_upgrade(lang: &str) {
                 icon_info().blue()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{migrate_nodejs_package_json, strip_trailing_json_commas};
+
+    #[test]
+    fn migrate_renames_scoped_core_to_unscoped_package() {
+        // The @tina4 scope is no longer ours: a v2 @tina4/core must be renamed to
+        // the real tina4-nodejs package, never bumped to a squatted @tina4/core@3.
+        let v2 = "{\n  \"dependencies\": {\n    \"@tina4/core\": \"^2.5.0\"\n  }\n}\n";
+        let out = migrate_nodejs_package_json(v2);
+        assert!(out.contains("\"tina4-nodejs\": \"^3.0.0\""), "got:\n{out}");
+        assert!(!out.contains("@tina4/core"), "scoped name must be gone:\n{out}");
+    }
+
+    #[test]
+    fn migrate_folds_core_and_orm_into_one_dependency() {
+        // @tina4/orm folds into tina4-nodejs (its /orm subpath), so both scoped
+        // deps collapse to a single valid line with no trailing comma.
+        let v2 = "{\n  \"dependencies\": {\n    \"@tina4/core\": \"~2.9.1\",\n    \"@tina4/orm\": \"^2.0.0\"\n  }\n}\n";
+        let out = migrate_nodejs_package_json(v2);
+        assert_eq!(out.matches("tina4-nodejs").count(), 1, "one collapsed dep expected:\n{out}");
+        assert!(!out.contains("@tina4/orm"), "orm dep must be dropped:\n{out}");
+        // Valid JSON: no dangling comma before the closing brace.
+        assert!(!out.contains(",\n  }"), "trailing comma left behind:\n{out}");
+    }
+
+    #[test]
+    fn migrate_leaves_a_non_tina4_manifest_untouched() {
+        let other = "{\n  \"dependencies\": {\n    \"express\": \"^4.0.0\"\n  }\n}\n";
+        assert_eq!(migrate_nodejs_package_json(other), other);
+    }
+
+    #[test]
+    fn strip_trailing_json_commas_only_touches_a_comma_before_a_closer() {
+        assert_eq!(strip_trailing_json_commas("[1, 2,\n]"), "[1, 2\n]");
+        assert_eq!(strip_trailing_json_commas("{\"a\":1}"), "{\"a\":1}");
+        // A comma between values is preserved.
+        assert_eq!(strip_trailing_json_commas("[1, 2]"), "[1, 2]");
     }
 }

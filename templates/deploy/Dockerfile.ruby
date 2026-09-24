@@ -3,7 +3,8 @@
 # resolved bundle into a slim runtime.
 #
 # The builder is the full `ruby:3.3` image, not `-slim`: several gems in the
-# default dependency set ship native extensions (date, json, nio4r, sqlite3),
+# default dependency set ship native extensions (date, json, sqlite3; nio4r if
+# the app adds puma),
 # and `-slim` carries no compiler, so `bundle install` dies with
 # "Gem::Ext::BuildError: Failed to build gem native extension".
 # The tina4 CLI is installed in EVERY Tina4 image and is the launcher: one
@@ -26,9 +27,10 @@ RUN bundle config set --local without 'development test' \
  && bundle config set --local path '/app/vendor/bundle' \
  && bundle install --jobs 4 \
  && rm -rf /app/vendor/bundle/ruby/*/cache
-# puma at BUILD time, same reason as uvicorn in the Python image: otherwise
-# `tina4 serve --production` shells out to `gem install puma` on every boot.
-RUN gem install puma --no-doc
+# No server gem is installed here. tina4ruby serves HTTP itself; Puma is opt-in
+# (ADR-0067): an app that wants it lists `gem "puma"` in its Gemfile, and the
+# bundle install above brings it in. A `gem install puma` outside the bundle
+# could not be loaded under `bundle exec` anyway.
 
 FROM ruby:3.3-slim
 WORKDIR /app

@@ -1,4 +1,10 @@
 #!/bin/sh
+# Copyright (c) 2026 Code Infinity
+# SPDX-License-Identifier: MPL-2.0
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 # FALLBACK signer for macOS / Linux. The Windows signtool path
 # (scripts/sign-release.ps1) is primary and best-trodden for Authenticode;
 # use this only when you cannot sign on Windows.
@@ -40,6 +46,7 @@
 #
 # USAGE:  sh scripts/sign-release.sh v3.8.53
 set -eu
+VERIFY_INPUTS="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/verify-release-inputs.py"
 
 TAG="${1:-}"
 [ -z "$TAG" ] && { echo "Usage: sh scripts/sign-release.sh <tag>   (e.g. v3.8.53)" >&2; exit 1; }
@@ -124,6 +131,7 @@ cd "$WORK"
 echo "Downloading draft release assets for $TAG ..."
 gh release download "$TAG" --repo "$REPO" --dir . --clobber
 [ -f "$BINARY" ] || { echo "Error: $BINARY not found in release $TAG" >&2; exit 1; }
+python3 "$VERIFY_INPUTS" --directory "$WORK" --repo "$REPO" --tag "$TAG"
 
 echo "Signing $BINARY (SimplySign must be logged in) ..."
 # -t (legacy Authenticode timestamp) is the Certum-proven form against

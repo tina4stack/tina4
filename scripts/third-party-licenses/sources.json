@@ -1,0 +1,75 @@
+{
+  "block2@0.6.2": {
+    "file": "block2-0.6.2.txt",
+    "sha256": "1bb3211320d0863ca6659e1d0b5f30d701cc610d7a3d471b4f2d8458390f48c6",
+    "sources": [
+      "https://github.com/madsmtm/objc2/blob/b4167b582b2f75f9a1be75495c41b765344fd03c/LICENSE.md"
+    ]
+  },
+  "dispatch2@0.3.1": {
+    "file": "dispatch2-0.3.1.txt",
+    "sha256": "311d9714868bcca9aefbb82317b7b3a2b7f71ca442e0ee91ad157d40fec47318",
+    "sources": [
+      "https://github.com/madsmtm/objc2/blob/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md"
+    ]
+  },
+  "grass@0.13.4": {
+    "file": "grass-0.13.4.txt",
+    "sha256": "1a8e4fc36600152bc4229b0859de4af6ce57cb513992ef0c74f447c4f80221a5",
+    "sources": [
+      "https://github.com/connorskees/grass/blob/e0bb9e2eabfc3a58e42b03089cd7b22c68d09d0b/LICENSE"
+    ]
+  },
+  "grass_compiler@0.13.4": {
+    "file": "grass_compiler-0.13.4.txt",
+    "sha256": "1a8e4fc36600152bc4229b0859de4af6ce57cb513992ef0c74f447c4f80221a5",
+    "sources": [
+      "https://github.com/connorskees/grass/blob/e0bb9e2eabfc3a58e42b03089cd7b22c68d09d0b/LICENSE"
+    ]
+  },
+  "objc2@0.6.4": {
+    "file": "objc2-0.6.4.txt",
+    "sha256": "311d9714868bcca9aefbb82317b7b3a2b7f71ca442e0ee91ad157d40fec47318",
+    "sources": [
+      "https://github.com/madsmtm/objc2/blob/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md"
+    ]
+  },
+  "objc2-encode@4.1.0": {
+    "file": "objc2-encode-4.1.0.txt",
+    "sha256": "f82a830e43d1545198ff5895c7b3359e0020cc82fa7e1c0c03f5d98116344dc7",
+    "sources": [
+      "https://github.com/madsmtm/objc2/blob/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.md"
+    ]
+  },
+  "r-efi@5.3.0": {
+    "file": "r-efi-5.3.0.txt",
+    "sha256": "76c43b76ba9f6f5196fa6f49cdb1ec03415469e4e3d68b3fd2898ea5da95ba28",
+    "sources": [
+      "https://github.com/r-efi/r-efi/blob/97b55bed1c2c91dcbf787674849f05337ff80b33/README.md",
+      "https://github.com/r-efi/r-efi/blob/97b55bed1c2c91dcbf787674849f05337ff80b33/AUTHORS"
+    ]
+  },
+  "tree-sitter-ruby@0.23.1": {
+    "file": "tree-sitter-ruby-0.23.1.txt",
+    "sha256": "376a5ef95ac2ea325846a737b04c6243933f8326972272217a9e93419332b56f",
+    "sources": [
+      "https://github.com/tree-sitter/tree-sitter-ruby/blob/71bd32fb7607035768799732addba884a37a6210/LICENSE"
+    ]
+  },
+  "tree-sitter-typescript@0.23.2": {
+    "file": "tree-sitter-typescript-0.23.2.txt",
+    "sha256": "3272983479a7b82d149d79cbf96badb735bb5a6ae74c2042a4efc0fc7e79b85a",
+    "sources": [
+      "https://github.com/tree-sitter/tree-sitter-typescript/blob/f975a621f4e7f532fe322e13c4f79495e0a7b2e7/LICENSE"
+    ]
+  },
+  "wasip2@1.0.2+wasi-0.2.9": {
+    "file": "wasip2-1.0.2+wasi-0.2.9.txt",
+    "sha256": "ebb20cbf739dcb82cb184ddb0117114124b3471fec6c5da7c2e82e6d752e8b78",
+    "sources": [
+      "https://github.com/bytecodealliance/wasi-rs/blob/06ce201370fcde0d1b0d47cac8ecb1b0b312c9f9/LICENSE-APACHE",
+      "https://github.com/bytecodealliance/wasi-rs/blob/06ce201370fcde0d1b0d47cac8ecb1b0b312c9f9/LICENSE-Apache-2.0_WITH_LLVM-exception",
+      "https://github.com/bytecodealliance/wasi-rs/blob/06ce201370fcde0d1b0d47cac8ecb1b0b312c9f9/LICENSE-MIT"
+    ]
+  }
+}

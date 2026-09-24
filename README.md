@@ -162,4 +162,5 @@ If you have old v2 CLI binaries (`tina4python`, `tina4php`, etc.) installed glob
 
 ## License
 
-MIT
+Mozilla Public License 2.0 ([LICENSE](LICENSE)). Code Infinity also offers a
+separate commercial licence; see [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md).

@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Code Infinity
+# SPDX-License-Identifier: MPL-2.0
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 # Canonical Tina4 skills file list -- the single source of truth for WHICH files
 # make up a skills release. Sourced (not executed) by:
 #   - gen-skills-sha256.sh   (emits the checksum manifest)

@@ -1,4 +1,10 @@
 #!/bin/sh
+# Copyright (c) 2026 Code Infinity
+# SPDX-License-Identifier: MPL-2.0
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 # macOS Authenticode signer for the tina4 Windows CLI binary, via JSIGN against
 # the Certum SimplySign CLOUD key (PKCS#11). This is the PROVEN macOS path.
 #
@@ -25,6 +31,7 @@
 #
 # OVERRIDES (env): TINA4_PKCS11_MODULE, TINA4_SIGN_ALIAS, TINA4_TS_URL, TINA4_REPO
 set -eu
+VERIFY_INPUTS="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/scripts/verify-release-inputs.py"
 
 cd "$(dirname "$0")"                        # tina4 repo root
 # Args: <tag> plus optional --check/--dry-run (in any position). --check resolves
@@ -45,6 +52,7 @@ TSA_URL="${TINA4_TS_URL:-http://time.certum.pl/}"
 
 command -v jsign >/dev/null 2>&1 || { echo "Error: 'jsign' required -> brew install jsign" >&2; exit 1; }
 command -v gh    >/dev/null 2>&1 || { echo "Error: 'gh' required (authenticated)" >&2; exit 1; }
+command -v osslsigncode >/dev/null 2>&1 || { echo "Error: osslsigncode required for independent signature verification" >&2; exit 1; }
 
 # SimplySign cloud PKCS#11 module. Resolve the symlink to the concrete versioned
 # .dylib - SunPKCS11 (jsign's provider) wants the real file, not the symlink.
@@ -103,6 +111,7 @@ cd "$WORK"
 echo "Downloading draft release assets for $TAG ..."
 gh release download "$TAG" --repo "$REPO" --dir . --clobber
 [ -f "$BINARY" ] || { echo "Error: $BINARY not found in release $TAG" >&2; exit 1; }
+python3 "$VERIFY_INPUTS" --directory "$WORK" --repo "$REPO" --tag "$TAG"
 
 echo "Signing $BINARY via jsign ..."
 # --storepass "" : the cloud session has no PIN (the 2FA gate is SimplySign Desktop).
@@ -112,11 +121,7 @@ jsign --storetype PKCS11 --keystore "$PKCFG" --storepass "" \
       --alias "$ALIAS" --tsmode AUTHENTICODE --tsaurl "$TSA_URL" "$BINARY"
 
 echo "Verifying signature ..."
-if command -v osslsigncode >/dev/null 2>&1; then
-  osslsigncode verify "$BINARY"
-else
-  echo "  (osslsigncode not installed - skipping local verify; brew install osslsigncode to verify)"
-fi
+osslsigncode verify "$BINARY"
 
 echo "Uploading signed $BINARY ..."
 gh release upload "$TAG" "$BINARY" --repo "$REPO" --clobber

@@ -1,9 +1,9 @@
 [package]
 name = "tina4"
-version = "3.8.89"
+version = "3.8.90"
 edition = "2021"
 description = "Tina4 — Unified CLI for Python, PHP, Ruby, and Node.js frameworks"
-license = "MIT"
+license = "MPL-2.0"
 repository = "https://github.com/tina4stack/tina4"
 homepage = "https://tina4.com"
 keywords = ["cli", "web-framework", "scss", "dev-tools"]
@@ -36,7 +36,11 @@ models and routes, run migrations, and measure code health - all from `tina4`.""
 assets = [
     ["target/release/tina4", "usr/bin/tina4", "755"],
     ["LICENSE", "usr/share/doc/tina4/copyright", "644"],
+    ["NOTICE", "usr/share/doc/tina4/NOTICE", "644"],
+    ["COMMERCIAL-LICENSE.md", "usr/share/doc/tina4/COMMERCIAL-LICENSE.md", "644"],
     ["README.md", "usr/share/doc/tina4/README.md", "644"],
+    ["dist/THIRD-PARTY-NOTICES.txt", "usr/share/doc/tina4/THIRD-PARTY-NOTICES.txt", "644"],
+    ["dist/LICENSE-INVENTORY.json", "usr/share/doc/tina4/LICENSE-INVENTORY.json", "644"],
 ]
 
 [[bin]]

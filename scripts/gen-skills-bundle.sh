@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Code Infinity
+# SPDX-License-Identifier: MPL-2.0
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 # Stage the tina4.com skills bundle -- the FIRST source the installer tries, ahead
 # of jsDelivr and raw.githubusercontent. It lands under tina4-documentation's
 # docs/public so the existing Jenkins-on-main deploy publishes it to

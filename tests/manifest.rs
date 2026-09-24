@@ -1,3 +1,9 @@
+// Copyright (c) 2026 Code Infinity
+// SPDX-License-Identifier: MPL-2.0
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 //! End-to-end test for the Phase-2 manifest fingerprint cache, driven through
 //! the built `tina4` binary against a REAL manifest-capable framework CLI (no
 //! mocks). Proves: first `--help` spawns the CLI and writes `.tina4/commands.json`;

@@ -1770,6 +1770,22 @@ fn handle_update() {
         return;
     }
 
+    // Refuse a downgrade. `get_latest_version` trusts GitHub's "latest" release,
+    // but a tampered API response (or a yanked latest) must never be able to roll
+    // a user BACK to an older, potentially vulnerable build. Self-update only ever
+    // moves forward; equality is handled above.
+    if version_is_older(latest_ver, CURRENT_VERSION) {
+        println!(
+            "{} Installed {} is newer than the latest published {} — not downgrading the CLI.",
+            icon_ok().green(),
+            CURRENT_VERSION.cyan(),
+            latest_ver.cyan()
+        );
+        refresh_installed_skills();
+        update_framework_package();
+        return;
+    }
+
     // Step 3: Download and replace binary — try multiple name variants
     let candidates = get_binary_name_candidates();
 
@@ -1811,13 +1827,28 @@ fn handle_update() {
         download_file_classified(&url, &tmp_path)
     });
 
-    if let Err(failure) = downloaded {
-        eprintln!(
-            "{} {}",
-            icon_fail().red(),
-            report_failed_download(&tmp_path, &failure, &candidates, &latest_tag)
-        );
-        // A failed update must be visible to whatever ran it.
+    let asset_name = match downloaded {
+        Ok(name) => name,
+        Err(failure) => {
+            eprintln!(
+                "{} {}",
+                icon_fail().red(),
+                report_failed_download(&tmp_path, &failure, &candidates, &latest_tag)
+            );
+            // A failed update must be visible to whatever ran it.
+            std::process::exit(1);
+        }
+    };
+
+    // Verify the downloaded binary against the release's SHA256SUMS before we
+    // trust it enough to overwrite the running CLI. SHA256SUMS is regenerated
+    // over the SIGNED bytes at publish time (scripts/sign-release.*), so it is
+    // the same integrity anchor install.sh/.ps1 verify. Fail closed: a missing
+    // or mismatched checksum aborts the update rather than installing unverified
+    // bytes.
+    if let Err(message) = verify_downloaded_binary(&tmp_path, &asset_name, &latest_tag) {
+        std::fs::remove_file(&tmp_path).ok();
+        eprintln!("{} {}", icon_fail().red(), message);
         std::process::exit(1);
     }
 
@@ -1867,6 +1898,127 @@ fn handle_update() {
 
     // Also update the framework package in the current project
     update_framework_package();
+}
+
+/// True when dotted-numeric version `candidate` is strictly older than `base`.
+/// Compares the numeric MAJOR.MINOR.PATCH components; any pre-release suffix
+/// (after `-`) is ignored for ordering, which is all the downgrade guard needs.
+/// A component that does not parse is treated as 0.
+fn version_is_older(candidate: &str, base: &str) -> bool {
+    fn parts(v: &str) -> Vec<u64> {
+        v.split('-')
+            .next()
+            .unwrap_or(v)
+            .split('.')
+            .map(|p| p.parse::<u64>().unwrap_or(0))
+            .collect()
+    }
+    let (a, b) = (parts(candidate), parts(base));
+    for i in 0..a.len().max(b.len()) {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x < y;
+        }
+    }
+    false
+}
+
+/// Verify a just-downloaded binary against the release's SHA256SUMS. Returns
+/// Ok(()) when the file's SHA-256 matches its entry, or Err(message) explaining
+/// why the update must not proceed. Fail closed: a missing SHA256SUMS, a missing
+/// entry, or a mismatch all return Err.
+fn verify_downloaded_binary(
+    binary: &std::path::Path,
+    asset_name: &str,
+    tag: &str,
+) -> Result<(), String> {
+    let url = format!(
+        "https://github.com/{}/releases/download/{}/SHA256SUMS",
+        REPO, tag
+    );
+    let sums_path = binary.with_extension("sha256sums");
+    if download_file_classified(&url, &sums_path) != DownloadOutcome::Ok {
+        return Err(format!(
+            "Could not download SHA256SUMS for {} — refusing to install an unverified binary.",
+            tag
+        ));
+    }
+    let sums = std::fs::read_to_string(&sums_path);
+    std::fs::remove_file(&sums_path).ok();
+    let sums = sums.map_err(|e| format!("Could not read SHA256SUMS: {}", e))?;
+
+    let expected = sha256sums_lookup(&sums, asset_name).ok_or_else(|| {
+        format!(
+            "{} is not listed in SHA256SUMS for {} — refusing to install.",
+            asset_name, tag
+        )
+    })?;
+    let actual = sha256_of_file(binary)
+        .ok_or_else(|| "No SHA-256 tool available to verify the download.".to_string())?;
+    if actual != expected {
+        return Err(format!(
+            "Checksum mismatch for {} — refusing to install.\n  expected: {}\n  actual:   {}",
+            asset_name, expected, actual
+        ));
+    }
+    println!("{} Checksum verified (sha256).", icon_ok().green());
+    Ok(())
+}
+
+/// Find the lowercase hex digest for `asset_name` in `sha256sum`-format text
+/// ("<hash>  <name>", the name optionally prefixed with `*` for binary mode).
+fn sha256sums_lookup(sums: &str, asset_name: &str) -> Option<String> {
+    sums.lines().find_map(|line| {
+        let mut it = line.split_whitespace();
+        let hash = it.next()?;
+        let name = it.next()?.trim_start_matches('*');
+        if name == asset_name && hash.len() == 64 {
+            Some(hash.to_lowercase())
+        } else {
+            None
+        }
+    })
+}
+
+/// SHA-256 of a file via the platform tool (no crypto dependency — the same
+/// approach install.sh uses). Returns the lowercase hex digest, or None when no
+/// tool is available or the output cannot be parsed.
+fn sha256_of_file(path: &std::path::Path) -> Option<String> {
+    let p = path.to_string_lossy().to_string();
+    if console::is_windows() {
+        // Resolve the interpreter path (not a bare "powershell") so it still runs
+        // on a box whose PATH has lost System32\WindowsPowerShell\v1.0.
+        let out = std::process::Command::new(setup::windows_powershell())
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!("(Get-FileHash -Algorithm SHA256 -LiteralPath '{}').Hash", p),
+            ])
+            .output()
+            .ok()?;
+        let s: String = String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .collect();
+        return (s.len() == 64).then_some(s);
+    }
+    for args in [vec![p.as_str()], vec!["-a", "256", p.as_str()]] {
+        let cmd = if args.len() == 1 { "sha256sum" } else { "shasum" };
+        if let Ok(out) = std::process::Command::new(cmd).args(&args).output() {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout);
+                if let Some(first) = s.split_whitespace().next() {
+                    if first.len() == 64 {
+                        return Some(first.to_lowercase());
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 const TINA4_SKILL_NAMES: &[&str] = &[
@@ -2823,6 +2975,38 @@ mod tests {
     // and no undo.
 
     use super::{classify_cli_generation, version_majors, CliGeneration};
+
+    // ---- self-update integrity: downgrade guard + checksum lookup ---------
+    //
+    // `tina4 update` overwrites the running CLI. Before it does, it must (a)
+    // refuse to move to an older version and (b) verify the download against the
+    // release SHA256SUMS. These pin both pure decisions.
+
+    use super::{sha256sums_lookup, version_is_older};
+
+    #[test]
+    fn version_is_older_orders_numeric_components() {
+        assert!(version_is_older("3.8.89", "3.8.90"));
+        assert!(version_is_older("3.7.0", "3.8.0"));
+        assert!(version_is_older("2.9.9", "3.0.0"));
+        // Not older: equal, newer, or a longer-but-not-smaller series.
+        assert!(!version_is_older("3.8.90", "3.8.90"));
+        assert!(!version_is_older("3.8.91", "3.8.90"));
+        assert!(!version_is_older("3.9.0", "3.8.90"));
+        assert!(!version_is_older("3.8.90", "3.8.90-rc.1"));
+    }
+
+    #[test]
+    fn sha256sums_lookup_finds_the_named_asset() {
+        let h = "a".repeat(64);
+        let g = "b".repeat(64);
+        let sums = format!("{h}  tina4-linux-amd64\n{g} *tina4-windows-amd64.exe\n");
+        assert_eq!(sha256sums_lookup(&sums, "tina4-linux-amd64"), Some(h));
+        // The `*` binary-mode marker on the name is stripped before matching.
+        assert_eq!(sha256sums_lookup(&sums, "tina4-windows-amd64.exe"), Some(g));
+        // A name that is not listed yields None (the caller then fails closed).
+        assert_eq!(sha256sums_lookup(&sums, "tina4-darwin-arm64"), None);
+    }
 
     // ---- production server per language (ADR-0067) ------------------------
 

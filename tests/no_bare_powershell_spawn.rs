@@ -128,9 +128,10 @@ fn the_repaired_sites_still_resolve_before_spawning() {
         }
     }
     // setup.rs: the skills spawn, the UAC relaunch, the Claude Code installer.
-    // main.rs: the download fallback, reached when C:\Windows\System32\curl.exe
-    // is absent -- which happens on exactly the machine this resolution exists
-    // for, and which runs BEFORE the skills spawn on the same code path.
+    // main.rs: the download fallback (reached when C:\Windows\System32\curl.exe
+    // is absent -- exactly the machine this resolution exists for), plus the
+    // self-update checksum hash (Get-FileHash) that verifies the downloaded
+    // binary before it overwrites the running CLI.
     assert_eq!(
         calls.get("src/setup.rs").copied().unwrap_or(0),
         3,
@@ -138,8 +139,8 @@ fn the_repaired_sites_still_resolve_before_spawning() {
     );
     assert_eq!(
         calls.get("src/main.rs").copied().unwrap_or(0),
-        1,
-        "the download fallback in main.rs stopped resolving PowerShell"
+        2,
+        "a resolved PowerShell spawn in main.rs (download fallback or update hash) regressed"
     );
 }
 

@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Code Infinity
+# SPDX-License-Identifier: MPL-2.0
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 """Verify draft bytes and tag-bound CI provenance before any local signing."""
 import argparse
 import hashlib
@@ -18,7 +24,7 @@ def verify_checksums(directory):
     actual = {p.name for p in directory.iterdir() if p.is_file() and p.name != 'SHA256SUMS'}
     if set(entries) != actual:
         raise ValueError('Checksum manifest does not exactly cover the downloaded assets')
-    required = {'tina4.spdx.json', 'THIRD-PARTY-NOTICES.txt', 'LICENSE-INVENTORY.json',
+    required = {'LICENSE', 'NOTICE', 'COMMERCIAL-LICENSE.md', 'tina4.spdx.json', 'THIRD-PARTY-NOTICES.txt', 'LICENSE-INVENTORY.json',
                 'tina4-windows-amd64.exe'}
     if not required <= actual:
         raise ValueError('Release is missing required binary, SBOM or licence assets')

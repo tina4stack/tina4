@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Code Infinity
+# SPDX-License-Identifier: MPL-2.0
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 """Generate SPDX 2.3 and notices from the locked, all-platform Cargo graph.
 
 Uses only Python's standard library and Cargo. This is an auditable inventory,
@@ -9,6 +15,7 @@ import hashlib
 import json
 import re
 import subprocess
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -95,6 +102,8 @@ def generate(output):
                 'comment': 'All-platform Cargo.lock inventory; includes build/dev dependencies. No legal approval claimed.',
                 'packages': packages, 'relationships': relationships}
     output.mkdir(parents=True, exist_ok=True)
+    for notice in ['LICENSE', 'NOTICE', 'COMMERCIAL-LICENSE.md']:
+        shutil.copyfile(ROOT / notice, output / notice)
     (output / 'tina4.spdx.json').write_text(json.dumps(document, indent=2) + '\n')
     (output / 'THIRD-PARTY-NOTICES.txt').write_text('\n\n'.join(notices) + '\n')
     (output / 'LICENSE-INVENTORY.json').write_text(json.dumps(licence_inventory, indent=2) + '\n')

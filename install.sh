@@ -1,4 +1,10 @@
 #!/bin/sh
+# Copyright (c) 2026 Code Infinity
+# SPDX-License-Identifier: MPL-2.0
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 # Tina4 CLI installer — https://tina4.com
 # Usage: curl -fsSL https://raw.githubusercontent.com/tina4stack/tina4/main/install.sh | sh
 #    or: wget -qO- https://raw.githubusercontent.com/tina4stack/tina4/main/install.sh | sh

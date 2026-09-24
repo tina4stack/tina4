@@ -1,4 +1,10 @@
 #!/bin/sh
+# Copyright (c) 2026 Code Infinity
+# SPDX-License-Identifier: MPL-2.0
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 # macOS Authenticode signer for the tina4 Windows CLI binary, via JSIGN against
 # the Certum SimplySign CLOUD key (PKCS#11). This is the PROVEN macOS path.
 #

@@ -1,3 +1,9 @@
+// Copyright (c) 2026 Code Infinity
+// SPDX-License-Identifier: MPL-2.0
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 //! `tina4 update` deletes files off PATH before it does anything else, and the
 //! deletion has no undo. These go through the real entry point on purpose: the
 //! unit tests cover the classification, and every one of them stays green while

@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# Copyright (c) 2026 Code Infinity
+# SPDX-License-Identifier: MPL-2.0
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 # Generate skills.sha256 -- the checksum manifest install-skills.sh verifies every
 # downloaded skill file against. Run this at release time with the framework repos
 # checked out at the skills tag, then commit skills.sha256 alongside install-skills.sh.

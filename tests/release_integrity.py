@@ -1,3 +1,9 @@
+# Copyright (c) 2026 Code Infinity
+# SPDX-License-Identifier: MPL-2.0
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 """Real-file negative checks for the pre-sign integrity gate; no signing/network."""
 import hashlib
 import importlib.util
@@ -16,14 +22,14 @@ class ChecksumGate(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
-        for name in ['tina4.spdx.json', 'THIRD-PARTY-NOTICES.txt', 'LICENSE-INVENTORY.json', 'tina4-windows-amd64.exe']:
+        for name in ['LICENSE', 'NOTICE', 'COMMERCIAL-LICENSE.md', 'tina4.spdx.json', 'THIRD-PARTY-NOTICES.txt', 'LICENSE-INVENTORY.json', 'tina4-windows-amd64.exe']:
             (self.directory / name).write_bytes(('checksum fixture: ' + name).encode())
         self.manifest = self.directory / 'SHA256SUMS'
         self.manifest.write_text(''.join(hashlib.sha256(p.read_bytes()).hexdigest() + '  ' + p.name + '\n'
                                          for p in sorted(self.directory.iterdir())))
 
     def test_complete_matching_assets(self):
-        self.assertEqual(len(verify.verify_checksums(self.directory)), 5)
+        self.assertEqual(len(verify.verify_checksums(self.directory)), 8)
 
     def test_tampered_asset_is_rejected(self):
         with (self.directory / 'tina4-windows-amd64.exe').open('ab') as file:

@@ -20,4 +20,12 @@ Root owns documentation wrappers and the immutable skills bundle. No tags or pub
 - [x] Attest all draft assets/checksums, including unsigned Windows; all three signing scripts fail closed on mismatched/incomplete checksums or missing tag-bound CI provenance.
 - [x] Five real-file checksum rejection tests pass; shell/PowerShell syntax and workflow YAML validated.
 - [ ] End-to-end hosted draft attestations and Debian/container packaging require the coordinated release workflow.
-- [ ] Inbound licence-policy approval remains a separate legal/maintainer decision; inventory records not-assessed.
+- [x] User confirmed MPL legal review/contributor consent. Repository dependency policy submitted with this release PR; cargo-deny checks all accepted alternatives. Per-component legal opinions remain not-assessed.
+
+## MPL-2.0 and commercial option
+- [x] Copy canonical Mozilla LICENSE, NOTICE and Code Infinity commercial-option notice; preserve previous releases and all third-party licence texts.
+- [x] Add MPL source notices to64first-party source/test/script/template files; update Cargo and Homebrew/Scoop/WinGet/Chocolatey metadata.
+- [x] Re-sign both PowerShell installers after final source notices; independent osslsigncode verification succeeds (digest, timestamp, chain and CRL). Preserve exact signed bytes through Git attributes.
+- [x] Explicit permissive-plus-MPL dependency choices in LICENSE-POLICY.md/deny.toml; PR and release cargo-deny0.20.2 gate. Full advisories/bans/licenses/sources check passes.
+- [x] Repeat Rust296passed/4existingignored, strict Clippy, locked build, installer5modes each, integrity5negative checks, workflow syntax and official SPDX2.3 validation.
+- [x] Include first-party LICENSE/NOTICE/commercial notice with release assets, Debian packages and the CLI image.

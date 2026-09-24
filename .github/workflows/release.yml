@@ -40,8 +40,8 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
       - uses: taiki-e/install-action@bffeee26d4db9be238a4ea78d8826604ebcb594d # v2.82.5
         with:
-          tool: cargo-deny
-      - run: cargo deny check advisories bans sources
+          tool: cargo-deny@0.20.2
+      - run: cargo deny check advisories bans sources licenses
 
   build:
     needs: audit
@@ -285,6 +285,9 @@ jobs:
             dist/tina4.spdx.json
             dist/THIRD-PARTY-NOTICES.txt
             dist/LICENSE-INVENTORY.json
+            dist/LICENSE
+            dist/NOTICE
+            dist/COMMERCIAL-LICENSE.md
           if-no-files-found: error
 
       - name: Generate SHA256SUMS
@@ -322,7 +325,7 @@ jobs:
           # ONE source of truth for the expected set. The threshold below is
           # DERIVED from it, so adding a build target can never leave a hardcoded
           # count out of step with the names actually checked.
-          EXPECTED="tina4-linux-amd64 tina4-linux-arm64 tina4-linux-musl-amd64 tina4-linux-musl-arm64 tina4-darwin-amd64 tina4-darwin-arm64 tina4-windows-amd64.exe tina4.spdx.json THIRD-PARTY-NOTICES.txt LICENSE-INVENTORY.json SHA256SUMS"
+          EXPECTED="tina4-linux-amd64 tina4-linux-arm64 tina4-linux-musl-amd64 tina4-linux-musl-arm64 tina4-darwin-amd64 tina4-darwin-arm64 tina4-windows-amd64.exe LICENSE NOTICE COMMERCIAL-LICENSE.md tina4.spdx.json THIRD-PARTY-NOTICES.txt LICENSE-INVENTORY.json SHA256SUMS"
           want=$(printf '%s\n' $EXPECTED | grep -c .)
 
           # `|| true` matters under `set -eu`: a transient non-zero from gh (rate

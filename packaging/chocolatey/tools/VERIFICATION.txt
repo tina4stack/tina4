@@ -30,6 +30,6 @@ published as an asset on the same release:
 The binary is additionally EV Authenticode code-signed; right-click the .exe,
 Properties, Digital Signatures to inspect the publisher signature.
 
-The software is licensed under the MIT License; a copy is included as
+The software is licensed under the Mozilla Public License 2.0; a copy is included as
 tools\LICENSE.txt and is published at:
   https://github.com/tina4stack/tina4/blob/main/LICENSE

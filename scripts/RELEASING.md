@@ -10,7 +10,7 @@ Code Infinity signature.
 A signature proves origin, not goodness, so CI makes the artifact provably good
 before any signature goes on:
 
-1. **audit** - `cargo-deny` (advisories, bans, sources) gates the build.
+1. **audit** - `cargo-deny` (advisories, bans, sources, licences) gates the build.
 2. **build** - `cargo build --locked` on a pinned Rust toolchain, all Actions
    pinned to commit SHAs, with a pre-sign smoke test.
 3. **provenance** - SLSA attestations cover every draft asset, including the
@@ -120,8 +120,9 @@ CI generates `tina4.spdx.json`, `LICENSE-INVENTORY.json` and
 build/development dependencies, so it is a conservative superset of each binary.
 Cargo archive checksums identify the exact source crates. Missing/unknown licence
 declarations or missing notice texts fail the inventory check on every PR. This
-records upstream declarations; it does not claim legal approval or an approved
-inbound licence policy, which remains a separate maintainer/legal decision.
+records upstream declarations and does not claim an individual legal opinion.
+The separate `LICENSE-POLICY.md` allowlist is enforced by cargo-deny on every
+pull request and release build.
 For the crates whose archives omit licence files, reviewed texts from their exact
 upstream source commits are stored under `scripts/third-party-licenses/`, with
 source URLs and SHA-256 checksums.

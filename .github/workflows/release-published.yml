@@ -42,7 +42,8 @@ jobs:
   render:
     runs-on: ubuntu-latest
     permissions:
-      contents: write   # commit the bumped manifests back to main
+      contents: write       # push the chore/manifests-<tag> branch
+      pull-requests: write  # open the PR that brings it into main
     outputs:
       tag: ${{ steps.ver.outputs.tag }}
       version: ${{ steps.ver.outputs.version }}
@@ -79,19 +80,32 @@ jobs:
       - name: Render manifests
         run: bash scripts/render-manifests.sh "${{ steps.ver.outputs.version }}" SHA256SUMS
 
-      - name: Commit bumped manifests back to main
+      # main is protected (changes land through pull requests), so the bumped
+      # manifests go up as a PR instead of a direct push. The publish jobs
+      # below use the rendered artifact, so they never wait on this PR.
+      - name: Open a PR with the bumped manifests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
         run: |
           set -eu
           rm -f SHA256SUMS
           if git diff --quiet -- packaging homebrew; then
-            echo "manifests already current for ${{ steps.ver.outputs.tag }} - nothing to commit"
+            echo "manifests already current for $TAG - nothing to commit"
             exit 0
           fi
+          branch="chore/manifests-$TAG"
           git config user.name  "tina4stack"
           git config user.email "info@tina4.com"
+          git switch -c "$branch"
           git add packaging homebrew
-          git commit -m "chore(packaging): sync manifests to ${{ steps.ver.outputs.tag }}"
-          git push origin main
+          git commit -m "chore(packaging): sync manifests to $TAG"
+          git push --force origin "$branch"
+          if ! gh pr create --base main --head "$branch" \
+                 --title "chore(packaging): sync manifests to $TAG" \
+                 --body "Rendered from the published $TAG SHA256SUMS by release-published.yml."; then
+            echo "::warning::Could not open the manifests PR (is 'Allow GitHub Actions to create pull requests' on?). Branch $branch is pushed; open the PR by hand."
+          fi
 
       # The exact rendered files, for the publish jobs (avoids re-cloning main,
       # which could race a later release).

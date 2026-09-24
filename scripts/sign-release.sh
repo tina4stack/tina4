@@ -40,6 +40,7 @@
 #
 # USAGE:  sh scripts/sign-release.sh v3.8.53
 set -eu
+VERIFY_INPUTS="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/verify-release-inputs.py"
 
 TAG="${1:-}"
 [ -z "$TAG" ] && { echo "Usage: sh scripts/sign-release.sh <tag>   (e.g. v3.8.53)" >&2; exit 1; }
@@ -124,6 +125,7 @@ cd "$WORK"
 echo "Downloading draft release assets for $TAG ..."
 gh release download "$TAG" --repo "$REPO" --dir . --clobber
 [ -f "$BINARY" ] || { echo "Error: $BINARY not found in release $TAG" >&2; exit 1; }
+python3 "$VERIFY_INPUTS" --directory "$WORK" --repo "$REPO" --tag "$TAG"
 
 echo "Signing $BINARY (SimplySign must be logged in) ..."
 # -t (legacy Authenticode timestamp) is the Certum-proven form against

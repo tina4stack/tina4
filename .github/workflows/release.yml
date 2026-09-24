@@ -171,11 +171,9 @@ jobs:
       # scripts/sign-release.ps1 signs the Windows .exe locally, regenerates
       # SHA256SUMS over the signed bytes, and publishes. See scripts/RELEASING.md.
 
-      # SLSA provenance over the CI-built artifacts. Skipped for Windows: that
-      # binary is re-signed locally, so its shipped bytes differ from the build
-      # output - the EV Authenticode signature is its trust anchor instead.
+      # Attest every CI-built binary, including the unsigned Windows input.
+      # Local EV signing must verify this provenance before changing its bytes.
       - name: Attest build provenance
-        if: runner.os != 'Windows'
         uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
         with:
           subject-path: ${{ matrix.name }}
@@ -209,6 +207,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       # Checkout FIRST (before artifacts land in dist/): actions/checkout cleans
       # the workspace, which would wipe a dist/ populated earlier. We need the
@@ -258,6 +258,9 @@ jobs:
       # and running --no-build packages the exact shipped bytes. The .debs land
       # in dist/ so they flow through the SAME single-writer upload + SHA256SUMS
       # (and the local sign step re-hashes them when it regenerates the sums).
+      - name: Generate locked SPDX inventory and third-party notices
+        run: python3 scripts/release-inventory.py --output dist
+
       - name: Build .deb packages (amd64 + arm64)
         run: |
           set -eux
@@ -274,12 +277,29 @@ jobs:
           done
           echo "Built .debs:"; ls -l dist/*.deb
 
+      - name: Upload release inventory for container packaging
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: release-inventory
+          path: |
+            dist/tina4.spdx.json
+            dist/THIRD-PARTY-NOTICES.txt
+            dist/LICENSE-INVENTORY.json
+          if-no-files-found: error
+
       - name: Generate SHA256SUMS
         run: |
           cd dist
           sha256sum * > ../SHA256SUMS
           echo "Published checksums:"
           cat ../SHA256SUMS
+
+      - name: Attest all draft assets and their checksum manifest
+        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
+        with:
+          subject-path: |
+            dist/*
+            SHA256SUMS
 
       # ONE writer, ONE call, all assets. This is what removes the race.
       - name: Upload all assets to the draft Release
@@ -302,7 +322,7 @@ jobs:
           # ONE source of truth for the expected set. The threshold below is
           # DERIVED from it, so adding a build target can never leave a hardcoded
           # count out of step with the names actually checked.
-          EXPECTED="tina4-linux-amd64 tina4-linux-arm64 tina4-linux-musl-amd64 tina4-linux-musl-arm64 tina4-darwin-amd64 tina4-darwin-arm64 tina4-windows-amd64.exe SHA256SUMS"
+          EXPECTED="tina4-linux-amd64 tina4-linux-arm64 tina4-linux-musl-amd64 tina4-linux-musl-arm64 tina4-darwin-amd64 tina4-darwin-arm64 tina4-windows-amd64.exe tina4.spdx.json THIRD-PARTY-NOTICES.txt LICENSE-INVENTORY.json SHA256SUMS"
           want=$(printf '%s\n' $EXPECTED | grep -c .)
 
           # `|| true` matters under `set -eu`: a transient non-zero from gh (rate
@@ -390,7 +410,7 @@ jobs:
   # build runs unchanged on both Alpine and Debian-slim -- one artifact, four
   # images.
   publish-cli-image:
-    needs: build
+    needs: [build, release-assets]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -406,6 +426,12 @@ jobs:
           merge-multiple: true
           path: cliimg
 
+      - name: Download inventory and third-party notices
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: release-inventory
+          path: cliimg/notices
+
       - name: Stage per-arch binaries
         run: |
           set -eux
@@ -418,9 +444,10 @@ jobs:
           # per platform, so each image gets the binary built for ITS arch. A
           # single-arch image here would silently break arm64 deployments.
           cat > cliimg/Dockerfile <<'EOF'
-          FROM alpine:3.21
+          FROM alpine:3.21@sha256:ce64758a109eb420d874a118f87920e625e12d3634e03b4a5573fd9f6e5d3507
           ARG TARGETPLATFORM
           COPY ${TARGETPLATFORM}/tina4 /usr/local/bin/tina4
+          COPY notices/ /usr/share/doc/tina4/
           ENTRYPOINT ["/usr/local/bin/tina4"]
           EOF
 
@@ -439,6 +466,7 @@ jobs:
         with:
           context: cliimg
           platforms: linux/amd64,linux/arm64
+          provenance: mode=max
           push: true
           tags: |
             ghcr.io/tina4stack/tina4-cli:${{ github.ref_name }}

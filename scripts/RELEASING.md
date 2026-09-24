@@ -13,9 +13,9 @@ before any signature goes on:
 1. **audit** - `cargo-deny` (advisories, bans, sources) gates the build.
 2. **build** - `cargo build --locked` on a pinned Rust toolchain, all Actions
    pinned to commit SHAs, with a pre-sign smoke test.
-3. **provenance** - SLSA build-provenance attestation for the Linux/macOS
-   binaries (the Windows .exe is re-signed locally, so its trust anchor is the
-   EV Authenticode signature instead).
+3. **provenance** - SLSA attestations cover every draft asset, including the
+   unsigned Windows input. Signing verifies the tag-bound attestations first;
+   the final Windows bytes then carry the EV Authenticode signature.
 4. **checksums** - `SHA256SUMS` over the artifacts.
 5. CI publishes all of this as a **draft** release. The Windows .exe in the
    draft is unsigned until you finalize it.
@@ -112,3 +112,29 @@ The full channel guide - install commands, per-channel one-time setup, and the
 required secrets - is [`packaging/README.md`](../packaging/README.md). To preview
 what a bump will publish: `bash scripts/render-manifests.sh <version> <SHA256SUMS>`
 then `git diff -- packaging homebrew`.
+
+## Release inventory and signing inputs (3.8.90 onward)
+
+CI generates `tina4.spdx.json`, `LICENSE-INVENTORY.json` and
+`THIRD-PARTY-NOTICES.txt` from the locked all-platform Cargo graph. This includes
+build/development dependencies, so it is a conservative superset of each binary.
+Cargo archive checksums identify the exact source crates. Missing/unknown licence
+declarations or missing notice texts fail the inventory check on every PR. This
+records upstream declarations; it does not claim legal approval or an approved
+inbound licence policy, which remains a separate maintainer/legal decision.
+For the crates whose archives omit licence files, reviewed texts from their exact
+upstream source commits are stored under `scripts/third-party-licenses/`, with
+source URLs and SHA-256 checksums.
+
+The release ships these three assets next to the binaries, with notices and the
+inventory also inside Debian packages and the CLI container. CI attests every draft asset and the
+checksum manifest, including the unsigned Windows input. All three signing
+scripts require Python 3 and call `verify-release-inputs.py` before signing:
+checksum coverage must be exact, and every asset must have provenance bound to
+this repository's release workflow and this exact release tag. No bypass flag
+is provided. The final Windows binary uses its EV signature; final checksums
+are regenerated after signing and preserve the SBOM/notices.
+
+Local checks: `cargo test --locked`, `cargo clippy --locked -- -D warnings`,
+`cargo build --release --locked`, `python3 scripts/release-inventory.py --output dist`,
+and `python3 tests/release_integrity.py`.

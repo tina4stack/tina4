@@ -30,6 +30,7 @@ param(
     [string]$TimestampUrl = "http://time.certum.pl/"
 )
 
+$verifyInputs = Join-Path $PSScriptRoot "verify-release-inputs.py"
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
@@ -70,6 +71,9 @@ try {
     gh release download $Tag --repo $Repo --dir . --clobber
     if ($LASTEXITCODE -ne 0) { Write-Error "gh release download failed for $Tag"; exit 1 }
     if (-not (Test-Path $Binary)) { Write-Error "$Binary not found in release $Tag"; exit 1 }
+
+    python $verifyInputs --directory $work --repo $Repo --tag $Tag
+    if ($LASTEXITCODE -ne 0) { throw "CI input verification failed; refusing to sign" }
 
     Write-Host "Signing $Binary (SimplySign must be open and logged in) ..."
     & $signtool sign /sha1 $Thumbprint /tr $TimestampUrl /td sha256 /fd sha256 /v $Binary

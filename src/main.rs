@@ -566,22 +566,22 @@ fn production_env() -> [(&'static str, &'static str); 2] {
 }
 
 pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_production: bool, no_browser: bool) {
-    // The CLI owns browser-opening. Decide OUR answer here, before any child is
-    // spawned, then suppress the child's unconditionally.
+    // The CLI owns browser-opening (tina4: ADR-0070). Decide OUR answer here,
+    // before any child is spawned, then suppress the child's unconditionally.
     //
     // Every framework also opens a browser on listen unless TINA4_NO_BROWSER is
-    // set, and we only propagated that when --no-browser was passed. So a plain
-    // `tina4 serve` opened THREE tabs: ours for the app, ours for /__dev, and
-    // the framework's duplicate of the app. Setting the var on the child after
-    // reading our own answer collapses that to the two we intend.
+    // set, so without the set_var below a plain `tina4 serve` would open the
+    // framework's tab on top of ours.
     //
     // The read must happen BEFORE the set_var below, or we would suppress
-    // ourselves along with the child.
-    let env_no_browser = read_dotenv_bool("TINA4_NO_BROWSER");
-    let os_no_browser = std::env::var("TINA4_NO_BROWSER")
-        .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes"))
-        .unwrap_or(false);
-    let cli_opens_browser = !(no_browser || env_no_browser || os_no_browser);
+    // ourselves along with the child. It also runs before --dev/--production
+    // rewrite TINA4_DEBUG, so the mode comes from the flags and the project.
+    let frontend_only = matches!(
+        detect::detect_language(),
+        Some(ref i) if i.language == "tina4js"
+    );
+    let mode = resolve_serve_mode(serve_env_lookup, force_dev, force_production, frontend_only);
+    let cli_opens_browser = should_open_browser(serve_env_lookup, no_browser, mode);
     // Inherited by every spawn site in start_language_server, so a new runtime
     // cannot forget it the way a per-Command .env() call could.
     std::env::set_var("TINA4_NO_BROWSER", "true");
@@ -811,33 +811,28 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
         });
     }
 
-    // Give the server a moment to bind, then open browser.
+    // Give the server a moment to bind, then open AT MOST ONE tab.
     //
-    // Three ways to suppress, all folded into `cli_opens_browser` at the top of
-    // this function (it must be computed before we set TINA4_NO_BROWSER for the
-    // child, or we would read our own suppression back):
-    //   1. `--no-browser` CLI flag
-    //   2. `TINA4_NO_BROWSER=true` in the process environment
-    //   3. `TINA4_NO_BROWSER=true` in the project's .env file
+    // `cli_opens_browser` was decided at the top of this function by
+    // should_open_browser (ADR-0070): development only, and vetoed by
+    // --no-browser, a truthy TINA4_NO_BROWSER (process env or .env), or CI.
     //
-    // The .env read mirrors what the framework side does, so a single
-    // entry in .env governs both browser-open points (fixes tina4-book#131).
+    // This used to open two tabs every time: the app, then /__dev 400ms later.
+    // The dashboard URL is printed instead, one click away in the terminal.
     std::thread::sleep(std::time::Duration::from_secs(2));
     let url = format!("http://localhost:{}", port);
-    if !cli_opens_browser {
-        println!("{} Server ready: {}", icon_ok().green(), url.cyan());
-    } else {
+    if cli_opens_browser {
         console::open_browser(&url);
         println!("{} Browser opened: {}", icon_ok().green(), url.cyan());
-        // Also open the dev dashboard in a second tab — the route inspector, DB
-        // runner, logs, AI chat and live tools, right next to the running app.
-        // Dev only: `/__dev` doesn't exist in a production server.
-        if !force_production {
-            let dashboard = format!("{}/__dev", url);
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            console::open_browser(&dashboard);
-            println!("{} Dashboard:      {}", icon_ok().green(), dashboard.cyan());
-        }
+    } else {
+        println!("{} Server ready: {}", icon_ok().green(), url.cyan());
+    }
+    if mode == ServeMode::Development && !frontend_only {
+        println!(
+            "{} Dashboard:      {}",
+            icon_ok().green(),
+            format!("{}/__dev", url).cyan()
+        );
     }
 
     // File watcher — the Rust CLI owns all file watching. On change it:
@@ -967,14 +962,10 @@ enum ExitCause {
     WaitError(std::io::Error),
 }
 
-/// Read a boolean-valued variable from the given `.env` file.
-/// Returns true for values `true` / `1` / `yes` (case-insensitive), false otherwise.
-/// Pure function of the path and contents — easy to test.
-fn read_dotenv_bool_from<P: AsRef<std::path::Path>>(path: P, key: &str) -> bool {
-    let contents = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
+/// Read a variable's raw value from the given `.env` file, surrounding quotes
+/// removed. `None` when the file or the key is missing.
+fn read_dotenv_value_from<P: AsRef<std::path::Path>>(path: P, key: &str) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
     for line in contents.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -982,26 +973,128 @@ fn read_dotenv_bool_from<P: AsRef<std::path::Path>>(path: P, key: &str) -> bool 
         }
         if let Some((k, v)) = line.split_once('=') {
             if k.trim() == key {
-                // Left on the old expression deliberately. Truncation is invisible
-                // here - the result is lower-cased and tested for membership of
-                // {true, 1, yes}, so a lost trailing quote cannot change the
-                // answer for any well-formed value. Switching it to
+                // Left on the old expression deliberately. Switching it to
                 // env_config::unquote_env_value would change what a MALFORMED
                 // value means (`true'` would stop counting as true), and no
                 // report covers that.
-                let v = v.trim().trim_matches('"').trim_matches('\'').to_lowercase();
-                return matches!(v.as_str(), "true" | "1" | "yes");
+                return Some(v.trim().trim_matches('"').trim_matches('\'').to_string());
             }
         }
     }
-    false
+    None
 }
 
-/// Convenience: read from `.env` in the current working directory.
-/// Used by `handle_serve` so env vars like `TINA4_NO_BROWSER` can live in
-/// `.env` and govern both the CLI's browser-open and the framework's.
-fn read_dotenv_bool(key: &str) -> bool {
-    read_dotenv_bool_from(".env", key)
+/// Read a boolean-valued variable from the given `.env` file, with the
+/// ADR-0070 truthy set. False when the file or the key is missing.
+fn read_dotenv_bool_from<P: AsRef<std::path::Path>>(path: P, key: &str) -> bool {
+    read_dotenv_value_from(path, key).is_some_and(|v| env_truthy(&v))
+}
+
+// ── Browser-open gate (tina4: ADR-0070) ──────────────────────────
+
+/// The one truthy set for a boolean switch: `true`, `1`, `yes`, `on`, any
+/// case, surrounding whitespace ignored. Everything else, including an empty
+/// value, is false.
+fn env_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "true" | "1" | "yes" | "on"
+    )
+}
+
+/// The variables that mark a CI run, in the order ADR-0070 lists them. The
+/// union of what already shipped: tina4-php `App::CI_ENVIRONMENT_VARIABLES`
+/// and tina4-ruby `Tina4::CI_ENV_VARS`. Pinned against the
+/// `ci_env_vars` array in tina4-documentation
+/// `plan/v3/fixtures/browser_open_contract.json` by a unit test.
+const CI_ENV_VARS: [&str; 8] = [
+    "CI",
+    "CONTINUOUS_INTEGRATION",
+    "GITHUB_ACTIONS",
+    "GITLAB_CI",
+    "BUILDKITE",
+    "JENKINS_URL",
+    "TF_BUILD",
+    "TEAMCITY_VERSION",
+];
+
+/// The values that mean "not CI" (ADR-0070 `ci_not_set_values`), compared
+/// trimmed and lower-cased. An empty value is not CI either.
+const CI_NOT_SET_VALUES: [&str; 4] = ["false", "0", "no", "off"];
+
+/// One CI variable's verdict: set to a value that, trimmed and lower-cased,
+/// is non-empty and not in `CI_NOT_SET_VALUES`.
+fn ci_marker_set(value: &str) -> bool {
+    let v = value.trim().to_ascii_lowercase();
+    !v.is_empty() && !CI_NOT_SET_VALUES.contains(&v.as_str())
+}
+
+/// What `tina4 serve` is running: the development server or a production one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ServeMode {
+    Development,
+    Production,
+}
+
+/// Decide the serve mode. `--production` wins over everything, then `--dev`.
+/// A tina4-js project has no `TINA4_DEBUG` switch: without `--production` it
+/// runs the Vite dev server, which is development. A backend project is in
+/// development only when `TINA4_DEBUG` is truthy, the same switch the
+/// framework reads to turn on the dev toolbar and `/__dev`.
+fn resolve_serve_mode(
+    lookup: impl Fn(&str) -> Option<String>,
+    force_dev: bool,
+    force_production: bool,
+    frontend_only: bool,
+) -> ServeMode {
+    if force_production {
+        return ServeMode::Production;
+    }
+    if force_dev || frontend_only {
+        return ServeMode::Development;
+    }
+    if lookup("TINA4_DEBUG").is_some_and(|v| env_truthy(&v)) {
+        ServeMode::Development
+    } else {
+        ServeMode::Production
+    }
+}
+
+/// True when the process runs under CI: any variable in `CI_ENV_VARS` passes
+/// `ci_marker_set`. `CI=true`, `CI=woodpecker`, `JENKINS_URL=http://...` and
+/// `TF_BUILD=True` all count; `CI=`, `CI=false` and `CI=0` do not.
+fn under_ci(lookup: &impl Fn(&str) -> Option<String>) -> bool {
+    CI_ENV_VARS
+        .iter()
+        .any(|name| lookup(name).is_some_and(|v| ci_marker_set(&v)))
+}
+
+/// ADR-0070: open a browser only in development, never when
+/// `TINA4_NO_BROWSER` is truthy, never with `--no-browser`, never under CI.
+/// Every rule is a veto, so the order only matters for readability.
+///
+/// `lookup` resolves a variable the way `serve` does: the process
+/// environment first, then the project's `.env`.
+fn should_open_browser(
+    lookup: impl Fn(&str) -> Option<String>,
+    no_browser_flag: bool,
+    mode: ServeMode,
+) -> bool {
+    if mode != ServeMode::Development || no_browser_flag {
+        return false;
+    }
+    if lookup("TINA4_NO_BROWSER").is_some_and(|v| env_truthy(&v)) {
+        return false;
+    }
+    !under_ci(&lookup)
+}
+
+/// The lookup `serve` uses: process environment first, then `./.env`, the
+/// same precedence every framework's dotenv loader applies.
+fn serve_env_lookup(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .or_else(|| read_dotenv_value_from(".env", key))
 }
 
 /// What `tina4 serve --production` installs for a language: `(name, command)`.
@@ -3291,6 +3384,182 @@ mod tests {
         with_env_file("comments", "# comment\n\nTINA4_NO_BROWSER=yes\n# TINA4_DEBUG=true\n", |p| {
             assert!(read_dotenv_bool_from(p, "TINA4_NO_BROWSER"));
             assert!(!read_dotenv_bool_from(p, "TINA4_DEBUG"));
+        });
+    }
+
+    // ── ADR-0070 browser-open gate ───────────────────────────────
+    // Case names match plan/v3/fixtures/browser_open_contract.json in
+    // tina4-documentation; the contract auditor greps for them here.
+
+    /// A lookup over a fixed table, standing in for "process env, then .env".
+    fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let owned: Vec<(String, String)> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |key| owned.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+    }
+
+    const DEV: ServeMode = ServeMode::Development;
+    const PROD: ServeMode = ServeMode::Production;
+
+    #[test]
+    fn browser_opens_in_development_with_nothing_set() {
+        assert!(should_open_browser(env_of(&[]), false, DEV));
+    }
+
+    #[test]
+    fn browser_never_opens_in_production() {
+        assert!(!should_open_browser(env_of(&[]), false, PROD));
+        // A falsy TINA4_NO_BROWSER does not re-enable it.
+        assert!(!should_open_browser(
+            env_of(&[("TINA4_NO_BROWSER", "false")]),
+            false,
+            PROD
+        ));
+    }
+
+    #[test]
+    fn browser_never_opens_with_the_no_browser_flag() {
+        assert!(!should_open_browser(env_of(&[]), true, DEV));
+        // The flag wins even when the variable says "go ahead".
+        assert!(!should_open_browser(
+            env_of(&[("TINA4_NO_BROWSER", "false")]),
+            true,
+            DEV
+        ));
+    }
+
+    #[test]
+    fn browser_never_opens_when_no_browser_env_is_truthy() {
+        for v in [
+            "true", "1", "yes", "on", "TRUE", "Yes", "ON", " on ", "True",
+        ] {
+            let pairs = [("TINA4_NO_BROWSER", v)];
+            assert!(
+                !should_open_browser(env_of(&pairs), false, DEV),
+                "TINA4_NO_BROWSER={v:?} must veto the browser"
+            );
+        }
+    }
+
+    #[test]
+    fn browser_opens_when_no_browser_env_is_not_truthy() {
+        for v in ["false", "0", "no", "off", "", "maybe", "y", "t", "enabled"] {
+            let pairs = [("TINA4_NO_BROWSER", v)];
+            assert!(
+                should_open_browser(env_of(&pairs), false, DEV),
+                "TINA4_NO_BROWSER={v:?} is outside the truthy set and must not veto"
+            );
+        }
+    }
+
+    #[test]
+    fn browser_never_opens_under_ci() {
+        for v in ["true", "1", "TRUE", "yes", "woodpecker"] {
+            let pairs = [("CI", v)];
+            assert!(
+                !should_open_browser(env_of(&pairs), false, DEV),
+                "CI={v:?} must veto the browser"
+            );
+        }
+    }
+
+    #[test]
+    fn browser_opens_when_ci_is_empty_or_falsy() {
+        for name in CI_ENV_VARS {
+            for v in ["", "  ", "false", "0", "FALSE", " False ", "no", "NO", "off", " Off "] {
+                let pairs = [(name, v)];
+                assert!(
+                    should_open_browser(env_of(&pairs), false, DEV),
+                    "{name}={v:?} is not a CI run and must not veto"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_ci_variable_vetoes_on_its_own() {
+        let values = [
+            ("CI", "true"),
+            ("CONTINUOUS_INTEGRATION", "true"),
+            ("GITHUB_ACTIONS", "true"),
+            ("GITLAB_CI", "true"),
+            ("BUILDKITE", "true"),
+            ("JENKINS_URL", "http://jenkins.example:8080/"),
+            ("TF_BUILD", "True"),
+            ("TEAMCITY_VERSION", "2024.12"),
+        ];
+        assert_eq!(values.len(), CI_ENV_VARS.len());
+        for pair in values {
+            assert!(
+                !should_open_browser(env_of(&[pair]), false, DEV),
+                "{}={:?} must veto the browser",
+                pair.0,
+                pair.1
+            );
+        }
+    }
+
+    /// Element for element, the `ci_env_vars` array in tina4-documentation
+    /// `plan/v3/fixtures/browser_open_contract.json` (ADR-0070). Change both
+    /// together, or neither.
+    #[test]
+    fn ci_env_vars_match_the_contract_fixture() {
+        let fixture = [
+            "CI",
+            "CONTINUOUS_INTEGRATION",
+            "GITHUB_ACTIONS",
+            "GITLAB_CI",
+            "BUILDKITE",
+            "JENKINS_URL",
+            "TF_BUILD",
+            "TEAMCITY_VERSION",
+        ];
+        assert_eq!(CI_ENV_VARS.len(), fixture.len());
+        for (i, (ours, theirs)) in CI_ENV_VARS.iter().zip(fixture.iter()).enumerate() {
+            assert_eq!(ours, theirs, "CI_ENV_VARS[{i}] drifted from the fixture");
+        }
+        // ...and its `ci_not_set_values` array.
+        assert_eq!(CI_NOT_SET_VALUES, ["false", "0", "no", "off"]);
+    }
+
+    #[test]
+    fn development_needs_a_truthy_debug_flag() {
+        let debug = |v: &str| -> ServeMode {
+            let pairs = [("TINA4_DEBUG", v)];
+            resolve_serve_mode(env_of(&pairs), false, false, false)
+        };
+        for v in ["true", "1", "yes", "on", "TRUE"] {
+            assert_eq!(debug(v), DEV, "TINA4_DEBUG={v:?} is development");
+        }
+        for v in ["false", "0", "", "no", "off", "y"] {
+            assert_eq!(debug(v), PROD, "TINA4_DEBUG={v:?} is not development");
+        }
+        // Unset is production: the frameworks' own default is debug off.
+        assert_eq!(resolve_serve_mode(env_of(&[]), false, false, false), PROD);
+    }
+
+    #[test]
+    fn production_flag_beats_dev_flag_and_debug() {
+        let on = env_of(&[("TINA4_DEBUG", "true")]);
+        assert_eq!(resolve_serve_mode(&on, true, true, false), PROD);
+        assert_eq!(resolve_serve_mode(&on, false, true, true), PROD);
+        // --dev forces development over a project that sets debug off.
+        let off = env_of(&[("TINA4_DEBUG", "false")]);
+        assert_eq!(resolve_serve_mode(&off, true, false, false), DEV);
+    }
+
+    #[test]
+    fn a_frontend_only_project_serves_in_development_without_debug() {
+        assert_eq!(resolve_serve_mode(env_of(&[]), false, false, true), DEV);
+    }
+
+    #[test]
+    fn dotenv_bool_accepts_on() {
+        with_env_file("on", "TINA4_NO_BROWSER=on\nB=OFF\n", |p| {
+            assert!(read_dotenv_bool_from(p, "TINA4_NO_BROWSER"));
+            assert!(!read_dotenv_bool_from(p, "B"));
         });
     }
 

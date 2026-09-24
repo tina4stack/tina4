@@ -111,7 +111,7 @@ tina4 serve
 | `tina4 doctor` | Check installed languages, package managers, and Tina4 CLIs |
 | `tina4 install <language>` | Install a language runtime (python, php, ruby, nodejs) |
 | `tina4 init [language] <path>` | Scaffold a new Tina4 project. Prompts for language if not specified and multiple runtimes are available |
-| `tina4 serve [--port N] [--host H] [--dev] [--production] [--no-browser]` | Compile SCSS, start the dev server, watch files, open the browser |
+| `tina4 serve [--port N] [--host H] [--dev] [--production] [--no-browser]` | Compile SCSS, start the dev server, watch files, open one browser tab (development only; never with `--no-browser`, a truthy `TINA4_NO_BROWSER` or under CI) |
 | `tina4 scss [-w]` | Compile SCSS files (`src/scss` → `src/public/css`). Use `-w` to watch |
 | `tina4 migrate [--create <name>]` | Run database migrations or create a new one |
 | `tina4 test` | Run project tests (delegated to the framework CLI) |

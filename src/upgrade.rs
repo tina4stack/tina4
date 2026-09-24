@@ -243,11 +243,17 @@ fn upgrade_gemfile() -> usize {
     let updated = content
         .replace("'tina4', '~> 2", "'tina4', '~> 3")
         .replace("\"tina4\", \"~> 2", "\"tina4\", \"~> 3");
+    let mut changes = 0;
     if updated != content && fs::write(path, &updated).is_ok() {
         println!("  {} Updated Gemfile — tina4 ~> 3.0", icon_ok().green());
-        return 1;
+        changes += 1;
     }
-    0
+    // tina4ruby v3 does not bundle the SQLite driver (ADR-0067); the app declares it.
+    if crate::init::ensure_gemfile_sqlite3(Path::new(path)) {
+        println!("  {} Added gem \"sqlite3\" to Gemfile — the SQLite driver is an app dependency", icon_ok().green());
+        changes += 1;
+    }
+    changes
 }
 
 fn upgrade_package_json() -> usize {

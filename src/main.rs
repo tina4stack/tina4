@@ -1896,11 +1896,22 @@ fn update_framework_package() {
             .status()
             .map(|s| s.success())
             .unwrap_or(false),
-        "ruby" => std::process::Command::new(console::resolve_cmd("bundle"))
-            .args(["update", "tina4ruby"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false),
+        "ruby" => {
+            // Projects scaffolded while tina4ruby still declared sqlite3 itself
+            // have no gem "sqlite3" line; without it the update would take their
+            // default SQLite database away (ADR-0067).
+            if init::ensure_gemfile_sqlite3(std::path::Path::new("Gemfile")) {
+                println!(
+                    "  {} Added gem \"sqlite3\" to Gemfile — tina4ruby no longer bundles the SQLite driver",
+                    icon_ok().green()
+                );
+            }
+            std::process::Command::new(console::resolve_cmd("bundle"))
+                .args(["update", "tina4ruby"])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        }
         "nodejs" => std::process::Command::new(console::resolve_cmd("npm"))
             .args(["update", "tina4-nodejs"])
             .status()

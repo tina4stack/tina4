@@ -1411,7 +1411,7 @@ Dev server: watches files, hot-reloads, opens the app + the `/__dev` dashboard.
     // Per-language gotcha (one sharp line).
     match lang {
         "php" => s.push_str("- **PHP gotcha:** `return $response(...)` (callable) and `$response->json(...)` both emit JSON and auto-serialize models/arrays/`DatabaseResult`. Route files of pure `Router::*()` calls hot-reload; files declaring top-level functions/classes need a server restart.\n"),
-        "ruby" => s.push_str("- **Ruby gotcha:** the handler block is `|request, response|`; pass an HTTP status like `Tina4::HTTP_OK` to `response.json`. The `sqlite3` gem ships by default; `pg`/`mysql2` are add-ons.\n"),
+        "ruby" => s.push_str("- **Ruby gotcha:** the handler block is `|request, response|`; pass an HTTP status like `Tina4::HTTP_OK` to `response.json`. The scaffold Gemfile carries `gem \"sqlite3\"` for the default database; `pg`/`mysql2` are add-ons you `bundle add`.\n"),
         "nodejs" => s.push_str("- **Node.js gotcha:** the route filename = HTTP method (`get.ts`/`post.ts`/…); dirs map to the path (`[id]` → `{id}`). Use `.js` extensions in import paths. `res.json(model | model[] | DatabaseResult)` auto-serializes.\n"),
         _ => s.push_str("- **Python gotcha:** route decorators (`@get`/`@post`/…) must be INNERMOST (closest to `def`); `@noauth`/`@secured`/`@description` go above. GET is public; POST/PUT/PATCH/DELETE need auth unless `@noauth()`. Use `response(...)`, not `response.json()`.\n"),
     }

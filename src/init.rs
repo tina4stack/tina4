@@ -800,6 +800,53 @@ server {
     println!("  {} Created PHP scaffold", icon_ok().green());
 }
 
+/// The Gemfile lines that give a Ruby project its SQLite driver.
+///
+/// sqlite3 is an APPLICATION dependency (ADR-0067): tina4ruby requires it
+/// lazily and never declares it, exactly like pg or mysql2. The scaffold binds a
+/// SQLite database in .env, so the Gemfile carries the driver and
+/// `tina4 init ruby && tina4 serve` works out of the box (tina4-book#100).
+const RUBY_SQLITE3_GEMFILE_BLOCK: &str = "\n# SQLite driver for the default database (TINA4_DATABASE_URL=sqlite:...).\n# tina4ruby loads it lazily; it is an app dependency, like pg or mysql2.\ngem \"sqlite3\"\n";
+
+/// Does this Gemfile already declare the sqlite3 gem (either quote style, any
+/// version constraint or options)? A commented-out line does not count.
+pub fn gemfile_declares_sqlite3(content: &str) -> bool {
+    content.lines().any(|line| {
+        let Some(rest) = line.trim_start().strip_prefix("gem") else { return false };
+        if !rest.starts_with(|c: char| c.is_whitespace() || c == '(') {
+            return false;
+        }
+        let rest = rest.trim_start_matches(|c: char| c.is_whitespace() || c == '(');
+        rest.starts_with("\"sqlite3\"") || rest.starts_with("'sqlite3'")
+    })
+}
+
+/// The Gemfile with the sqlite3 block appended, or None when it already
+/// declares the gem. Existing lines are kept byte for byte.
+pub fn gemfile_with_sqlite3(content: &str) -> Option<String> {
+    if gemfile_declares_sqlite3(content) {
+        return None;
+    }
+    let mut updated = content.to_string();
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(RUBY_SQLITE3_GEMFILE_BLOCK);
+    Some(updated)
+}
+
+/// Add gem "sqlite3" to an existing Gemfile when it is missing. A project
+/// scaffolded while tina4ruby still declared sqlite3 itself would otherwise
+/// lose its default database on the next `bundle update tina4ruby`. Returns
+/// true when the file changed; a missing or unwritable Gemfile is left alone.
+pub fn ensure_gemfile_sqlite3(path: &Path) -> bool {
+    let Ok(content) = fs::read_to_string(path) else { return false };
+    match gemfile_with_sqlite3(&content) {
+        Some(updated) => fs::write(path, updated).is_ok(),
+        None => false,
+    }
+}
+
 fn scaffold_ruby(path: &str) {
     write_file(
         path,
@@ -819,10 +866,12 @@ Tina4.run!(__dir__)
     write_file(
         path,
         "Gemfile",
-        r#"source "https://rubygems.org"
+        &format!(
+            r#"source "https://rubygems.org"
 
 gem "tina4ruby", "~> 3.0"
-"#,
+{RUBY_SQLITE3_GEMFILE_BLOCK}"#
+        ),
     );
 
     // src/routes/ is created empty — users add routes via gallery or manually
@@ -1484,6 +1533,68 @@ mod tests {
             );
             let _ = fs::remove_dir_all(&dir);
         }
+    }
+
+    #[test]
+    fn ruby_scaffold_gemfile_bundles_tina4ruby_and_sqlite3() {
+        // sqlite3 is an APP dependency (ADR-0067): tina4ruby requires it lazily
+        // and does not declare it. The scaffold binds a SQLite database in .env,
+        // so the Gemfile must carry the driver or that database cannot open.
+        let dir = std::env::temp_dir().join(format!("tina4_init_gemfile_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        scaffold_project("ruby", dir.to_str().unwrap());
+        let gemfile = fs::read_to_string(dir.join("Gemfile")).expect("scaffold wrote a Gemfile");
+        assert!(gemfile.lines().any(|l| l.starts_with("gem \"tina4ruby\"")), "got:\n{gemfile}");
+        assert!(gemfile_declares_sqlite3(&gemfile), "Gemfile must declare sqlite3, got:\n{gemfile}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn gemfile_sqlite3_detection_matches_a_real_declaration_only() {
+        for declared in [
+            "gem \"sqlite3\"",
+            "gem 'sqlite3'",
+            "gem \"sqlite3\", \"~> 2.0\"",
+            "  gem 'sqlite3', '>= 1.4', require: false",
+            "gem(\"sqlite3\")",
+        ] {
+            assert!(gemfile_declares_sqlite3(declared), "should match: {declared}");
+        }
+        for absent in [
+            "gem \"tina4ruby\"",
+            "# gem \"sqlite3\"",
+            "gem \"sqlite3-ruby\"",
+            "gems \"sqlite3\"",
+            "",
+        ] {
+            assert!(!gemfile_declares_sqlite3(absent), "should not match: {absent}");
+        }
+    }
+
+    #[test]
+    fn gemfile_with_sqlite3_appends_once() {
+        let before = "source \"https://rubygems.org\"\n\ngem \"tina4ruby\", \"~> 3.0\"";
+        let after = gemfile_with_sqlite3(before).expect("missing sqlite3 must be added");
+        assert!(after.starts_with(before), "existing lines must be kept verbatim");
+        assert!(gemfile_declares_sqlite3(&after));
+        assert!(gemfile_with_sqlite3(&after).is_none(), "second pass must change nothing");
+        assert!(gemfile_with_sqlite3("gem 'sqlite3', '~> 1.7'\n").is_none());
+    }
+
+    #[test]
+    fn ensure_gemfile_sqlite3_edits_a_real_file_idempotently() {
+        let dir = std::env::temp_dir().join(format!("tina4_ensure_sqlite3_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Gemfile");
+        fs::write(&path, "source \"https://rubygems.org\"\ngem \"tina4ruby\"\n").unwrap();
+        assert!(ensure_gemfile_sqlite3(&path), "first call adds the gem");
+        assert!(!ensure_gemfile_sqlite3(&path), "second call is a no-op");
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(content.matches("gem \"sqlite3\"").count(), 1, "got:\n{content}");
+        assert!(!ensure_gemfile_sqlite3(&dir.join("missing-Gemfile")), "no Gemfile, no change");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

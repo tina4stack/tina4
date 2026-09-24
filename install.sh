@@ -111,9 +111,7 @@ echo "Downloading ${BINARY}..."
 fetch_to "$URL" "$TMP"
 
 # Verify integrity against the release SHA256SUMS before trusting the binary.
-# Releases from 3.8.53 publish SHA256SUMS; when it is present we verify strictly
-# and abort on any mismatch. Older releases predate it, so we warn and continue
-# (a pinned older install still works).
+# SHA256SUMS is mandatory; missing or mismatched integrity data aborts installation.
 SUMS_TMP=$(mktemp)
 if fetch_to "https://github.com/${REPO}/releases/download/${LATEST}/SHA256SUMS" "$SUMS_TMP" 2>/dev/null && [ -s "$SUMS_TMP" ]; then
   EXPECTED=$(grep -E "[[:space:]]\*?${BINARY}\$" "$SUMS_TMP" | awk '{print $1}' | head -1)
@@ -137,7 +135,12 @@ if fetch_to "https://github.com/${REPO}/releases/download/${LATEST}/SHA256SUMS" 
   fi
   echo "Checksum verified (sha256)."
 else
-  echo "Note: no SHA256SUMS published for ${LATEST} - skipping integrity check (older release)." >&2
+  # Fail closed: a missing SHA256SUMS means we cannot prove the download is the
+  # published binary, so we do NOT install it. (Every release from 3.8.53 on
+  # publishes SHA256SUMS; a build old enough to lack it can be installed by
+  # pinning an explicit older asset by hand.)
+  echo "Error: SHA256SUMS is not available for ${LATEST} - refusing to install an unverified binary." >&2
+  rm -f "$TMP" "$SUMS_TMP"; exit 1
 fi
 rm -f "$SUMS_TMP"
 

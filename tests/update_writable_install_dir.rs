@@ -99,6 +99,14 @@ fn update_refuses_before_downloading_when_the_install_dir_is_not_writable() {
         eprintln!("skipped: this build is the latest release, so nothing downloads");
         return;
     }
+    if text.contains("not downgrading") {
+        // On a checkout AHEAD of the published latest (the normal state of
+        // `main`), the self-update downgrade guard exits before the download
+        // path, exactly like "already up to date". Same class of skip; the gate
+        // is prove.sh, which lowers the version so the download path is reached.
+        eprintln!("skipped: this build is newer than the latest release, so nothing downloads");
+        return;
+    }
 
     let dir = install.dir.display().to_string();
     assert!(

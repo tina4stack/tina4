@@ -384,6 +384,20 @@ mod tests {
         ]
     }
 
+    /// ADR-0067: the Ruby image installs no server gem. tina4ruby serves HTTP
+    /// itself; Puma arrives only through the app's own Gemfile.
+    #[test]
+    fn the_ruby_image_installs_no_server_gem() {
+        let code: String = DOCKERFILE_RUBY
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!code.contains("gem install"), "Dockerfile.ruby installs a gem outside the bundle");
+        assert!(!code.contains("puma"), "Dockerfile.ruby still names puma outside a comment");
+        assert!(code.contains("bundle install"), "the app's own Gemfile must still be installed");
+    }
+
     // ── PHP runtime selection ─────────────────────────────────────────────
 
     /// CLAUDE.md's version header must match Cargo.toml.

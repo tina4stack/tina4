@@ -1004,21 +1004,34 @@ fn read_dotenv_bool(key: &str) -> bool {
     read_dotenv_bool_from(".env", key)
 }
 
-fn install_production_server(info: &detect::ProjectInfo) {
-    let (name, check_fn, install_cmd): (&str, Box<dyn Fn() -> bool>, &str) = match info.language.as_str() {
-        "python" => ("uvicorn", Box::new(|| which::which("uvicorn").is_ok()), "uv add uvicorn"),
-        "php" => ("opcache", Box::new(|| true), ""), // built-in
-        "ruby" => ("puma", Box::new(|| {
-            console::shell_output("gem list puma")
-                .map(|o| !o.stdout.is_empty() && String::from_utf8_lossy(&o.stdout).contains("puma"))
-                .unwrap_or(false)
-        }), "gem install puma --no-doc"),
-        "nodejs" => ("cluster", Box::new(|| true), ""), // built-in
-        "tina4js" => ("vite", Box::new(|| true), ""), // uses vite build + preview
-        _ => return,
-    };
+/// What `tina4 serve --production` installs for a language: `(name, command)`.
+/// An empty command means the framework's own server already is the production
+/// server and nothing is installed. `None` means the language has no production
+/// step at all.
+///
+/// Ruby installs NOTHING (ADR-0067). tina4ruby serves HTTP itself and no longer
+/// depends on Puma; Puma is used only when the APP lists it in its Gemfile, and
+/// under `bundle exec` a gem installed with `gem install` but absent from the
+/// lockfile cannot be loaded anyway - so `gem install puma` bought nothing but
+/// a network fetch on every production start.
+fn production_server_install(language: &str) -> Option<(&'static str, &'static str)> {
+    match language {
+        "python" => Some(("uvicorn", "uv add uvicorn")),
+        "php" => Some(("opcache", "")),        // built-in
+        "ruby" => Some(("tina4-server", "")), // built-in; Puma is opt-in via the Gemfile
+        "nodejs" => Some(("cluster", "")),    // built-in
+        "tina4js" => Some(("vite", "")),      // uses vite build + preview
+        _ => None,
+    }
+}
 
-    if check_fn() {
+fn install_production_server(info: &detect::ProjectInfo) {
+    let Some((name, install_cmd)) = production_server_install(info.language.as_str()) else {
+        return;
+    };
+    let installed = install_cmd.is_empty() || (name == "uvicorn" && which::which("uvicorn").is_ok());
+
+    if installed {
         println!("  {} {} already installed", icon_ok().green(), name.cyan());
         return;
     }
@@ -2700,6 +2713,27 @@ mod tests {
     // and no undo.
 
     use super::{classify_cli_generation, version_majors, CliGeneration};
+
+    // ---- production server per language (ADR-0067) ------------------------
+
+    /// Ruby's production server is tina4ruby's own; `--production` must not
+    /// shell out to `gem install puma` (a network fetch that a bundled app
+    /// cannot even load).
+    #[test]
+    fn ruby_production_installs_nothing() {
+        let (name, command) = super::production_server_install("ruby").expect("ruby has a production step");
+        assert_eq!(name, "tina4-server");
+        assert!(command.is_empty(), "ruby must install nothing, got {command:?}");
+        assert!(!command.contains("puma"));
+    }
+
+    /// Negative control: Python still installs uvicorn, so the table is not
+    /// simply empty.
+    #[test]
+    fn python_production_still_installs_uvicorn() {
+        assert_eq!(super::production_server_install("python"), Some(("uvicorn", "uv add uvicorn")));
+        assert_eq!(super::production_server_install("cobol"), None);
+    }
 
     /// Positive: the generation this feature exists to clear out.
     #[test]

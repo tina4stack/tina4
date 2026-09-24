@@ -1002,12 +1002,27 @@ fn env_truthy(value: &str) -> bool {
     )
 }
 
-/// The explicit "off" set: `false`, `0`, `no`, `off`, any case.
-fn env_falsy(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "false" | "0" | "no" | "off"
-    )
+/// The variables that mark a CI run, in the order ADR-0070 lists them. The
+/// union of what already shipped: tina4-php `App::CI_ENVIRONMENT_VARIABLES`
+/// and tina4-ruby `Tina4::CI_ENV_VARS`. Pinned against the
+/// `ci_env_vars` array in tina4-documentation
+/// `plan/v3/fixtures/browser_open_contract.json` by a unit test.
+const CI_ENV_VARS: [&str; 8] = [
+    "CI",
+    "CONTINUOUS_INTEGRATION",
+    "GITHUB_ACTIONS",
+    "GITLAB_CI",
+    "BUILDKITE",
+    "JENKINS_URL",
+    "TF_BUILD",
+    "TEAMCITY_VERSION",
+];
+
+/// One CI variable's verdict: set to a value that, trimmed and lower-cased,
+/// is non-empty and is neither `false` nor `0`. The rule tina4-php ships.
+fn ci_marker_set(value: &str) -> bool {
+    let v = value.trim().to_ascii_lowercase();
+    !v.is_empty() && v != "false" && v != "0"
 }
 
 /// What `tina4 serve` is running: the development server or a production one.
@@ -1041,12 +1056,13 @@ fn resolve_serve_mode(
     }
 }
 
-/// True when the process runs under CI: `CI` is set to a non-empty value that
-/// is not in the explicit "off" set. `CI=true` (GitHub Actions, GitLab,
-/// CircleCI, Travis, Buildkite), `CI=1` and `CI=woodpecker` all count;
-/// `CI=`, `CI=false` and `CI=0` do not.
+/// True when the process runs under CI: any variable in `CI_ENV_VARS` passes
+/// `ci_marker_set`. `CI=true`, `CI=woodpecker`, `JENKINS_URL=http://...` and
+/// `TF_BUILD=True` all count; `CI=`, `CI=false` and `CI=0` do not.
 fn under_ci(lookup: &impl Fn(&str) -> Option<String>) -> bool {
-    lookup("CI").is_some_and(|v| !v.trim().is_empty() && !env_falsy(&v))
+    CI_ENV_VARS
+        .iter()
+        .any(|name| lookup(name).is_some_and(|v| ci_marker_set(&v)))
 }
 
 /// ADR-0070: open a browser only in development, never when
@@ -3391,7 +3407,7 @@ mod tests {
 
     #[test]
     fn browser_never_opens_under_ci() {
-        for v in ["true", "1", "TRUE", "yes", "woodpecker"] {
+        for v in ["true", "1", "TRUE", "yes", "no", "off", "woodpecker"] {
             let pairs = [("CI", v)];
             assert!(
                 !should_open_browser(env_of(&pairs), false, DEV),
@@ -3402,12 +3418,58 @@ mod tests {
 
     #[test]
     fn browser_opens_when_ci_is_empty_or_falsy() {
-        for v in ["", "  ", "false", "0", "no", "off", "FALSE"] {
-            let pairs = [("CI", v)];
+        for name in CI_ENV_VARS {
+            for v in ["", "  ", "false", "0", "FALSE", " False "] {
+                let pairs = [(name, v)];
+                assert!(
+                    should_open_browser(env_of(&pairs), false, DEV),
+                    "{name}={v:?} is not a CI run and must not veto"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_ci_variable_vetoes_on_its_own() {
+        let values = [
+            ("CI", "true"),
+            ("CONTINUOUS_INTEGRATION", "true"),
+            ("GITHUB_ACTIONS", "true"),
+            ("GITLAB_CI", "true"),
+            ("BUILDKITE", "true"),
+            ("JENKINS_URL", "http://jenkins.example:8080/"),
+            ("TF_BUILD", "True"),
+            ("TEAMCITY_VERSION", "2024.12"),
+        ];
+        assert_eq!(values.len(), CI_ENV_VARS.len());
+        for pair in values {
             assert!(
-                should_open_browser(env_of(&pairs), false, DEV),
-                "CI={v:?} is not a CI run and must not veto"
+                !should_open_browser(env_of(&[pair]), false, DEV),
+                "{}={:?} must veto the browser",
+                pair.0,
+                pair.1
             );
+        }
+    }
+
+    /// Element for element, the `ci_env_vars` array in tina4-documentation
+    /// `plan/v3/fixtures/browser_open_contract.json` (ADR-0070). Change both
+    /// together, or neither.
+    #[test]
+    fn ci_env_vars_match_the_contract_fixture() {
+        let fixture = [
+            "CI",
+            "CONTINUOUS_INTEGRATION",
+            "GITHUB_ACTIONS",
+            "GITLAB_CI",
+            "BUILDKITE",
+            "JENKINS_URL",
+            "TF_BUILD",
+            "TEAMCITY_VERSION",
+        ];
+        assert_eq!(CI_ENV_VARS.len(), fixture.len());
+        for (i, (ours, theirs)) in CI_ENV_VARS.iter().zip(fixture.iter()).enumerate() {
+            assert_eq!(ours, theirs, "CI_ENV_VARS[{i}] drifted from the fixture");
         }
     }
 

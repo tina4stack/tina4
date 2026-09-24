@@ -166,13 +166,13 @@ pub fn run(target: &str, runtime: Option<&str>, force: bool) {
         println!("  • {}", path.cyan());
     }
     println!();
-    print_next_steps(target);
+    print_next_steps(target, exposed_port(docker_template(&info, php_runtime, python_runtime)));
 }
 
 // ── Targets ───────────────────────────────────────────────────────────
 
-fn emit_docker(info: &ProjectInfo, php_runtime: PhpRuntime, python_runtime: PythonRuntime, force: bool) -> Vec<String> {
-    let dockerfile = match info.language.as_str() {
+fn docker_template(info: &ProjectInfo, php_runtime: PhpRuntime, python_runtime: PythonRuntime) -> &'static str {
+    match info.language.as_str() {
         "python"   => match python_runtime {
             PythonRuntime::Builtin => DOCKERFILE_PYTHON,
             PythonRuntime::Asgi    => DOCKERFILE_PYTHON_ASGI,
@@ -185,7 +185,27 @@ fn emit_docker(info: &ProjectInfo, php_runtime: PhpRuntime, python_runtime: Pyth
         "ruby"     => DOCKERFILE_RUBY,
         "nodejs"   => DOCKERFILE_NODEJS,
         _          => DOCKERFILE_PYTHON,
-    };
+    }
+}
+
+/// The port an emitted Dockerfile EXPOSEs. The run hint must publish THAT
+/// port: it used to say 7145 for every language, and `-p 7145:7145` on the
+/// Ruby (7147), Python (7146) or Node (7148) image publishes a port nothing
+/// listens on.
+fn exposed_port(dockerfile: &str) -> &str {
+    dockerfile
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("EXPOSE "))
+        .map(str::trim)
+        .unwrap_or("7145")
+}
+
+fn docker_run_hint(port: &str) -> String {
+    format!("docker run -p {port}:{port} my-app")
+}
+
+fn emit_docker(info: &ProjectInfo, php_runtime: PhpRuntime, python_runtime: PythonRuntime, force: bool) -> Vec<String> {
+    let dockerfile = docker_template(info, php_runtime, python_runtime);
     let mut written = Vec::new();
     if write_if_absent("Dockerfile", dockerfile, force) {
         written.push("Dockerfile".to_string());
@@ -288,13 +308,13 @@ fn write_if_absent(path: &str, contents: &str, force: bool) -> bool {
     true
 }
 
-fn print_next_steps(target: Target) {
+fn print_next_steps(target: Target, docker_port: &str) {
     match target {
         Target::Docker => {
             println!("Next:");
             println!("  {} review {} for language-specific bits", "•".dimmed(), "Dockerfile".cyan());
             println!("  {} {}                       # build image", "•".dimmed(), "docker build -t my-app .".cyan());
-            println!("  {} {}              # run", "•".dimmed(), "docker run -p 7145:7145 my-app".cyan());
+            println!("  {} {}              # run", "•".dimmed(), docker_run_hint(docker_port).cyan());
         }
         Target::Systemd => {
             println!("Next:");
@@ -396,6 +416,19 @@ mod tests {
         assert!(!code.contains("gem install"), "Dockerfile.ruby installs a gem outside the bundle");
         assert!(!code.contains("puma"), "Dockerfile.ruby still names puma outside a comment");
         assert!(code.contains("bundle install"), "the app's own Gemfile must still be installed");
+    }
+
+    /// The run hint publishes the port the emitted image EXPOSEs, per
+    /// language - not 7145 for everyone.
+    #[test]
+    fn the_run_hint_publishes_the_port_each_image_exposes() {
+        assert_eq!(docker_run_hint(exposed_port(DOCKERFILE_RUBY)), "docker run -p 7147:7147 my-app");
+        assert_eq!(docker_run_hint(exposed_port(DOCKERFILE_PYTHON)), "docker run -p 7146:7146 my-app");
+        assert_eq!(docker_run_hint(exposed_port(DOCKERFILE_NODEJS)), "docker run -p 7148:7148 my-app");
+        assert_eq!(docker_run_hint(exposed_port(DOCKERFILE_PHP)), "docker run -p 7145:7145 my-app");
+        for (name, dockerfile) in all_dockerfiles() {
+            assert!(dockerfile.contains(&format!("EXPOSE {}", exposed_port(dockerfile))), "{name} has no EXPOSE");
+        }
     }
 
     // ── PHP runtime selection ─────────────────────────────────────────────

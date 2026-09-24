@@ -29,3 +29,11 @@ Root owns documentation wrappers and the immutable skills bundle. No tags or pub
 - [x] Explicit permissive-plus-MPL dependency choices in LICENSE-POLICY.md/deny.toml; PR and release cargo-deny0.20.2 gate. Full advisories/bans/licenses/sources check passes.
 - [x] Repeat Rust296passed/4existingignored, strict Clippy, locked build, installer5modes each, integrity5negative checks, workflow syntax and official SPDX2.3 validation.
 - [x] Include first-party LICENSE/NOTICE/commercial notice with release assets, Debian packages and the CLI image.
+
+## Dependency advisory follow-up
+- [x] Pin quinn-proto0.11.15 and rand0.8.6; no other dependency updates.
+- [x] Explain coverage gap: cargo-deny checks the active dependency graph (optional quinn-proto was absent) and its default unsound scope only covers direct workspace dependencies (rand was transitive). No ignore entries were used.
+- [x] Add cargo-audit0.22.2 complete-lockfile checks to PR CI and release with unsound/yanked denied; set cargo-deny unsound=all and run full existing checks in PR CI too. Keep the existing documented policy for transitive unmaintained instant0.1.13.
+- [x] Regression evidence: prior lockfile fails for both RUSTSEC-2026-0185 and RUSTSEC-2026-0097; patched223-package lockfile passes. Fresh registry/advisory fetch succeeds with Rust toolchain on PATH.
+- [x] Re-run296Rust tests (4existing ignored), strict Clippy, locked release build, full cargo-deny checks, regenerated notices/inventory, official SPDX2.3 schema and5integrity tests. Installer bytes/hash unchanged, so prior shell/PowerShell behavioral and signature checks remain applicable. Local rust-objcopy missing LLVM warning remains; build succeeds.
+- [ ] Root coordinates one follow-up push to release PR38 after this verified commit.

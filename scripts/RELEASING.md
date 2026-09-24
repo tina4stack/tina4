@@ -10,7 +10,7 @@ Code Infinity signature.
 A signature proves origin, not goodness, so CI makes the artifact provably good
 before any signature goes on:
 
-1. **audit** - `cargo-deny` (advisories, bans, sources, licences) gates the build.
+1. **audit** - `cargo audit --deny unsound --deny yanked` checks the entire lockfile (including inactive optional dependencies); `cargo-deny` (advisories, bans, sources, licences) gates the build.
 2. **build** - `cargo build --locked` on a pinned Rust toolchain, all Actions
    pinned to commit SHAs, with a pre-sign smoke test.
 3. **provenance** - SLSA attestations cover every draft asset, including the

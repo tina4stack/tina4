@@ -40,8 +40,10 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
       - uses: taiki-e/install-action@bffeee26d4db9be238a4ea78d8826604ebcb594d # v2.82.5
         with:
-          tool: cargo-deny@0.20.2
-      - run: cargo deny check advisories bans sources licenses
+          tool: cargo-deny@0.20.2,cargo-audit@0.22.2
+      # Audit every locked crate, including optional crates outside the active graph.
+      - run: cargo audit --deny unsound --deny yanked
+      - run: cargo deny --locked check advisories bans sources licenses
 
   build:
     needs: audit

@@ -3,9 +3,16 @@
 .gitignore
 .vscode
 .idea
+# Secrets and env files must NEVER be baked into the image by `COPY . /app`.
+# Ignore every .env variant (production/staging included) and any key material.
 .env
-.env.local
-.env.*.local
+.env.*
+secrets/
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
 node_modules
 .venv
 vendor

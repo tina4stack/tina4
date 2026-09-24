@@ -17,12 +17,17 @@
 ARG TINA4_CLI_IMAGE=ghcr.io/tina4stack/tina4-cli:v3.8.63
 FROM ${TINA4_CLI_IMAGE} AS tina4cli
 
-FROM composer:2 AS deps
+# Base images are pinned by digest (supply chain): a moved tag cannot swap the
+# base out from under a build. The human-readable tag is kept in the comment;
+# bump the digest deliberately (docker buildx imagetools inspect <tag>).
+# composer:2
+FROM composer:2@sha256:a5f59b9fd2faf31218632be4809dc6491761085e8064c31dc3b84378c48c248b AS deps
 WORKDIR /app
 COPY composer.json composer.lock* ./
 RUN composer install --no-dev --optimize-autoloader --no-scripts
 
-FROM php:8.4-cli-alpine
+# php:8.4-cli-alpine
+FROM php:8.4-cli-alpine@sha256:1f044d6de9f2338df85f32719dfd2938e284f848a91b5ccee6a3d375ca81caa5
 WORKDIR /app
 COPY --from=tina4cli /usr/local/bin/tina4 /usr/local/bin/tina4
 # pcntl is NOT optional here, and it is not in the base image.
@@ -47,6 +52,12 @@ RUN php -m | grep -qi '^pcntl$' \
  || { echo "pcntl failed to install - the server would run single-process"; exit 1; }
 COPY --from=deps /app/vendor /app/vendor
 COPY . /app
+# Run as a non-root user (defence in depth). /app must be writable at runtime —
+# the app writes its SQLite database (sqlite:///app.db resolves under the
+# workdir), logs/, and any cache/ here — so the unprivileged user owns it.
+RUN addgroup -S tina4 && adduser -S -G tina4 -h /app tina4 \
+ && chown -R tina4:tina4 /app
+USER tina4
 ENV TINA4_OVERRIDE_CLIENT=true \
     TINA4_DEBUG=false
 EXPOSE 7145

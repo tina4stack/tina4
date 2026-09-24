@@ -25,12 +25,16 @@
 ARG TINA4_CLI_IMAGE=ghcr.io/tina4stack/tina4-cli:v3.8.63
 FROM ${TINA4_CLI_IMAGE} AS tina4cli
 
-FROM composer:2 AS deps
+# Base images are pinned by digest (supply chain): a moved tag cannot swap the
+# base out from under a build. The tag is kept in the comment; bump deliberately.
+# composer:2
+FROM composer:2@sha256:a5f59b9fd2faf31218632be4809dc6491761085e8064c31dc3b84378c48c248b AS deps
 WORKDIR /app
 COPY composer.json composer.lock* ./
 RUN composer install --no-dev --optimize-autoloader --no-scripts
 
-FROM php:8.4-cli
+# php:8.4-cli
+FROM php:8.4-cli@sha256:2b87a5d0c0465ade44b1bbec46e8f63520448a7bd7ec90a284dd8b8f0b07fd53
 WORKDIR /app
 COPY --from=tina4cli /usr/local/bin/tina4 /usr/local/bin/tina4
 
@@ -73,6 +77,12 @@ RUN php -r 'if (class_exists("OpenSwoole\\Util")) { $n = OpenSwoole\Util::getCPU
     if ($n < 1) { fwrite(STDERR, "worker count did not resolve\n"); exit(1); } \
     echo "worker count resolves to $n on this build\n";'
 
+# Run as a non-root user (defence in depth). /app must be writable at runtime —
+# the app writes its SQLite database, logs/ and any cache/ under the workdir —
+# so the unprivileged user owns it. Swoole binds 7145 (>1024), so no root needed.
+RUN groupadd -r tina4 && useradd -r -g tina4 -d /app tina4 \
+ && chown -R tina4:tina4 /app
+USER tina4
 ENV TINA4_OVERRIDE_CLIENT=true \
     TINA4_DEBUG=false \
     TINA4_SWOOLE_HOST=0.0.0.0 \

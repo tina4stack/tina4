@@ -234,6 +234,14 @@ def main() -> int:
     ap.add_argument("--strict-xfail", action="store_true", help="fail the build on an XPASS")
     args = ap.parse_args()
 
+    # The gate runs the binary with cwd set to a temp project dir, so a relative
+    # --bin (e.g. ./target/release/tina4) would not resolve there. Make a
+    # path-like bin absolute; leave a bare name (e.g. "tina4") for PATH lookup.
+    binary = args.bin
+    if os.sep in binary or (os.altsep and os.altsep in binary) or Path(binary).exists():
+        binary = str(Path(binary).resolve())
+    args.bin = binary
+
     fixture = json.loads(Path(args.fixture).read_text())
     report = Report()
     workdir = Path(tempfile.mkdtemp(prefix=f"tina4-gate-{args.language}-"))

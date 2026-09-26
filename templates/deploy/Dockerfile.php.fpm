@@ -26,12 +26,16 @@
 ARG TINA4_CLI_IMAGE=ghcr.io/tina4stack/tina4-cli:v3.8.63
 FROM ${TINA4_CLI_IMAGE} AS tina4cli
 
-FROM composer:2 AS deps
+# Base images are pinned by digest (supply chain): a moved tag cannot swap the
+# base out from under a build. The tag is kept in the comment; bump deliberately.
+# composer:2
+FROM composer:2@sha256:a5f59b9fd2faf31218632be4809dc6491761085e8064c31dc3b84378c48c248b AS deps
 WORKDIR /app
 COPY composer.json composer.lock* ./
 RUN composer install --no-dev --optimize-autoloader --no-scripts
 
-FROM php:8.4-fpm
+# php:8.4-fpm
+FROM php:8.4-fpm@sha256:223115611852f585846b5d30f0cd95de8af9b486ca3bf310174a143704fc71e3
 WORKDIR /app
 COPY --from=tina4cli /usr/local/bin/tina4 /usr/local/bin/tina4
 
@@ -60,6 +64,14 @@ COPY docker-entrypoint.fpm.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
  && chown -R www-data:www-data /app
 
+# NOTE (F10, defence in depth): PHP already runs as the unprivileged www-data
+# user — php-fpm drops its workers to www-data and /app is owned by www-data.
+# The container is NOT switched to `USER www-data` wholesale because the nginx
+# master in this image writes its pid to /run and logs to /var/log/nginx (both
+# root-owned) and would fail to start as www-data without relocating those to a
+# writable path. Running the whole fpm+nginx stack rootless is a focused change
+# (nginx pid/log/temp dirs + conf) that needs its own boot test; the cli, swoole
+# and asgi images already run fully non-root.
 ENV TINA4_OVERRIDE_CLIENT=true \
     TINA4_DEBUG=false
 EXPOSE 7145

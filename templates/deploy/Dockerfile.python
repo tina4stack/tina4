@@ -16,7 +16,11 @@
 ARG TINA4_CLI_IMAGE=ghcr.io/tina4stack/tina4-cli:v3.8.63
 FROM ${TINA4_CLI_IMAGE} AS tina4cli
 
-FROM python:3.12-slim AS deps
+# Base images are pinned by digest (supply chain): a moved tag cannot swap the
+# base out from under a build. The tag is kept in the comment; bump the digest
+# deliberately (docker buildx imagetools inspect <tag>).
+# python:3.12-slim
+FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9 AS deps
 WORKDIR /app
 RUN pip install --no-cache-dir uv
 COPY pyproject.toml uv.lock* ./
@@ -26,7 +30,8 @@ COPY pyproject.toml uv.lock* ./
 # makes the production check a no-op.
 RUN uv sync --frozen --no-dev && uv pip install uvicorn
 
-FROM python:3.12-slim
+# python:3.12-slim
+FROM python:3.12-slim@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9
 WORKDIR /app
 COPY --from=tina4cli /usr/local/bin/tina4 /usr/local/bin/tina4
 ENV PATH="/app/.venv/bin:$PATH" \
@@ -34,6 +39,12 @@ ENV PATH="/app/.venv/bin:$PATH" \
     TINA4_DEBUG=false
 COPY --from=deps /app/.venv /app/.venv
 COPY . /app
+# Run as a non-root user (defence in depth). /app must be writable at runtime —
+# the app writes its SQLite database (sqlite:///app.db resolves under the
+# workdir), logs/, and any cache/ here — so the unprivileged user owns it.
+RUN groupadd -r tina4 && useradd -r -g tina4 -d /app tina4 \
+ && chown -R tina4:tina4 /app
+USER tina4
 EXPOSE 7146
 
 # One launcher for all four languages. --host defaults to 0.0.0.0, which is

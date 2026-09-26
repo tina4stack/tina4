@@ -22,7 +22,11 @@
 ARG TINA4_CLI_IMAGE=ghcr.io/tina4stack/tina4-cli:v3.8.63
 FROM ${TINA4_CLI_IMAGE} AS tina4cli
 
-FROM ruby:3.3 AS deps
+# Base images are pinned by digest (supply chain): a moved tag cannot swap the
+# base out from under a build. The tag is kept in the comment; bump the digest
+# deliberately (docker buildx imagetools inspect <tag>).
+# ruby:3.3
+FROM ruby:3.3@sha256:21e6a5125535e13999143c49b6471f68c92a74d8faad0a3541c51b11de0266ad AS deps
 WORKDIR /app
 COPY Gemfile Gemfile.lock* ./
 # `deployment true` is deliberately NOT set. It demands a lockfile that matches
@@ -38,7 +42,8 @@ RUN bundle config set --local without 'development test' \
 # bundle install above brings it in. A `gem install puma` outside the bundle
 # could not be loaded under `bundle exec` anyway.
 
-FROM ruby:3.3-slim
+# ruby:3.3-slim
+FROM ruby:3.3-slim@sha256:379ffc9ca20cae2655cb80cac53ee23e1e7d859c03a4cceb7f567d6ce4873cee
 WORKDIR /app
 COPY --from=tina4cli /usr/local/bin/tina4 /usr/local/bin/tina4
 # Runtime shared libraries only. The extensions were compiled in the builder but
@@ -53,6 +58,12 @@ ENV TINA4_OVERRIDE_CLIENT=true \
 COPY --from=deps /app/vendor /app/vendor
 COPY --from=deps /usr/local/bundle /usr/local/bundle
 COPY . /app
+# Run as a non-root user (defence in depth). /app must be writable at runtime —
+# the app writes its SQLite database (sqlite:///app.db resolves under the
+# workdir), logs/, and any cache/ here — so the unprivileged user owns it.
+RUN groupadd -r tina4 && useradd -r -g tina4 -d /app tina4 \
+ && chown -R tina4:tina4 /app
+USER tina4
 EXPOSE 7147
 
 # One launcher for all four languages. --host defaults to 0.0.0.0, which is

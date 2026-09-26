@@ -24,7 +24,7 @@ ladder + parity). Documented + guarded by the gate; framework PR is the fix.
 - [x] Rust tests for bug 2 + bug 3 (real binary, gated where a toolchain is needed)
 - [x] Generator-parity gate: fixture + runner script + matrix workflow
 - [x] Gate FAILS on today's bugs (proven) and passes for CLI-owned bugs after fix
-- [ ] PR into main; CI green
+- [x] PR into main; CI green (PR #45, all 15 checks pass)
 
 ## Parity
 | Item | Python | PHP | Ruby | Node | tina4js |
@@ -43,6 +43,6 @@ ladder + parity). Documented + guarded by the gate; framework PR is the fix.
 - [ ] bug1 framework double-plural (framework PR — out of CLI scope; gate guards it)
 
 ## Commits
-- 479997f  bug2 PYTHONPATH + bug3 tina4js dispatch + generator-parity gate (verified lab: py/php/tina4js gate pass patched, fail unpatched)
+- (PR #45) bug2 PYTHONPATH + bug3 tina4js dispatch + generator-parity gate (verified lab: py/php/tina4js gate pass patched, fail unpatched)
 
-## Status: In Progress
+## Status: Complete

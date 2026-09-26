@@ -1,0 +1,107 @@
+{
+  "$comment": [
+    "Generator naming contract for the tina4 CLI, guarded by the generator-parity",
+    "gate (scripts/generator_parity_gate.py + .github/workflows/generator-parity.yml).",
+    "The CLI forwards `generate`/`routes` verbatim to each framework CLI, so this",
+    "fixture pins the developer-VISIBLE, cross-language-identical output — route",
+    "paths, table names, migration names — plus the per-language file paths, and",
+    "asserts them end-to-end from a real `tina4 init` + `generate` + `routes` run.",
+    "Everything a developer SEES must be identical across the four frameworks",
+    "(Tina4 core principle 6); only file casing/extension is language-idiomatic.",
+    "",
+    "Pluralisation rule (the ONE rule, applied consistently):",
+    "  singular_base = snake_case(ClassName)               e.g. Order -> order, Product -> product",
+    "  table/migration = singular_base, UNLESS it is a SQL reserved word, then plural",
+    "                    Order -> orders (reserved), Product -> product",
+    "  route path / route file / page+list template = pluralise(singular_base)",
+    "                    Order -> orders, Product -> products",
+    "So the route is ALWAYS the single plural of the singular base -- never the",
+    "plural of an already-pluralised table. `route = table + 's'` is the bug: when",
+    "the table was pluralised for a reserved word it double-pluralises (orderss)."
+  ],
+  "schema_version": "1",
+  "envelope_name": "generator_contract_v1",
+
+  "model": {
+    "class": "Widget",
+    "table": "widget",
+    "migration": "create_widget"
+  },
+
+  "crud": [
+    {
+      "name": "Product",
+      "fields": "name:string",
+      "table": "product",
+      "migration": "create_product",
+      "route_plural": "products",
+      "route_paths": ["/api/products"]
+    },
+    {
+      "name": "Order",
+      "fields": "total:float",
+      "reserved_word": true,
+      "table": "orders",
+      "migration": "create_orders",
+      "route_plural": "orders",
+      "route_paths": ["/api/orders"],
+      "must_not_appear": ["orderss", "/api/orderss"],
+      "known_framework_bug": {
+        "id": "crud-double-pluralisation",
+        "why": "framework generators build route/template names as table + 's'; a reserved-word table is already plural (orders), so routes/templates double-pluralise to orderss. Lives in the framework generator (e.g. tina4-python/tina4_python/cli/__init__.py:1973 route_name = table + 's'), NOT the CLI, which forwards generate verbatim. Fix: route_plural = pluralise(snake(name)). Needs a framework PR across all four; the CLI cannot fix it.",
+        "expect_until_framework_fixed": "double_pluralised"
+      }
+    }
+  ],
+
+  "languages": {
+    "python": {
+      "cli_available": true,
+      "model_file": "src/orm/Widget.py",
+      "migration_glob": "migrations/*_create_widget.sql",
+      "crud_files": {
+        "Product": ["src/orm/Product.py", "src/routes/products.py", "src/templates/pages/products.twig"],
+        "Order": ["src/orm/Order.py", "src/routes/orders.py", "src/templates/pages/orders.twig"]
+      }
+    },
+    "php": {
+      "cli_available": true,
+      "model_file": "src/orm/Widget.php",
+      "migration_glob": "migrations/*_create_widget.sql",
+      "crud_files": {
+        "Product": ["src/orm/Product.php", "src/routes/products.php", "src/templates/pages/products.twig"],
+        "Order": ["src/orm/Order.php", "src/routes/orders.php", "src/templates/pages/orders.twig"]
+      }
+    },
+    "ruby": {
+      "cli_available": true,
+      "model_file": "src/orm/widget.rb",
+      "migration_glob": "migrations/*_create_widget.sql",
+      "crud_files": {
+        "Product": ["src/orm/product.rb", "src/routes/products.rb"],
+        "Order": ["src/orm/order.rb", "src/routes/orders.rb"]
+      }
+    },
+    "nodejs": {
+      "cli_available": true,
+      "generator_incomplete": {
+        "id": "nodejs-generate-not-implemented",
+        "why": "the published tina4-nodejs package's `generate` is a no-op: `tina4 init nodejs` scaffolds a project, but `generate model`/`generate crud` emit no files and `routes` lists nothing. This is a framework gap (the Node generators are not shipped), not a CLI dispatch bug — the CLI forwards generate verbatim and PHP/Python/Ruby all emit. Remove this marker once tina4-nodejs ships generate."
+      },
+      "model_file_globs": ["src/orm/Widget.ts", "src/orm/Widget.js"],
+      "migration_glob": "migrations/*_create_widget.sql",
+      "crud_files_globs": {
+        "Product": ["src/routes/products.*"],
+        "Order": ["src/routes/orders.*"]
+      }
+    }
+  },
+
+  "tina4js": {
+    "$comment": "bug 3: generate must delegate to tina4js, not vite.",
+    "page": {"name": "Home", "files": ["public/js/home-page.js", "src/public/home.html"]},
+    "component": {"name": "WidgetCard", "files": ["public/js/components/widget-card.js"]}
+  },
+
+  "routes_min_registered": 4
+}

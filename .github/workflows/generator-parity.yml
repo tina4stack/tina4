@@ -1,0 +1,68 @@
+name: Generator Parity
+
+# Drives the built CLI end-to-end for each language — init, generate, routes —
+# and asserts the produced names/paths against tests/fixtures/generator_contract.json
+# (scripts/generator_parity_gate.py). Guards three shipped bugs: routes must load
+# generated route files (bug 2), tina4js generate must delegate to tina4js not
+# vite (bug 3), and crud route/template names must be a single plural, not a
+# double-pluralised reserved-word table (bug 1 — framework-owned, tracked XFAIL).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  generator-parity:
+    name: ${{ matrix.language }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # All five run as hard-required checks. A framework whose generators are
+        # not shipped yet (nodejs) is flagged generator_incomplete in the fixture
+        # and reported XFAIL by the gate, so the job stays green while the gap
+        # stays VISIBLE — never silently skipped, and it flips to a loud XPASS
+        # the day the framework ships generate.
+        language: [python, php, ruby, nodejs, tina4js]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+        with:
+          toolchain: stable
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv (Python framework CLI runner)
+        if: matrix.language == 'python'
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+
+      - name: Set up PHP
+        if: matrix.language == 'php'
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+        with:
+          php-version: "8.3"
+          tools: composer
+
+      - name: Set up Ruby
+        if: matrix.language == 'ruby'
+        uses: ruby/setup-ruby@14594264cd68ce8a2345dd349bc3d138a4ef85c8 # v1.327.0
+        with:
+          ruby-version: "3.2"
+
+      - name: Set up Node
+        if: matrix.language == 'nodejs' || matrix.language == 'tina4js'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Build the CLI
+        run: cargo build --release
+
+      - name: Run the generator-parity gate
+        run: python3 scripts/generator_parity_gate.py --language ${{ matrix.language }} --bin ./target/release/tina4

@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.8.92 — 2026-09-26
+
+- fix(cli): `tina4 routes` now loads route files in a fresh `tina4 init` Python project — the project root is placed on PYTHONPATH for python delegations, so route modules resolve instead of failing with "No module named 'src'".
+- fix(cli): `tina4 generate page|component` in a `tina4 init js` project now delegates to `npx tina4js` instead of `vite`, so scaffolding works instead of failing with "Failed to run vite generate".
+- ci: add a 5-language generator-parity gate (matrix over python/php/ruby/nodejs) that runs init → generate model/crud/page/component → routes and asserts produced names/paths/routes/migrations against a committed contract fixture, with cross-language parity. The framework crud route/template double-pluralisation is encoded and tracked (XFAIL) until the framework fix ships.
+
 ## 3.8.91 — 2026-09-24
 
 - Verify self-update downloads against mandatory SHA256SUMS before replacement and refuse downgrades. Pass Windows hash paths as data rather than PowerShell code.

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- test(release): cover the SPDX SBOM generator with a real-run test (`tests/test_release_inventory.py`). It builds the inventory from the actual lockfile and asserts the document names the `tina4` package and its dependencies, and it proves the generator refuses an unsound graph. `scripts/release-inventory.py` gains a pure `build_document` seam so the trust boundary is testable without mocks; the emitted release bytes are unchanged.
+
 ## 3.8.92 — 2026-09-26
 
 - fix(cli): `tina4 routes` now loads route files in a fresh `tina4 init` Python project — the project root is placed on PYTHONPATH for python delegations, so route modules resolve instead of failing with "No module named 'src'".

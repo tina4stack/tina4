@@ -123,6 +123,11 @@ declarations or missing notice texts fail the inventory check on every PR. This
 records upstream declarations and does not claim an individual legal opinion.
 The separate `LICENSE-POLICY.md` allowlist is enforced by cargo-deny on every
 pull request and release build.
+A real-run test, `tests/test_release_inventory.py`, generates the SBOM from the
+actual lockfile on every PR and proves the SPDX document names the `tina4`
+package and its resolved dependencies; it also proves the generator refuses an
+unsound graph (a missing licence, an unknown SPDX identifier, an absent locked
+checksum, or a crate with no notice text).
 For the crates whose archives omit licence files, reviewed texts from their exact
 upstream source commits are stored under `scripts/third-party-licenses/`, with
 source URLs and SHA-256 checksums.
@@ -138,4 +143,5 @@ are regenerated after signing and preserve the SBOM/notices.
 
 Local checks: `cargo test --locked`, `cargo clippy --locked -- -D warnings`,
 `cargo build --release --locked`, `python3 scripts/release-inventory.py --output dist`,
-and `python3 tests/release_integrity.py`.
+`python3 tests/release_integrity.py`,
+and `python3 tests/test_release_inventory.py`.

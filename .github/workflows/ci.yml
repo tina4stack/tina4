@@ -24,6 +24,7 @@ jobs:
       - run: cargo clippy -- -D warnings
       - run: python3 scripts/release-inventory.py --output target/release-inventory
       - run: python3 tests/release_integrity.py
+      - run: python3 tests/test_release_inventory.py
 
   skills-installer:
     strategy:

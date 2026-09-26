@@ -9,6 +9,13 @@
 
 Uses only Python's standard library and Cargo. This is an auditable inventory,
 not legal approval of any licence. Unknown/missing declarations and notices fail.
+
+``build_document`` is the pure core: it turns a resolved ``cargo metadata`` graph
+plus the locked checksums into the SPDX document, third-party notices, and licence
+inventory, and raises the moment the graph is unsound. ``generate`` gathers those
+inputs from the real tree (Cargo, git, the lockfile) and writes the release files.
+The split lets tests exercise the trust boundary on real inputs without invoking
+the package manager - see ``tests/test_release_inventory.py``.
 """
 import argparse
 import hashlib
@@ -25,15 +32,22 @@ KNOWN_LICENSES = set("MIT Apache-2.0 Unicode-3.0 ISC Unlicense Zlib BSD-3-Clause
 NOTICE_NAMES = re.compile(r'^(licen[cs]e|copying|notice|copyright)(?:$|[.-])', re.I)
 
 
-def generate(output):
-    metadata = json.loads(subprocess.check_output(
-        ['cargo', 'metadata', '--locked', '--format-version', '1'], cwd=ROOT))
+def parse_lock(text):
+    """Index a Cargo.lock's packages by (name, version) without a TOML dependency."""
     lock = {}
-    for block in (ROOT / 'Cargo.lock').read_text().split('[[package]]')[1:]:
+    for block in text.split('[[package]]')[1:]:
         fields = dict(re.findall(r'^(name|version|checksum|source) = "([^"]+)"$', block, re.M))
         lock[(fields['name'], fields['version'])] = fields
-    fallback_dir = ROOT / 'scripts/third-party-licenses'
-    fallbacks = json.loads((fallback_dir / 'sources.json').read_text())
+    return lock
+
+
+def build_document(metadata, lock, fallback_dir, fallbacks, commit, created, lock_digest):
+    """Turn a resolved Cargo graph into SPDX + notices + inventory, or raise.
+
+    Pure over its inputs: the only filesystem reads are each crate's own source
+    directory (from ``manifest_path``) for notice text and the reviewed fallback
+    files. It never installs, resolves, or executes crate code.
+    """
     packages = []
     ids = {}
     notices = ['Tina4 CLI third-party notices',
@@ -91,23 +105,36 @@ def generate(output):
         for dependency in node['dependencies']:
             relationships.append({'spdxElementId': ids[node['id']], 'relationshipType': 'DEPENDS_ON',
                                   'relatedSpdxElement': ids[dependency]})
-    commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
     version = next(p['version'] for p in metadata['packages'] if p['id'] == root_id)
-    lock_digest = hashlib.sha256((ROOT / 'Cargo.lock').read_bytes()).hexdigest()
     document = {'spdxVersion': 'SPDX-2.3', 'dataLicense': 'CC0-1.0', 'SPDXID': 'SPDXRef-DOCUMENT',
                 'name': 'tina4-' + version,
                 'documentNamespace': f'https://tina4.com/spdx/cli/{version}/{commit}-{lock_digest}',
                 'creationInfo': {'creators': ['Tool: tina4-release-inventory'],
-                                 'created': datetime.fromisoformat(subprocess.check_output(['git', 'show', '-s', '--format=%cI', 'HEAD'], cwd=ROOT, text=True).strip()).astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')},
+                                 'created': created},
                 'comment': 'All-platform Cargo.lock inventory; includes build/dev dependencies. No legal approval claimed.',
                 'packages': packages, 'relationships': relationships}
+    return document, notices, licence_inventory
+
+
+def generate(output):
+    metadata = json.loads(subprocess.check_output(
+        ['cargo', 'metadata', '--locked', '--format-version', '1'], cwd=ROOT))
+    lock_bytes = (ROOT / 'Cargo.lock').read_bytes()
+    lock = parse_lock(lock_bytes.decode())
+    fallback_dir = ROOT / 'scripts/third-party-licenses'
+    fallbacks = json.loads((fallback_dir / 'sources.json').read_text())
+    commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+    created = datetime.fromisoformat(subprocess.check_output(['git', 'show', '-s', '--format=%cI', 'HEAD'], cwd=ROOT, text=True).strip()).astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    lock_digest = hashlib.sha256(lock_bytes).hexdigest()
+    document, notices, licence_inventory = build_document(
+        metadata, lock, fallback_dir, fallbacks, commit, created, lock_digest)
     output.mkdir(parents=True, exist_ok=True)
     for notice in ['LICENSE', 'NOTICE', 'COMMERCIAL-LICENSE.md']:
         shutil.copyfile(ROOT / notice, output / notice)
     (output / 'tina4.spdx.json').write_text(json.dumps(document, indent=2) + '\n')
     (output / 'THIRD-PARTY-NOTICES.txt').write_text('\n\n'.join(notices) + '\n')
     (output / 'LICENSE-INVENTORY.json').write_text(json.dumps(licence_inventory, indent=2) + '\n')
-    print(f'Inventoried {len(packages)} packages; all have declarations and third-party notices.')
+    print(f'Inventoried {len(document["packages"])} packages; all have declarations and third-party notices.')
 
 
 if __name__ == '__main__':

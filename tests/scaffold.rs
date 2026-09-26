@@ -255,3 +255,84 @@ fn init_js_scaffolds_a_project_that_tests_and_audits_clean() {
 
     let _ = fs::remove_dir_all(&base);
 }
+
+// ── bug 3: tina4js generate must delegate to `tina4js`, never `vite` ──
+
+#[test]
+fn generate_in_a_tina4js_project_targets_tina4js_not_vite() {
+    // A `tina4 init js` project is detected as language "tina4js", whose
+    // `cli_name()` is "vite" — the SERVE tool. `generate page|component` was
+    // routed through the delegate catch-all, which used that name, so the CLI
+    // ran `vite generate page Home` and died with:
+    //   "Failed to run vite generate page Home: No such file or directory".
+    // `npx tina4js generate page Home` is the tool that actually generates.
+    // This test needs no node toolchain: with no node_modules the delegate
+    // resolves to the bare `tina4js` bin, which is simply not found — but the
+    // TARGET is what matters. The regression is proven by the dispatch target
+    // switching from "vite" to "tina4js"; vite must never appear again.
+    let dir = unique_dir("tina4js-generate");
+    fs::write(
+        dir.join("package.json"),
+        r#"{"name":"app","dependencies":{"tina4js":"^1.5.2"}}"#,
+    )
+    .unwrap();
+
+    let out = run(&dir, &["generate", "page", "Home"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("vite"),
+        "generate in a tina4js project must not delegate to vite, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("tina4js"),
+        "generate in a tina4js project must delegate to tina4js, got: {stderr}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// ── bug 2: `routes` must load project route files (PYTHONPATH) ───────
+
+#[test]
+#[ignore = "needs a locally-installed tina4python + uv; run with: cargo test -- --ignored"]
+fn routes_lists_generated_routes_without_import_error() {
+    // In a python project, `tina4 routes` loads every file in src/routes/. The
+    // generated route files do `from src.orm.Foo import Foo`. Python only puts
+    // the script directory on sys.path, so under the delegate the project root
+    // was invisible and every route file failed to load:
+    //   ERROR Failed to load .../src/routes/products.py: No module named 'src'
+    // leaving only the framework's built-in routes listed. The CLI now exports
+    // the project root on PYTHONPATH so `src` imports resolve.
+    if !tina4python_available() {
+        eprintln!("SKIP routes_lists_generated_routes_without_import_error: tina4python not on PATH");
+        return;
+    }
+    let dir = unique_dir("routes");
+    fs::write(dir.join("app.py"), "from tina4_python import Tina4\n").unwrap();
+    fs::create_dir_all(dir.join("src/orm")).unwrap();
+    fs::create_dir_all(dir.join("src/routes")).unwrap();
+    // A route file that imports from the project's own `src` package — the
+    // exact shape the crud generator emits.
+    fs::write(
+        dir.join("src/orm/Product.py"),
+        "from tina4_python.orm import ORM, IntegerField, StringField\n\nclass Product(ORM):\n    id = IntegerField(primary_key=True, auto_increment=True)\n    name = StringField()\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/routes/products.py"),
+        "from tina4_python.core.router import get\nfrom src.orm.Product import Product\n\n@get(\"/api/products\")\nasync def list_products(request, response):\n    return response(Product.all())\n",
+    )
+    .unwrap();
+
+    let out = run(&dir, &["routes"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("No module named 'src'") && !stdout.contains("No module named 'src'"),
+        "route files must import the project's src package:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("/api/products"),
+        "the generated route must be listed:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}

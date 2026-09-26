@@ -1490,8 +1490,59 @@ pub(crate) fn resolve_cli(info: &detect::ProjectInfo) -> (String, Vec<String>) {
                 }
             ("tina4nodejs".into(), vec![])
         }
+        "tina4js" => {
+            // A tina4js (frontend) project owns its generators through the
+            // `tina4js` bin, run via `npx tina4js generate page|component`.
+            // `cli_name()` returns "vite" — that is the SERVE tool (vite dev +
+            // build), which has no `generate` subcommand and is not spawnable as
+            // a bare program on Windows. Delegating `generate`/`lint`/etc. must
+            // target `tina4js`, or `tina4 generate page X` tries to run
+            // `vite generate page X` and dies with "No such file or directory".
+            if std::path::Path::new("node_modules").exists()
+                && which::which("npx").is_ok() {
+                    return ("npx".into(), vec!["tina4js".into()]);
+                }
+            ("tina4js".into(), vec![])
+        }
         _ => (info.cli_name().into(), vec![]),
     }
+}
+
+/// Environment a delegated framework command needs to run project code.
+///
+/// The project root must be importable so a command that LOADS the app's own
+/// files works. `tina4 routes` (and `test`, and anything that discovers
+/// `src/routes/`) imports the generated route files, and those do
+/// `from src.orm.Foo import Foo`. Python only puts the SCRIPT's directory on
+/// `sys.path`, not the working directory, so under `uv run tina4python routes`
+/// the interpreter cannot see `src` and every route file fails to load with
+/// "No module named 'src'" — the router then lists only the framework's
+/// built-in routes. Putting the project root on `PYTHONPATH` makes `src` a
+/// top-level package again, exactly as the server does when it boots the app.
+///
+/// Scoped to Python: the "No module named 'src'" failure is Python's import
+/// model. PHP autoloads through composer, Ruby/Node resolve project modules
+/// through their own loaders, so they need no equivalent here.
+fn apply_delegate_env(command: &mut std::process::Command, info: &detect::ProjectInfo) {
+    if info.language != "python" {
+        return;
+    }
+    let root = match std::env::current_dir() {
+        Ok(dir) => dir,
+        Err(_) => return,
+    };
+    let root = root.as_os_str();
+    let combined = match std::env::var_os("PYTHONPATH") {
+        Some(existing) if !existing.is_empty() => {
+            let mut merged = std::ffi::OsString::from(root);
+            // The project root FIRST so its `src` wins over any collision.
+            merged.push(if console::is_windows() { ";" } else { ":" });
+            merged.push(existing);
+            merged
+        }
+        _ => std::ffi::OsString::from(root),
+    };
+    command.env("PYTHONPATH", combined);
 }
 
 fn delegate_command(args: Vec<String>) {
@@ -1510,7 +1561,11 @@ fn delegate_command(args: Vec<String>) {
             let (cmd, mut cmd_args) = resolve_cli(&info);
             cmd_args.extend(args);
 
-            match std::process::Command::new(&cmd).args(&cmd_args).status() {
+            let mut command = std::process::Command::new(&cmd);
+            command.args(&cmd_args);
+            apply_delegate_env(&mut command, &info);
+
+            match command.status() {
                 Ok(s) if !s.success() => std::process::exit(s.code().unwrap_or(1)),
                 Err(e) => {
                     eprintln!("{} Failed to run {} {}: {}", icon_fail().red(), cmd, cmd_args.join(" "), e);

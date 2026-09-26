@@ -151,6 +151,22 @@ def gate_backend(report: Report, binary: str, proj: Path, language: str, fixture
     res = run(binary, ["generate", "model", model["class"]], proj)
     if res.returncode != 0:
         report.fail(f"generate model {model['class']} failed: {(res.stderr or res.stdout).strip()[:200]}")
+
+    model_files = [lang["model_file"]] if "model_file" in lang else lang.get("model_file_globs", [])
+    model_present = any(glob.glob(str(proj / p)) for p in model_files)
+
+    # Some published framework generators are not shipped yet (the npm package's
+    # `generate` is a no-op: init works, but model/crud emit nothing). That is a
+    # framework gap, NOT a CLI regression, so it is reported as XFAIL against a
+    # machine-readable marker rather than failing the gate — and it flips to a
+    # loud XPASS the day the framework ships `generate`, so the marker is removed.
+    incomplete = lang.get("generator_incomplete")
+    if incomplete and not model_present:
+        report.xfail(f"{language}: framework generator not implemented ({incomplete['id']}) — {incomplete['why']}")
+        return
+    if incomplete and model_present:
+        report.xpass(f"{language}: framework now emits model output ({incomplete['id']}); remove generator_incomplete and enable hard assertions")
+
     if "model_file" in lang:
         check_files(report, proj, [lang["model_file"]], "model")
     if "model_file_globs" in lang:

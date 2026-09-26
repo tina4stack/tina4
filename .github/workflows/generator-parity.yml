@@ -17,23 +17,15 @@ jobs:
   generator-parity:
     name: ${{ matrix.language }}
     runs-on: ubuntu-latest
-    continue-on-error: ${{ matrix.experimental || false }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - language: python
-          - language: php
-          - language: tina4js
-          # Ruby and Node run NON-BLOCKING: their published framework generators
-          # do not yet emit crud files (the Ruby gem CLI and the npm package's
-          # `generate` are incomplete), so the gate cannot pass on them until the
-          # frameworks ship working generators. The job still runs and reports,
-          # so the gap stays visible instead of silently skipped.
-          - language: ruby
-            experimental: true
-          - language: nodejs
-            experimental: true
+        # All five run as hard-required checks. A framework whose generators are
+        # not shipped yet (nodejs) is flagged generator_incomplete in the fixture
+        # and reported XFAIL by the gate, so the job stays green while the gap
+        # stays VISIBLE — never silently skipped, and it flips to a loud XPASS
+        # the day the framework ships generate.
+        language: [python, php, ruby, nodejs, tina4js]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 

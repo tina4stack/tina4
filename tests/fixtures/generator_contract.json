@@ -84,6 +84,10 @@
     },
     "nodejs": {
       "cli_available": true,
+      "generator_incomplete": {
+        "id": "nodejs-generate-not-implemented",
+        "why": "the published tina4-nodejs package's `generate` is a no-op: `tina4 init nodejs` scaffolds a project, but `generate model`/`generate crud` emit no files and `routes` lists nothing. This is a framework gap (the Node generators are not shipped), not a CLI dispatch bug — the CLI forwards generate verbatim and PHP/Python/Ruby all emit. Remove this marker once tina4-nodejs ships generate."
+      },
       "model_file_globs": ["src/orm/Widget.ts", "src/orm/Widget.js"],
       "migration_glob": "migrations/*_create_widget.sql",
       "crud_files_globs": {

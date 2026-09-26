@@ -13,9 +13,9 @@
 # rewrites them from the tag and SHA256SUMS. Keep them exact.
 $ErrorActionPreference = 'Stop'
 
-$version     = '3.8.89'
+$version     = '3.8.92'
 $url64       = "https://github.com/tina4stack/tina4/releases/download/v$version/tina4-windows-amd64.exe"
-$checksum64  = 'BD6FBF44A61A94177A2BC2B7F979CF5B2341FE2E31C4E0AE2B30050DB1EEFA79'
+$checksum64  = 'E364AB617312BE5ECC97EB4EF28AC275E33306CC335F3BCEBF95C6333C9ADF56'
 
 $toolsDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 

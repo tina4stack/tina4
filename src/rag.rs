@@ -258,7 +258,8 @@ fn derive_query_for_file(rel_path: &str, content: &str, language: &str) -> Strin
 
 /// Check a Tina4 route handler file. Common mistakes we've seen:
 ///   * imports from `tina4` (PHP / v2 shape) instead of `tina4_python`
-///   * uses bare `def` instead of `async def`
+///   * a sync database call inside an `async def` handler (ADR-0074): it
+///     blocks the event loop, so every other request waits on the query
 ///   * `@post` without `@noauth` on a public-looking endpoint when the
 ///     retrieved chunks all have `@noauth`
 fn check_route_handler(path: &str, content: &str, language: &str, hits: &[RagHit]) -> Vec<RagWarning> {
@@ -293,22 +294,58 @@ fn check_route_handler(path: &str, content: &str, language: &str, hits: &[RagHit
         });
     }
 
-    // async def vs def — Tina4 Python handlers are always async.
-    let looks_like_handler = content.contains("@get(") || content.contains("@post(")
-        || content.contains("@put(") || content.contains("@delete(");
-    let has_async_def = content.contains("async def ");
-    let has_sync_def = content.contains("\ndef ") && !has_async_def;
-    if looks_like_handler && has_sync_def && !has_async_def {
+    // ADR-0074: a plain `def` route is fine - Tina4 runs it in a worker thread.
+    // What is wrong is a SYNC database call inside `async def`: it runs on the
+    // event loop and every other request waits for the query to return.
+    for (line, call) in sync_db_calls_in_async_handlers(content) {
         out.push(RagWarning {
             path: path.to_string(),
             kind: "convention".into(),
-            message: "Route handlers in Tina4 Python must be `async def` — retrieved examples all use `async def`".into(),
-            line: None,
-            reference: hits.iter().find(|h| h.text.contains("async def")).map(|h| h.metadata.title.clone()),
+            message: format!(
+                "`{call}` runs on the event loop inside an `async def` route and blocks every \
+                 other request until it returns - await its `_async` twin, or declare the \
+                 route with plain `def` (ADR-0074)"
+            ),
+            line: Some(line),
+            reference: None,
         });
     }
 
     out
+}
+
+/// Sync database calls a Tina4 Python route can make. Each has an `_async`
+/// twin (`db.fetch_async(...)`, `user.save_async()`), which is what an
+/// `async def` handler must await instead (ADR-0074).
+const SYNC_DB_CALLS: &[&str] = &[
+    "db.fetch(", "db.fetch_one(", "db.fetch_all(", "db.execute(", "db.execute_many(",
+    "db.insert(", "db.update(", "db.delete(", "db.truncate(", "db.start_transaction(",
+    "db.commit(", "db.rollback(", "db.get_next_id(", ".save()", ".load(", ".find_by_id(",
+    ".find_or_fail(", ".select_one(", ".force_delete()", ".restore()",
+];
+
+/// `(line number, call)` for every sync database call inside the body of a
+/// top-level `async def`. A body is every indented line after the header; the
+/// next top-level line (decorator, `def`, import) ends it. An awaited call or
+/// an `_async(` call is never flagged.
+fn sync_db_calls_in_async_handlers(content: &str) -> Vec<(u32, String)> {
+    let mut found = Vec::new();
+    let mut in_async_body = false;
+    for (index, line) in content.lines().enumerate() {
+        let top_level = !line.is_empty() && !line.starts_with(' ') && !line.starts_with('\t');
+        if top_level {
+            in_async_body = line.starts_with("async def ");
+            continue;
+        }
+        if !in_async_body || line.contains("await ") || line.contains("_async(") {
+            continue;
+        }
+        let code = line.split('#').next().unwrap_or("");
+        if let Some(call) = SYNC_DB_CALLS.iter().find(|call| code.contains(**call)) {
+            found.push(((index + 1) as u32, call.trim_end_matches('(').to_string()));
+        }
+    }
+    found
 }
 
 /// Check a SQL migration file. DROP without IF EXISTS is a frequent
@@ -418,16 +455,38 @@ mod tests {
         assert!(w[0].message.contains("tina4_python"));
     }
 
-    #[test]
-    fn route_handler_flags_sync_def() {
-        let hits = vec![RagHit {
+    fn router_hit() -> Vec<RagHit> {
+        vec![RagHit {
             text: "from tina4_python.core.router import get\n@get('/x')\nasync def x(req, res): pass".into(),
             metadata: Default::default(),
             distance: 0.2,
-        }];
-        let content = "from tina4_python.core.router import get\n@get('/x')\ndef x(req, res):\n    return {}";
-        let w = check_route_handler("src/routes/x.py", content, "python", &hits);
-        assert!(w.iter().any(|w| w.message.contains("async def")));
+        }]
+    }
+
+    #[test]
+    fn route_handler_accepts_a_plain_def_route_with_the_sync_api() {
+        // ADR-0074: Tina4 runs a def route in a worker thread; sync DB calls are fine there.
+        let content = "from tina4_python.core.router import get\n@get('/x')\ndef x(req, res):\n    return res(db.fetch_one(\"SELECT 1\"))";
+        let w = check_route_handler("src/routes/x.py", content, "python", &router_hit());
+        assert!(w.is_empty(), "a def route was flagged: {:?}", w.iter().map(|w| &w.message).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn route_handler_flags_a_sync_db_call_inside_async_def() {
+        let content = "from tina4_python.core.router import get\n@get('/x')\nasync def x(req, res):\n    row = db.fetch_one(\"SELECT 1\")\n    user.save()\n    return res(row)";
+        let w = check_route_handler("src/routes/x.py", content, "python", &router_hit());
+        assert_eq!(w.len(), 2);
+        assert_eq!(w[0].line, Some(4));
+        assert!(w[0].message.contains("db.fetch_one") && w[0].message.contains("_async"));
+        assert!(w[0].message.contains("`def`"));
+        assert_eq!(w[1].line, Some(5));
+    }
+
+    #[test]
+    fn route_handler_accepts_the_async_api_inside_async_def() {
+        let content = "from tina4_python.core.router import get\n@get('/x')\nasync def x(req, res):\n    row = await db.fetch_one_async(\"SELECT 1\")\n    await user.save_async()\n    return res(row)\n\ndef helper():\n    return db.fetch(\"SELECT 2\")";
+        let w = check_route_handler("src/routes/x.py", content, "python", &router_hit());
+        assert!(w.is_empty(), "flagged: {:?}", w.iter().map(|w| &w.message).collect::<Vec<_>>());
     }
 
     #[test]

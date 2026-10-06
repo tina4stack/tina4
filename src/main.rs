@@ -118,6 +118,12 @@ enum Commands {
         /// TINA4_NO_RELOAD=true). Useful in stable demos and CI.
         #[arg(long)]
         no_reload: bool,
+
+        /// Opt out of port takeover (sets TINA4_NO_TAKEOVER): a busy port is
+        /// never reclaimed, even from this project's own dev server. The holder
+        /// is left running and serve stops. Pick another port with --port.
+        #[arg(long)]
+        no_kill: bool,
     },
 
     /// Compile SCSS files from src/scss/ to src/public/css/
@@ -306,7 +312,7 @@ fn main() {
 
         Commands::Init { lang, path } => init::run(lang.as_deref(), path.as_deref()),
 
-        Commands::Serve { project, port, host, dev, production, no_browser, no_reload } => {
+        Commands::Serve { project, port, host, dev, production, no_browser, no_reload, no_kill } => {
             // `tina4 serve <projectname>` — resolve the named project and
             // change into it before serving. Look in the current folder
             // first (./<name>), then the configured projects folder.
@@ -408,6 +414,12 @@ fn main() {
             // see it.
             if no_reload {
                 std::env::set_var("TINA4_NO_RELOAD", "true");
+            }
+            // --no-kill is the flag form of TINA4_NO_TAKEOVER=true. Set it in
+            // the environment so the CLI's own takeover gate and the framework's
+            // runtime bind-failure path both read the same opt-out.
+            if no_kill {
+                std::env::set_var("TINA4_NO_TAKEOVER", "true");
             }
             // TINA4_NO_BROWSER is now set for the child unconditionally inside
             // handle_serve — the CLI opens the browser, the framework must not.
@@ -656,57 +668,17 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
             .unwrap_or_else(|| info.default_port())
     });
 
-    // If --port was explicitly provided, kill whatever is on that port.
-    // Otherwise, auto-increment to find a free port.
-    let explicit_port = port.is_some();
-    let port = if explicit_port {
-        if std::net::TcpListener::bind(("127.0.0.1", requested_port)).is_err() {
-            println!(
-                "{} Port {} in use — killing existing process...",
-                icon_warn().yellow(),
-                requested_port.to_string().cyan()
-            );
-            if console::kill_port(requested_port) {
-                println!(
-                    "{} Port {} freed",
-                    icon_ok().green(),
-                    requested_port.to_string().cyan()
-                );
-            } else {
-                eprintln!(
-                    "{} Could not free port {} — process may require manual termination",
-                    icon_fail().red(),
-                    requested_port
-                );
-                std::process::exit(1);
-            }
-        }
-        requested_port
-    } else {
-        // Default port: kill whatever is on it and take it over
-        if std::net::TcpListener::bind(("127.0.0.1", requested_port)).is_err() {
-            println!(
-                "{} Port {} in use — killing existing process...",
-                icon_warn().yellow(),
-                requested_port.to_string().cyan()
-            );
-            if console::kill_port(requested_port) {
-                println!(
-                    "{} Port {} freed",
-                    icon_ok().green(),
-                    requested_port.to_string().cyan()
-                );
-            } else {
-                eprintln!(
-                    "{} Could not free port {} — process may require manual termination",
-                    icon_fail().red(),
-                    requested_port
-                );
-                std::process::exit(1);
-            }
-        }
-        requested_port
-    };
+    // A busy port, whether from --port or the default, is taken over only from
+    // this project's own Tina4 dev server. Anything else holding it is left
+    // running and serve stops, rather than killing it. TAKEOVER-DEC-03: serve is
+    // a dev run unless --production (or an explicit TINA4_DEBUG=false), and
+    // --no-kill / TINA4_NO_TAKEOVER opts out of takeover entirely.
+    if std::net::TcpListener::bind(("127.0.0.1", requested_port)).is_err() {
+        let dev = !force_production && console::serve_is_dev();
+        let no_takeover = console::takeover_opted_out();
+        take_over_port_or_exit(requested_port, dev, no_takeover);
+    }
+    let port = requested_port;
 
     println!(
         "{} Detected {} project",
@@ -970,6 +942,62 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
             }
         }
     }
+}
+
+
+/// Free a busy port for `tina4 serve`, or say why not and exit. `dev` and
+/// `no_takeover` carry the TAKEOVER-DEC-03 gate resolved by the caller.
+fn take_over_port_or_exit(port: u16, dev: bool, no_takeover: bool) {
+    println!(
+        "{} Port {} in use — checking whether it is this project's dev server...",
+        icon_warn().yellow(),
+        port.to_string().cyan()
+    );
+    match console::take_over_port(port, std::path::Path::new("."), dev, no_takeover) {
+        console::Takeover::Reclaimed(pids) => println!(
+            "{} Port {} freed (stopped Tina4 dev server, PID {})",
+            icon_ok().green(),
+            port.to_string().cyan(),
+            join_pids(&pids)
+        ),
+        console::Takeover::Foreign(pids) => {
+            eprintln!(
+                "{} Port {} is held by PID {}, which is not this project's Tina4 dev server — it was left running.\n  Stop it yourself, or pick another port: tina4 serve --port <port>",
+                icon_fail().red(),
+                port,
+                join_pids(&pids)
+            );
+            std::process::exit(1);
+        }
+        console::Takeover::RefusedOptout => {
+            eprintln!(
+                "{} Port {} is in use and takeover is opted out (--no-kill / TINA4_NO_TAKEOVER) — the holder was left running.\n  Stop it yourself, or pick another port: tina4 serve --port <port>",
+                icon_fail().red(),
+                port
+            );
+            std::process::exit(1);
+        }
+        console::Takeover::RefusedProduction => {
+            eprintln!(
+                "{} Port {} is in use; takeover is disabled outside dev mode (a production bind never reclaims a port) — the holder was left running.\n  Stop it yourself, or pick another port: tina4 serve --port <port>",
+                icon_fail().red(),
+                port
+            );
+            std::process::exit(1);
+        }
+        console::Takeover::Failed => {
+            eprintln!(
+                "{} Could not free port {} — process may require manual termination",
+                icon_fail().red(),
+                port
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
+fn join_pids(pids: &[u32]) -> String {
+    pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ")
 }
 
 enum ExitCause {

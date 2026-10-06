@@ -30,6 +30,10 @@ tina4 serve [project]            Start dev server (file watcher + SCSS + browser
                                  guidance. cd into the resolved project happens automatically.
 tina4 serve --production         Auto-install and use production server
 tina4 serve --no-browser         Don't open browser on startup
+tina4 serve --no-kill            Opt out of port takeover (sets TINA4_NO_TAKEOVER):
+                                 a busy port is never reclaimed, even from this
+                                 project's own dev server; the holder is left
+                                 running and serve stops (TAKEOVER-DEC-03)
 tina4 doctor                     Check installed languages/tools, ports, AND global
                                  Tina4 AI-skills currency (~/.claude/skills vs the latest
                                  published ref). Strictly READ-ONLY: it reports + suggests a

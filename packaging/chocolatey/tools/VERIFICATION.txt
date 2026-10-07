@@ -10,10 +10,10 @@ Package binary:
   tina4-windows-amd64.exe
 
 Download location (embedded in tools\chocolateyinstall.ps1):
-  https://github.com/tina4stack/tina4/releases/download/v3.8.96/tina4-windows-amd64.exe
+  https://github.com/tina4stack/tina4/releases/download/v3.8.97/tina4-windows-amd64.exe
 
 SHA-256 (embedded as -Checksum64 in tools\chocolateyinstall.ps1):
-  9AA07E0134102904D272D7487218107196F51DA51DEE8F28EB8C13EB21A39C9B
+  0C2A18D3B9697A606A7DB6ED05E14AC7395840C80F6C720CAF818AA753AED9A4
 
 To verify the checksum yourself:
 
@@ -25,7 +25,7 @@ To verify the checksum yourself:
 You can also cross-check it against the project's signed checksum manifest,
 published as an asset on the same release:
 
-  https://github.com/tina4stack/tina4/releases/download/v3.8.96/SHA256SUMS
+  https://github.com/tina4stack/tina4/releases/download/v3.8.97/SHA256SUMS
 
 The binary is additionally EV Authenticode code-signed; right-click the .exe,
 Properties, Digital Signatures to inspect the publisher signature.

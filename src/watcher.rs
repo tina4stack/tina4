@@ -34,6 +34,11 @@ const IGNORED_SUBSTRINGS: &[&str] = &[
     "/target/",
     "/logs/",
     "/.tina4/",
+    // The native metrics engine writes this run-history file on every scan
+    // (unless --no-history). The dashboard scans with --no-history, but a
+    // manual `tina4 metrics` in a watched project must not trigger a reload
+    // loop either - the file is a generated artifact, not source.
+    ".tina4-metrics.json",
 ];
 
 /// File extensions whose events we always ignore.
@@ -480,6 +485,18 @@ mod tests {
         let e = ev(
             EventKind::Modify(ModifyKind::Data(DataChange::Any)),
             "/project/data/app.db-wal",
+        );
+        assert!(!is_meaningful_event(&e));
+    }
+
+    #[test]
+    fn tina4_metrics_history_file_is_ignored() {
+        // Regression: a `tina4 metrics` scan writes .tina4-metrics.json; the
+        // watcher must not treat that write as a source change, or the dashboard
+        // reloads itself every time it measures (a ~2-second reload loop).
+        let e = ev(
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            "/project/src/.tina4-metrics.json",
         );
         assert!(!is_meaningful_event(&e));
     }

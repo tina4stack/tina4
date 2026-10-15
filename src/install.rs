@@ -283,7 +283,7 @@ fn install_php() {
     }
 
     println!(
-        "  {} Install tina4php: composer global require tina4stack/tina4-php",
+        "  {} Install tina4php: composer global require tina4stack/tina4php",
         icon_info().blue()
     );
 }

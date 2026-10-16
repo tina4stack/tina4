@@ -701,7 +701,7 @@ fn resolve_requested_port(explicit: Option<u16>, default_port: u16) -> u16 {
     }
     // Read .env file if it exists (don't override existing env vars)
     if let Ok(contents) = std::fs::read_to_string(".env") {
-        for line in contents.lines() {
+        for line in env_config::strip_utf8_bom(&contents).lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
@@ -1073,7 +1073,7 @@ fn join_pids(pids: &[u32]) -> String {
 /// removed. `None` when the file or the key is missing.
 fn read_dotenv_value_from<P: AsRef<std::path::Path>>(path: P, key: &str) -> Option<String> {
     let contents = std::fs::read_to_string(path).ok()?;
-    for line in contents.lines() {
+    for line in env_config::strip_utf8_bom(&contents).lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -3691,6 +3691,15 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static N: AtomicU64 = AtomicU64::new(0);
         N.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// A `.env` saved as "UTF-8 with BOM" starts with the mark. Unstripped, it
+    /// glues onto the first key and `TINA4_NO_BROWSER=true` stops counting.
+    #[test]
+    fn dotenv_bool_reads_the_first_key_after_a_byte_order_mark() {
+        with_env_file("bom", "\u{feff}TINA4_NO_BROWSER=true\n", |p| {
+            assert!(read_dotenv_bool_from(p, "TINA4_NO_BROWSER"));
+        });
     }
 
     #[test]

@@ -289,6 +289,19 @@ fn interactive_features() -> Vec<Feature> {
     ]
 }
 
+/// The text of a `.env` file with a leading UTF-8 byte-order mark removed.
+///
+/// Windows PowerShell 5.1's `-Encoding utf8` writes one, as does any editor
+/// saving "UTF-8 with BOM", and `str::trim` does not strip it: U+FEFF is not
+/// Unicode whitespace. Every `.env` reader here splits lines
+/// and then keys on `=`, so the mark stayed glued to the FIRST key and that
+/// variable vanished — `tina4 serve` handed the framework `\u{feff}TINA4_CSP`
+/// instead of `TINA4_CSP`, with no warning. Every reader of a `.env` must go
+/// through this before it splits lines.
+pub(crate) fn strip_utf8_bom(contents: &str) -> &str {
+    contents.strip_prefix('\u{feff}').unwrap_or(contents)
+}
+
 /// Strip at most one matching pair of wrapping quotes from a `.env` value.
 ///
 /// This replaces `trim().trim_matches('"').trim_matches('\'')`, the expression
@@ -363,7 +376,7 @@ pub(crate) fn quote_env_value(value: &str) -> String {
 fn read_env(path: &str) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
     if let Ok(contents) = fs::read_to_string(path) {
-        for line in contents.lines() {
+        for line in strip_utf8_bom(&contents).lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;

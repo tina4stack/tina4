@@ -101,7 +101,10 @@ pub fn run(yes: bool) {
         }
     };
 
-    let plan = build_plan(&raw);
+    // The backup below keeps the file byte for byte; only the rewrite drops
+    // the mark, which would otherwise hide the first key from the plan.
+    let body = crate::env_config::strip_utf8_bom(&raw);
+    let plan = build_plan(body);
     if plan.is_empty() {
         println!(
             "{} {} is already TINA4_* clean — no legacy keys found.",
@@ -131,7 +134,7 @@ pub fn run(yes: bool) {
         std::process::exit(1);
     }
 
-    let rewritten = apply_plan(&raw, &plan);
+    let rewritten = apply_plan(body, &plan);
     if let Err(e) = fs::write(env_path, rewritten) {
         eprintln!("{} could not write {}: {}", icon_warn().red(), env_path, e);
         std::process::exit(1);

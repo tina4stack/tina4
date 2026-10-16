@@ -12,6 +12,7 @@ set -e
 
 REPO="tina4stack/tina4"
 INSTALL_DIR="${TINA4_INSTALL_DIR:-/usr/local/bin}"
+MUSL_ONLY=""
 
 # Detect OS and architecture
 OS="$(uname -s)"
@@ -32,6 +33,7 @@ esac
 ANDROID=""
 if [ "$PLATFORM" = "linux" ] && { [ "$(uname -o 2>/dev/null)" = "Android" ] || [ -n "${TERMUX_VERSION:-}" ]; }; then
   ANDROID="1"
+  MUSL_ONLY="1"
   if [ -z "${TINA4_INSTALL_DIR:-}" ] && [ -n "${PREFIX:-}" ]; then
     INSTALL_DIR="${PREFIX}/bin"
   fi
@@ -40,11 +42,9 @@ fi
 case "$ARCH" in
   x86_64|amd64)  ARCH_NAME="amd64" ;;
   arm64|aarch64)  ARCH_NAME="arm64" ;;
-  i386|i486|i586|i686)
-    echo "Error: 32-bit x86 ($ARCH) is not supported - tina4 ships 64-bit builds only." >&2
-    echo "  Build from source on this machine with: cargo install tina4" >&2
-    echo "  (needs the Rust toolchain - https://rustup.rs), or use a 64-bit OS." >&2
-    exit 1 ;;
+  # 32-bit x86 is what iSH (Linux shell on iPhone/iPad) emulates. Only a static
+  # musl build is published for it, so it always takes the musl path below.
+  i386|i486|i586|i686)  ARCH_NAME="386"; MUSL_ONLY="1" ;;
   *)
     echo "Error: Unsupported architecture: $ARCH" >&2
     echo "  Prebuilt binaries cover x86_64 and arm64. Build from source with:" >&2
@@ -88,16 +88,24 @@ fi
 if [ "$PLATFORM" = "windows" ]; then
   BINARY=$(echo "$RELEASE_JSON" | grep -oE '"name": *"tina4-windows-[^"]+\.exe"' | head -1 | sed -E 's/"name": *"([^"]+)"/\1/')
 else
-  # Try the canonical name first (tina4-linux-amd64), then common alternatives.
-  # On Android the static musl build goes first (see the ANDROID note above);
-  # ${ANDROID:+...} expands to nothing everywhere else.
-  for CANDIDATE in \
-    ${ANDROID:+"tina4-linux-musl-${ARCH_NAME}"} \
+  # Android (Bionic) and 32-bit x86 (iSH on iOS) can only run the static musl
+  # build, so it is the ONLY candidate there - falling back to a glibc asset
+  # would install a binary that cannot exec.
+  if [ -n "$MUSL_ONLY" ]; then
+    CANDIDATES="tina4-linux-musl-${ARCH_NAME}"
+  else
+    CANDIDATES=""
+  fi
+  # Otherwise try the canonical name first (tina4-linux-amd64), then common alternatives.
+  [ -z "$CANDIDATES" ] && for CANDIDATE in \
     "tina4-${PLATFORM}-${ARCH_NAME}" \
     "tina4-${PLATFORM}-$([ "$ARCH_NAME" = "amd64" ] && echo x86_64 || echo "$ARCH_NAME")" \
     "tina4-$([ "$PLATFORM" = "darwin" ] && echo macos || echo "$PLATFORM")-${ARCH_NAME}" \
     "tina4-$([ "$PLATFORM" = "darwin" ] && echo macos || echo "$PLATFORM")-$([ "$ARCH_NAME" = "amd64" ] && echo x86_64 || echo "$ARCH_NAME")"
   do
+    CANDIDATES="$CANDIDATES $CANDIDATE"
+  done
+  for CANDIDATE in $CANDIDATES; do
     if echo "$RELEASE_JSON" | grep -q "\"name\": *\"${CANDIDATE}\""; then
       BINARY="$CANDIDATE"
       break
@@ -118,7 +126,7 @@ echo ""
 echo "  Tina4 CLI Installer"
 echo "  ==================="
 echo "  Version:      ${LATEST}"
-echo "  Platform:     ${PLATFORM}/${ARCH_NAME}${ANDROID:+ (Android/Termux)}"
+echo "  Platform:     ${PLATFORM}/${ARCH_NAME}${ANDROID:+ (Android/Termux)}${MUSL_ONLY:+ - static musl build}"
 echo "  Install to:   ${INSTALL_DIR}/tina4"
 echo ""
 

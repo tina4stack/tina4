@@ -118,6 +118,22 @@ fn install_python() {
         // Linux: the distro's Python (apt), then uv on top.
         if check_exists("python3") || check_exists("python") {
             println!("  {} Python already installed", icon_ok().green());
+        } else if check_exists("apk") {
+            // Alpine - including iSH on iOS, which runs as root with no sudo.
+            // python3 ONLY: `apk add` is all-or-nothing, and older Alpine
+            // releases (iSH's App Store snapshot is v3.14) have no `uv`
+            // package, so asking for both would install neither. uv is
+            // added best-effort here and otherwise by ensure_uv_unix below.
+            run_install_commands(&[
+                ("apk", &["add", "python3"]),
+                ("sudo", &["apk", "add", "python3"]),
+            ]);
+            let _ = Command::new("apk")
+                .args(["add", "uv"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            warn_if_python_too_old();
         } else {
             run_install_commands(&[(
                 "sudo",
@@ -637,6 +653,44 @@ fn install_codeql() {
             ])
             .status();
         println!("  {} Pre-check a repo with: {}", icon_info().blue(), "tina4 codeql".cyan());
+    }
+}
+
+/// tina4-python needs Python 3.12+. Older Alpine releases ship older Python
+/// (iSH's App Store snapshot is Alpine v3.14, which has 3.9), so say so plainly
+/// instead of letting `uv tool install` fail with a resolver error later.
+fn warn_if_python_too_old() {
+    let out = get_version("python3", "--version");
+    if let Some((major, minor)) = parse_python_version(&out) {
+        if (major, minor) < (3, 12) {
+            println!(
+                "  {} Python {}.{} is too old - Tina4 needs 3.12+. On Alpine/iSH, point \
+                 /etc/apk/repositories at Alpine v3.20 or newer, then: apk upgrade -U && apk add python3",
+                icon_warn().yellow(),
+                major,
+                minor
+            );
+        }
+    }
+}
+
+/// "Python 3.9.18" -> (3, 9). None when the text is not a Python version line.
+fn parse_python_version(text: &str) -> Option<(u32, u32)> {
+    let ver = text.trim().strip_prefix("Python ")?;
+    let mut parts = ver.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+#[cfg(test)]
+mod python_version_tests {
+    #[test]
+    fn parses_python_version_lines() {
+        assert_eq!(super::parse_python_version("Python 3.9.18\n"), Some((3, 9)));
+        assert_eq!(super::parse_python_version("Python 3.12.4"), Some((3, 12)));
+        assert_eq!(super::parse_python_version(""), None);
+        assert_eq!(super::parse_python_version("command not found"), None);
     }
 }
 

@@ -2643,17 +2643,21 @@ fn get_binary_name_candidates() -> Vec<String> {
     // be replaced by a musl build, and Android must never get the glibc build:
     // it has no glibc loader, so the "updated" binary would not even exec.
     let musl_first = cfg!(target_env = "musl") || console::is_android();
-    binary_name_candidates(
-        cfg!(target_os = "macos"),
-        cfg!(target_os = "windows"),
-        cfg!(target_arch = "aarch64"),
-        musl_first,
-    )
+    let arch = if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else if cfg!(target_arch = "x86") {
+        "x86" // iSH on iOS: only a static musl build exists
+    } else {
+        "x86_64"
+    };
+    binary_name_candidates(cfg!(target_os = "macos"), cfg!(target_os = "windows"), arch, musl_first)
 }
 
 /// Release asset names to try, best match first. Pure, so the platform matrix
 /// is unit-tested without needing each platform to run the tests.
-fn binary_name_candidates(macos: bool, windows: bool, aarch64: bool, musl_first: bool) -> Vec<String> {
+fn binary_name_candidates(macos: bool, windows: bool, arch: &str, musl_first: bool) -> Vec<String> {
+    // 32-bit x86 is only ever published as a static musl build.
+    let musl_first = musl_first || arch == "x86";
     let ext = if windows { ".exe" } else { "" };
 
     let os_variants: Vec<&str> = if macos {
@@ -2668,10 +2672,10 @@ fn binary_name_candidates(macos: bool, windows: bool, aarch64: bool, musl_first:
         vec!["linux"]
     };
 
-    let arch_variants: Vec<&str> = if aarch64 {
-        vec!["arm64", "aarch64"]
-    } else {
-        vec!["amd64", "x86_64"]
+    let arch_variants: Vec<&str> = match arch {
+        "aarch64" => vec!["arm64", "aarch64"],
+        "x86" => vec!["386"],
+        _ => vec!["amd64", "x86_64"],
     };
 
     let mut names = Vec::new();
@@ -3157,7 +3161,7 @@ mod tests {
 
     #[test]
     fn glibc_linux_updates_to_the_glibc_asset() {
-        let names = super::binary_name_candidates(false, false, true, false);
+        let names = super::binary_name_candidates(false, false, "aarch64", false);
         assert_eq!(names[0], "tina4-linux-arm64");
         assert!(names.iter().all(|n| !n.contains("musl")));
     }
@@ -3166,26 +3170,34 @@ mod tests {
     fn musl_or_android_updates_only_to_the_musl_asset() {
         // Termux (Bionic) cannot exec the glibc build, so it must never be a
         // fallback: every candidate is a musl asset.
-        let arm = super::binary_name_candidates(false, false, true, true);
+        let arm = super::binary_name_candidates(false, false, "aarch64", true);
         assert_eq!(arm[0], "tina4-linux-musl-arm64");
         assert!(arm.iter().all(|n| n.starts_with("tina4-linux-musl-")));
-        let x64 = super::binary_name_candidates(false, false, false, true);
+        let x64 = super::binary_name_candidates(false, false, "x86_64", true);
         assert_eq!(x64[0], "tina4-linux-musl-amd64");
     }
 
     #[test]
     fn musl_flag_does_not_change_macos_or_windows() {
-        assert_eq!(super::binary_name_candidates(true, false, true, true)[0], "tina4-darwin-arm64");
-        assert_eq!(super::binary_name_candidates(false, true, false, true)[0], "tina4-windows-amd64.exe");
+        assert_eq!(super::binary_name_candidates(true, false, "aarch64", true)[0], "tina4-darwin-arm64");
+        assert_eq!(super::binary_name_candidates(false, true, "x86_64", true)[0], "tina4-windows-amd64.exe");
     }
 
     #[test]
     fn every_musl_candidate_is_a_published_release_asset() {
         // Names must match release.yml's matrix exactly, or update 404s.
-        for aarch64 in [false, true] {
-            let first = &super::binary_name_candidates(false, false, aarch64, true)[0];
-            assert!(["tina4-linux-musl-amd64", "tina4-linux-musl-arm64"].contains(&first.as_str()));
+        for arch in ["x86_64", "aarch64", "x86"] {
+            let first = &super::binary_name_candidates(false, false, arch, true)[0];
+            assert!(["tina4-linux-musl-amd64", "tina4-linux-musl-arm64", "tina4-linux-musl-386"]
+                .contains(&first.as_str()));
         }
+    }
+
+    #[test]
+    fn i386_ish_on_ios_only_gets_the_musl_386_asset() {
+        // iSH emulates 32-bit x86; there is no glibc i386 build to fall back to.
+        let names = super::binary_name_candidates(false, false, "x86", false);
+        assert_eq!(names, vec!["tina4-linux-musl-386".to_string()]);
     }
 
     // ---- v2 cleanup: which binary is old ---------------------------------

@@ -103,6 +103,17 @@ fn install_python() {
                 .stderr(std::process::Stdio::inherit())
                 .status();
         }
+    } else if console::is_android() {
+        // Termux: no sudo, and apt's python3.12 package names do not exist.
+        // Termux packages both Python and uv (built against Bionic) - use
+        // them. The astral.sh installer has no Android build, and
+        // `uv python install` has no Android interpreters to download, so
+        // neither is attempted here.
+        if !(check_exists("python3") || check_exists("python")) || !check_exists("uv") {
+            run_install_commands(&[("pkg", &["install", "-y", "python", "uv"])]);
+        } else {
+            println!("  {} Python and uv already installed", icon_ok().green());
+        }
     } else {
         // Linux: the distro's Python (apt), then uv on top.
         if check_exists("python3") || check_exists("python") {

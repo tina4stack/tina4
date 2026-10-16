@@ -24,6 +24,19 @@ case "$OS" in
   *) echo "Error: Unsupported OS: $OS" >&2; exit 1 ;;
 esac
 
+# Android (Termux) reports itself as Linux, but it has no glibc: the libc is
+# Bionic, so the glibc build fails to exec with "GLIBC_x.y not found" or a
+# misleading "No such file or directory" (its loader is missing). The static
+# musl build has no loader dependency and runs there. Termux also has no
+# /usr/local/bin - its binaries live in $PREFIX/bin.
+ANDROID=""
+if [ "$PLATFORM" = "linux" ] && { [ "$(uname -o 2>/dev/null)" = "Android" ] || [ -n "${TERMUX_VERSION:-}" ]; }; then
+  ANDROID="1"
+  if [ -z "${TINA4_INSTALL_DIR:-}" ] && [ -n "${PREFIX:-}" ]; then
+    INSTALL_DIR="${PREFIX}/bin"
+  fi
+fi
+
 case "$ARCH" in
   x86_64|amd64)  ARCH_NAME="amd64" ;;
   arm64|aarch64)  ARCH_NAME="arm64" ;;
@@ -75,8 +88,11 @@ fi
 if [ "$PLATFORM" = "windows" ]; then
   BINARY=$(echo "$RELEASE_JSON" | grep -oE '"name": *"tina4-windows-[^"]+\.exe"' | head -1 | sed -E 's/"name": *"([^"]+)"/\1/')
 else
-  # Try the canonical name first (tina4-linux-amd64), then common alternatives
+  # Try the canonical name first (tina4-linux-amd64), then common alternatives.
+  # On Android the static musl build goes first (see the ANDROID note above);
+  # ${ANDROID:+...} expands to nothing everywhere else.
   for CANDIDATE in \
+    ${ANDROID:+"tina4-linux-musl-${ARCH_NAME}"} \
     "tina4-${PLATFORM}-${ARCH_NAME}" \
     "tina4-${PLATFORM}-$([ "$ARCH_NAME" = "amd64" ] && echo x86_64 || echo "$ARCH_NAME")" \
     "tina4-$([ "$PLATFORM" = "darwin" ] && echo macos || echo "$PLATFORM")-${ARCH_NAME}" \
@@ -102,7 +118,7 @@ echo ""
 echo "  Tina4 CLI Installer"
 echo "  ==================="
 echo "  Version:      ${LATEST}"
-echo "  Platform:     ${PLATFORM}/${ARCH_NAME}"
+echo "  Platform:     ${PLATFORM}/${ARCH_NAME}${ANDROID:+ (Android/Termux)}"
 echo "  Install to:   ${INSTALL_DIR}/tina4"
 echo ""
 

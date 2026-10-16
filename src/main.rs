@@ -2639,17 +2639,36 @@ fn get_latest_version() -> Option<String> {
 /// Return a list of possible binary names to try, handling naming
 /// variations across releases (amd64 vs x86_64, darwin vs macos).
 fn get_binary_name_candidates() -> Vec<String> {
-    let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+    // Never let a self-update swap libc. A musl build (containers, Termux) must
+    // be replaced by a musl build, and Android must never get the glibc build:
+    // it has no glibc loader, so the "updated" binary would not even exec.
+    let musl_first = cfg!(target_env = "musl") || console::is_android();
+    binary_name_candidates(
+        cfg!(target_os = "macos"),
+        cfg!(target_os = "windows"),
+        cfg!(target_arch = "aarch64"),
+        musl_first,
+    )
+}
 
-    let os_variants: Vec<&str> = if cfg!(target_os = "macos") {
+/// Release asset names to try, best match first. Pure, so the platform matrix
+/// is unit-tested without needing each platform to run the tests.
+fn binary_name_candidates(macos: bool, windows: bool, aarch64: bool, musl_first: bool) -> Vec<String> {
+    let ext = if windows { ".exe" } else { "" };
+
+    let os_variants: Vec<&str> = if macos {
         vec!["darwin", "macos"]
-    } else if cfg!(target_os = "windows") {
+    } else if windows {
         vec!["windows"]
+    } else if musl_first {
+        // Only the musl asset: falling back to the glibc one would install a
+        // binary that cannot run here.
+        vec!["linux-musl"]
     } else {
         vec!["linux"]
     };
 
-    let arch_variants: Vec<&str> = if cfg!(target_arch = "aarch64") {
+    let arch_variants: Vec<&str> = if aarch64 {
         vec!["arm64", "aarch64"]
     } else {
         vec!["amd64", "x86_64"]
@@ -3133,6 +3152,41 @@ Always read and follow `.claude/skills/tina4-js/SKILL.md` when working with this
 
 #[cfg(test)]
 mod tests {
+
+    // ---- self-update asset selection: never swap libc ---------------------
+
+    #[test]
+    fn glibc_linux_updates_to_the_glibc_asset() {
+        let names = super::binary_name_candidates(false, false, true, false);
+        assert_eq!(names[0], "tina4-linux-arm64");
+        assert!(names.iter().all(|n| !n.contains("musl")));
+    }
+
+    #[test]
+    fn musl_or_android_updates_only_to_the_musl_asset() {
+        // Termux (Bionic) cannot exec the glibc build, so it must never be a
+        // fallback: every candidate is a musl asset.
+        let arm = super::binary_name_candidates(false, false, true, true);
+        assert_eq!(arm[0], "tina4-linux-musl-arm64");
+        assert!(arm.iter().all(|n| n.starts_with("tina4-linux-musl-")));
+        let x64 = super::binary_name_candidates(false, false, false, true);
+        assert_eq!(x64[0], "tina4-linux-musl-amd64");
+    }
+
+    #[test]
+    fn musl_flag_does_not_change_macos_or_windows() {
+        assert_eq!(super::binary_name_candidates(true, false, true, true)[0], "tina4-darwin-arm64");
+        assert_eq!(super::binary_name_candidates(false, true, false, true)[0], "tina4-windows-amd64.exe");
+    }
+
+    #[test]
+    fn every_musl_candidate_is_a_published_release_asset() {
+        // Names must match release.yml's matrix exactly, or update 404s.
+        for aarch64 in [false, true] {
+            let first = &super::binary_name_candidates(false, false, aarch64, true)[0];
+            assert!(["tina4-linux-musl-amd64", "tina4-linux-musl-arm64"].contains(&first.as_str()));
+        }
+    }
 
     // ---- v2 cleanup: which binary is old ---------------------------------
     //

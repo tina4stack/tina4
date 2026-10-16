@@ -74,6 +74,16 @@ pub fn is_windows() -> bool {
     cfg!(target_os = "windows")
 }
 
+/// True on Android (Termux). Checked at RUNTIME as well as compile time: the
+/// release binary Termux users get is the static musl build, which is compiled
+/// for `target_os = "linux"`, so `cfg!` alone would miss it. Android has Bionic,
+/// not glibc, so anything that picks a binary or a package manager needs this.
+pub fn is_android() -> bool {
+    cfg!(target_os = "android")
+        || std::env::var_os("TERMUX_VERSION").is_some()
+        || std::env::var("PREFIX").is_ok_and(|p| p.contains("/com.termux/"))
+}
+
 /// Run a shell command string cross-platform.
 /// On Unix uses `sh -c`, on Windows uses `cmd /C`.
 pub fn shell_exec(cmd: &str) -> std::io::Result<std::process::ExitStatus> {

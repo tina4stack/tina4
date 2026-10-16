@@ -2639,17 +2639,28 @@ fn get_latest_version() -> Option<String> {
 /// Return a list of possible binary names to try, handling naming
 /// variations across releases (amd64 vs x86_64, darwin vs macos).
 fn get_binary_name_candidates() -> Vec<String> {
-    let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+    binary_name_candidates(
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        cfg!(target_env = "musl"),
+    )
+}
 
-    let os_variants: Vec<&str> = if cfg!(target_os = "macos") {
-        vec!["darwin", "macos"]
-    } else if cfg!(target_os = "windows") {
-        vec!["windows"]
-    } else {
-        vec!["linux"]
+fn binary_name_candidates(os: &str, arch: &str, musl: bool) -> Vec<String> {
+    let ext = if os == "windows" { ".exe" } else { "" };
+
+    // Preserve the running build's libc on update, including musl builds used
+    // on Android and Alpine. Never fall back to a glibc asset: a successful
+    // download would replace a working CLI with one that cannot start.
+    let os_variants: Vec<&str> = match os {
+        "macos" => vec!["darwin", "macos"],
+        "windows" => vec!["windows"],
+        "android" => vec!["linux-musl"],
+        "linux" if musl => vec!["linux-musl"],
+        _ => vec!["linux"],
     };
 
-    let arch_variants: Vec<&str> = if cfg!(target_arch = "aarch64") {
+    let arch_variants: Vec<&str> = if arch == "aarch64" {
         vec!["arm64", "aarch64"]
     } else {
         vec!["amd64", "x86_64"]
@@ -3133,6 +3144,57 @@ Always read and follow `.claude/skills/tina4-js/SKILL.md` when working with this
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn update_preserves_musl_on_both_linux_architectures() {
+        for (arch, aliases) in [
+            ("aarch64", ["arm64", "aarch64"]),
+            ("x86_64", ["amd64", "x86_64"]),
+        ] {
+            let expected: Vec<String> = aliases
+                .iter()
+                .map(|alias| format!("tina4-linux-musl-{alias}"))
+                .collect();
+            assert_eq!(super::binary_name_candidates("linux", arch, true), expected);
+            assert_eq!(super::binary_name_candidates("android", arch, false), expected);
+        }
+    }
+
+    #[test]
+    fn update_does_not_fall_back_to_glibc_when_musl_assets_are_missing() {
+        let candidates = super::binary_name_candidates("linux", "aarch64", true);
+        let mut attempted = Vec::new();
+        let result = super::download_first_candidate(&candidates, |name| {
+            attempted.push(name.to_string());
+            super::DownloadOutcome::Http
+        });
+        assert!(matches!(result, Err(super::DownloadFailure::NoAssetForPlatform)));
+        assert_eq!(attempted, vec!["tina4-linux-musl-arm64", "tina4-linux-musl-aarch64"]);
+    }
+
+    #[test]
+    fn update_keeps_existing_non_musl_asset_names() {
+        for (os, arch, expected) in [
+            ("linux", "aarch64", vec!["tina4-linux-arm64", "tina4-linux-aarch64"]),
+            ("linux", "x86_64", vec!["tina4-linux-amd64", "tina4-linux-x86_64"]),
+            ("macos", "aarch64", vec!["tina4-darwin-arm64", "tina4-darwin-aarch64", "tina4-macos-arm64", "tina4-macos-aarch64"]),
+            ("windows", "x86_64", vec!["tina4-windows-amd64.exe", "tina4-windows-x86_64.exe"]),
+        ] {
+            assert_eq!(super::binary_name_candidates(os, arch, false), expected);
+        }
+    }
+
+    #[test]
+    fn update_uses_the_compiled_target_not_android_environment_variables() {
+        assert_eq!(
+            super::get_binary_name_candidates(),
+            super::binary_name_candidates(
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+                cfg!(target_env = "musl"),
+            ),
+        );
+    }
 
     // ---- v2 cleanup: which binary is old ---------------------------------
     //

@@ -11,7 +11,7 @@
 set -e
 
 REPO="tina4stack/tina4"
-INSTALL_DIR="${TINA4_INSTALL_DIR:-/usr/local/bin}"
+DEFAULT_INSTALL_DIR="/usr/local/bin"
 
 # Detect OS and architecture
 OS="$(uname -s)"
@@ -19,7 +19,18 @@ ARCH="$(uname -m)"
 
 case "$OS" in
   Darwin)  PLATFORM="darwin" ;;
-  Linux)   PLATFORM="linux" ;;
+  Linux)
+    PLATFORM="linux"
+    # Android uses Bionic, not glibc: the regular Linux binary cannot find
+    # /lib/ld-linux-*.so.*. Use the static musl release instead. Termux's
+    # PREFIX/bin is writable and already on PATH; other Android shells can
+    # use a per-user directory. Keep TINA4_INSTALL_DIR as an explicit override.
+    if [ -n "${TERMUX_VERSION:-}" ] || [ -n "${ANDROID_ROOT:-}" ]; then
+      PLATFORM="linux-musl"
+      DEFAULT_INSTALL_DIR="${PREFIX:+${PREFIX}/bin}"
+      DEFAULT_INSTALL_DIR="${DEFAULT_INSTALL_DIR:-${HOME}/.local/bin}"
+    fi
+    ;;
   MINGW*|MSYS*|CYGWIN*) PLATFORM="windows" ;;
   *) echo "Error: Unsupported OS: $OS" >&2; exit 1 ;;
 esac
@@ -38,6 +49,8 @@ case "$ARCH" in
     echo "    cargo install tina4   (needs Rust - https://rustup.rs)" >&2
     exit 1 ;;
 esac
+
+INSTALL_DIR="${TINA4_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
 
 # Helper: download a URL to stdout
 fetch() {

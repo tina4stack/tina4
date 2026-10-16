@@ -11,7 +11,7 @@ A single Rust binary that auto-detects your project language, compiles SCSS, wat
 
 ## Install
 
-### macOS / Linux
+### macOS / Linux / Android (Termux)
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/tina4stack/tina4/main/install.sh | sh
@@ -23,11 +23,13 @@ Or with `wget`:
 wget -qO- https://raw.githubusercontent.com/tina4stack/tina4/main/install.sh | sh
 ```
 
-The script auto-detects your OS and architecture, downloads the correct binary from the latest GitHub release, and installs it to `/usr/local/bin`. Override the install location with:
+The script auto-detects your OS and architecture, downloads the correct binary from the latest GitHub release, and installs it to `/usr/local/bin`. On Android/Termux it selects the static musl binary (no glibc loader needed) and installs to `$PREFIX/bin`, or `$HOME/.local/bin` if `PREFIX` is unset. Override the install location with:
 
 ```sh
-TINA4_INSTALL_DIR=~/.local/bin curl -fsSL https://raw.githubusercontent.com/tina4stack/tina4/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/tina4stack/tina4/main/install.sh | TINA4_INSTALL_DIR="$HOME/.local/bin" sh
 ```
+
+If you use `$HOME/.local/bin`, ensure it is on your `PATH`. Android detection uses `TERMUX_VERSION` or `ANDROID_ROOT`; this enables CLI installation, not a guarantee that every framework runtime supports Android.
 
 ### Windows (PowerShell)
 

@@ -28,12 +28,14 @@ esac
 # Android (Termux) reports itself as Linux, but it has no glibc: the libc is
 # Bionic, so the glibc build fails to exec with "GLIBC_x.y not found" or a
 # misleading "No such file or directory" (its loader is missing). The static
-# musl build has no loader dependency and runs there. Termux also has no
+# musl build is no way out either: Termux's termux-exec runs binaries through
+# /system/bin/linker64, which rejects a non-PIE static binary ("unexpected
+# e_type: 2"), and musl's resolver finds no /etc/resolv.conf there. Only the
+# native Android build (tina4-android-*) runs. Termux also has no
 # /usr/local/bin - its binaries live in $PREFIX/bin.
 ANDROID=""
 if [ "$PLATFORM" = "linux" ] && { [ "$(uname -o 2>/dev/null)" = "Android" ] || [ -n "${TERMUX_VERSION:-}" ]; }; then
   ANDROID="1"
-  MUSL_ONLY="1"
   if [ -z "${TINA4_INSTALL_DIR:-}" ] && [ -n "${PREFIX:-}" ]; then
     INSTALL_DIR="${PREFIX}/bin"
   fi
@@ -88,10 +90,12 @@ fi
 if [ "$PLATFORM" = "windows" ]; then
   BINARY=$(echo "$RELEASE_JSON" | grep -oE '"name": *"tina4-windows-[^"]+\.exe"' | head -1 | sed -E 's/"name": *"([^"]+)"/\1/')
 else
-  # Android (Bionic) and 32-bit x86 (iSH on iOS) can only run the static musl
-  # build, so it is the ONLY candidate there - falling back to a glibc asset
-  # would install a binary that cannot exec.
-  if [ -n "$MUSL_ONLY" ]; then
+  # Android (Termux) can only run the native Android build, and 32-bit x86
+  # (iSH on iOS) only the static musl build, so each is the ONLY candidate
+  # there - any fallback would install a binary that cannot exec.
+  if [ -n "$ANDROID" ]; then
+    CANDIDATES="tina4-android-${ARCH_NAME}"
+  elif [ -n "$MUSL_ONLY" ]; then
     CANDIDATES="tina4-linux-musl-${ARCH_NAME}"
   else
     CANDIDATES=""
@@ -126,7 +130,7 @@ echo ""
 echo "  Tina4 CLI Installer"
 echo "  ==================="
 echo "  Version:      ${LATEST}"
-echo "  Platform:     ${PLATFORM}/${ARCH_NAME}${ANDROID:+ (Android/Termux)}${MUSL_ONLY:+ - static musl build}"
+echo "  Platform:     ${PLATFORM}/${ARCH_NAME}${ANDROID:+ (Android/Termux) - native Android build}${MUSL_ONLY:+ - static musl build}"
 echo "  Install to:   ${INSTALL_DIR}/tina4"
 echo ""
 

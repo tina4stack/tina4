@@ -1945,7 +1945,7 @@ fn handle_update() {
     // Step 3: Download and replace binary — try multiple name variants
     let candidates = get_binary_name_candidates();
 
-    let current_exe = match std::env::current_exe() {
+    let current_exe = match console::current_exe() {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{} Cannot determine current executable path: {}", icon_fail().red(), e);
@@ -2520,7 +2520,7 @@ fn clean_v2_binaries() {
     // its own -- "it does not even say tina4" -- and is left as it was; only
     // the silent deletion changes.
     if let Ok(tina4_path) = which::which("tina4") {
-        let current_exe = std::env::current_exe().unwrap_or_default();
+        let current_exe = console::current_exe().unwrap_or_default();
         if tina4_path != current_exe {
             let is_old = std::process::Command::new(&tina4_path)
                 .arg("--version")
@@ -2592,8 +2592,12 @@ fn get_latest_version() -> Option<String> {
             .output()
             .ok()?
     } else {
-        std::process::Command::new("curl")
-            .args(["-fsSL", "-H", "User-Agent: tina4-cli", "-H", "Accept: application/vnd.github+json", &api_url])
+        let Some(dl) = console::unix_downloader() else {
+            eprintln!("{} {}", icon_fail().red(), console::NO_DOWNLOADER);
+            return None;
+        };
+        std::process::Command::new(dl.program())
+            .args(dl.stdout_args(&api_url, &["User-Agent: tina4-cli", "Accept: application/vnd.github+json"]))
             .output()
             .ok()?
     };
@@ -2639,10 +2643,13 @@ fn get_latest_version() -> Option<String> {
 /// Return a list of possible binary names to try, handling naming
 /// variations across releases (amd64 vs x86_64, darwin vs macos).
 fn get_binary_name_candidates() -> Vec<String> {
-    // Never let a self-update swap libc. A musl build (containers, Termux) must
-    // be replaced by a musl build, and Android must never get the glibc build:
-    // it has no glibc loader, so the "updated" binary would not even exec.
-    let musl_first = cfg!(target_env = "musl") || console::is_android();
+    // Never let a self-update swap libc. A musl build (containers, iSH) must be
+    // replaced by a musl build, and Android (Termux) only by the native
+    // Android build: Bionic has no glibc loader, and Termux's termux-exec runs
+    // binaries through /system/bin/linker64, which rejects the non-PIE static
+    // musl build ("unexpected e_type: 2"). Checked at runtime too, so a musl
+    // binary someone forced onto Termux updates to the Android build.
+    let musl_first = cfg!(target_env = "musl");
     let arch = if cfg!(target_arch = "aarch64") {
         "aarch64"
     } else if cfg!(target_arch = "x86") {
@@ -2650,12 +2657,24 @@ fn get_binary_name_candidates() -> Vec<String> {
     } else {
         "x86_64"
     };
-    binary_name_candidates(cfg!(target_os = "macos"), cfg!(target_os = "windows"), arch, musl_first)
+    binary_name_candidates(
+        cfg!(target_os = "macos"),
+        cfg!(target_os = "windows"),
+        console::is_android(),
+        arch,
+        musl_first,
+    )
 }
 
 /// Release asset names to try, best match first. Pure, so the platform matrix
 /// is unit-tested without needing each platform to run the tests.
-fn binary_name_candidates(macos: bool, windows: bool, arch: &str, musl_first: bool) -> Vec<String> {
+fn binary_name_candidates(
+    macos: bool,
+    windows: bool,
+    android: bool,
+    arch: &str,
+    musl_first: bool,
+) -> Vec<String> {
     // 32-bit x86 is only ever published as a static musl build.
     let musl_first = musl_first || arch == "x86";
     let ext = if windows { ".exe" } else { "" };
@@ -2664,6 +2683,9 @@ fn binary_name_candidates(macos: bool, windows: bool, arch: &str, musl_first: bo
         vec!["darwin", "macos"]
     } else if windows {
         vec!["windows"]
+    } else if android {
+        // Only the native Android build runs under Termux (see above).
+        vec!["android"]
     } else if musl_first {
         // Only the musl asset: falling back to the glibc one would install a
         // binary that cannot run here.
@@ -2774,6 +2796,63 @@ enum DownloadFailure {
 /// `ExitStatus` and not `.code()`: treating "no code" as a server refusal
 /// would resume the loop over a failure that had already written a truncated
 /// file to disk.
+/// Download with wget (Alpine / iSH ship busybox wget and no curl). stderr is
+/// captured to classify the failure, then passed through so the user still
+/// sees wget's own reason.
+fn download_with_wget(url: &str, dest: &str) -> DownloadOutcome {
+    match std::process::Command::new("wget")
+        .args(console::Downloader::Wget.file_args(url, dest))
+        .stdout(std::process::Stdio::inherit())
+        .output()
+    {
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            eprint!("{}", stderr);
+            if out.status.success() {
+                DownloadOutcome::Ok
+            } else {
+                classify_wget_failure(out.status.code(), &stderr)
+            }
+        }
+        Err(e) => DownloadOutcome::Local(FailureCause::Unclassified(format!(
+            "the downloader could not be started: {}",
+            e
+        ))),
+    }
+}
+
+/// The wget version of `classify_curl_status`: only a server refusal means
+/// another asset name could help. GNU wget says so with exit 8; busybox wget
+/// exits 1 for everything, so its message has to tell the cases apart.
+fn classify_wget_failure(code: Option<i32>, stderr: &str) -> DownloadOutcome {
+    let msg = stderr.to_ascii_lowercase();
+    if code == Some(8) || msg.contains("server returned error") {
+        return DownloadOutcome::Http;
+    }
+    if code == Some(4)
+        || code == Some(5)
+        || msg.contains("bad address")
+        || msg.contains("can't connect")
+        || msg.contains("connection refused")
+        || msg.contains("timed out")
+    {
+        return DownloadOutcome::Local(FailureCause::Network(format!(
+            "wget exited {} -- it could not reach the server",
+            code.unwrap_or(-1)
+        )));
+    }
+    if code == Some(3) || msg.contains("can't open") || msg.contains("no space") {
+        return DownloadOutcome::Local(FailureCause::Write(format!(
+            "wget exited {} -- it could not write the file",
+            code.unwrap_or(-1)
+        )));
+    }
+    DownloadOutcome::Local(FailureCause::Unclassified(match code {
+        Some(c) => format!("wget exited {}", c),
+        None => "wget was killed by a signal".to_string(),
+    }))
+}
+
 fn classify_curl_status(status: &std::process::ExitStatus) -> DownloadOutcome {
     if status.success() {
         return DownloadOutcome::Ok;
@@ -2915,7 +2994,7 @@ fn report_failed_download(
                     lead
                 ),
                 FailureCause::Unclassified(_) => {
-                    format!("{}curl printed its own reason above.", lead)
+                    format!("{}The downloader printed its own reason above.", lead)
                 }
             }
         }
@@ -3000,7 +3079,7 @@ fn report_single_download_failure(
                     lead, url
                 ),
                 FailureCause::Unclassified(_) => format!(
-                    "{}curl printed its own reason above. The file is at:\n  {}",
+                    "{}The downloader printed its own reason above. The file is at:\n  {}",
                     lead, url
                 ),
             }
@@ -3046,9 +3125,17 @@ fn download_file_classified(url: &str, dest: &std::path::Path) -> DownloadOutcom
                 .status()
         }
     } else {
-        std::process::Command::new("curl")
-            .args(["-fsSL", "-o", &dest_str, url])
-            .status()
+        match console::unix_downloader() {
+            Some(console::Downloader::Curl) => std::process::Command::new("curl")
+                .args(["-fsSL", "-o", &dest_str, url])
+                .status(),
+            Some(console::Downloader::Wget) => return download_with_wget(url, &dest_str),
+            None => {
+                return DownloadOutcome::Local(FailureCause::Unclassified(
+                    console::NO_DOWNLOADER.to_string(),
+                ))
+            }
+        }
     };
 
     match status {
@@ -3161,43 +3248,112 @@ mod tests {
 
     #[test]
     fn glibc_linux_updates_to_the_glibc_asset() {
-        let names = super::binary_name_candidates(false, false, "aarch64", false);
+        let names = super::binary_name_candidates(false, false, false, "aarch64", false);
         assert_eq!(names[0], "tina4-linux-arm64");
         assert!(names.iter().all(|n| !n.contains("musl")));
     }
 
     #[test]
-    fn musl_or_android_updates_only_to_the_musl_asset() {
-        // Termux (Bionic) cannot exec the glibc build, so it must never be a
-        // fallback: every candidate is a musl asset.
-        let arm = super::binary_name_candidates(false, false, "aarch64", true);
+    fn musl_linux_updates_only_to_the_musl_asset() {
+        // A static musl build (containers, Alpine) must stay musl: the glibc
+        // build may not even have a loader there.
+        let arm = super::binary_name_candidates(false, false, false, "aarch64", true);
         assert_eq!(arm[0], "tina4-linux-musl-arm64");
         assert!(arm.iter().all(|n| n.starts_with("tina4-linux-musl-")));
-        let x64 = super::binary_name_candidates(false, false, "x86_64", true);
+        let x64 = super::binary_name_candidates(false, false, false, "x86_64", true);
         assert_eq!(x64[0], "tina4-linux-musl-amd64");
     }
 
     #[test]
-    fn musl_flag_does_not_change_macos_or_windows() {
-        assert_eq!(super::binary_name_candidates(true, false, "aarch64", true)[0], "tina4-darwin-arm64");
-        assert_eq!(super::binary_name_candidates(false, true, "x86_64", true)[0], "tina4-windows-amd64.exe");
+    fn termux_updates_only_to_the_android_asset() {
+        // Termux (Bionic, termux-exec) can run neither the glibc build nor the
+        // non-PIE static musl build, so neither may ever be a fallback.
+        let names = super::binary_name_candidates(false, false, true, "aarch64", false);
+        assert_eq!(names[0], "tina4-android-arm64");
+        assert!(names.iter().all(|n| n.starts_with("tina4-android-")));
     }
 
     #[test]
-    fn every_musl_candidate_is_a_published_release_asset() {
+    fn a_musl_build_on_termux_moves_to_the_android_asset() {
+        // Someone who forced the musl build onto Termux gets the native build
+        // on their next update instead of the same broken one.
+        let names = super::binary_name_candidates(false, false, true, "aarch64", true);
+        assert_eq!(names[0], "tina4-android-arm64");
+        assert!(names.iter().all(|n| !n.contains("musl")));
+    }
+
+    #[test]
+    fn musl_and_android_flags_do_not_change_macos_or_windows() {
+        assert_eq!(super::binary_name_candidates(true, false, true, "aarch64", true)[0], "tina4-darwin-arm64");
+        assert_eq!(super::binary_name_candidates(false, true, true, "x86_64", true)[0], "tina4-windows-amd64.exe");
+    }
+
+    #[test]
+    fn every_musl_and_android_candidate_is_a_published_release_asset() {
         // Names must match release.yml's matrix exactly, or update 404s.
+        let published = [
+            "tina4-linux-musl-amd64",
+            "tina4-linux-musl-arm64",
+            "tina4-linux-musl-386",
+            "tina4-android-arm64",
+        ];
         for arch in ["x86_64", "aarch64", "x86"] {
-            let first = &super::binary_name_candidates(false, false, arch, true)[0];
-            assert!(["tina4-linux-musl-amd64", "tina4-linux-musl-arm64", "tina4-linux-musl-386"]
-                .contains(&first.as_str()));
+            let first = &super::binary_name_candidates(false, false, false, arch, true)[0];
+            assert!(published.contains(&first.as_str()), "{first}");
         }
+        let android = &super::binary_name_candidates(false, false, true, "aarch64", false)[0];
+        assert!(published.contains(&android.as_str()), "{android}");
     }
 
     #[test]
     fn i386_ish_on_ios_only_gets_the_musl_386_asset() {
         // iSH emulates 32-bit x86; there is no glibc i386 build to fall back to.
-        let names = super::binary_name_candidates(false, false, "x86", false);
+        let names = super::binary_name_candidates(false, false, false, "x86", false);
         assert_eq!(names, vec!["tina4-linux-musl-386".to_string()]);
+    }
+
+    // ---- wget fallback (Alpine / iSH have no curl) -------------------------
+
+    #[test]
+    fn a_wget_404_means_try_the_next_asset_name() {
+        use super::{classify_wget_failure, DownloadOutcome};
+        // GNU wget: exit 8. busybox wget: exit 1, so only the message says so.
+        assert_eq!(classify_wget_failure(Some(8), ""), DownloadOutcome::Http);
+        assert_eq!(
+            classify_wget_failure(Some(1), "wget: server returned error: HTTP/1.1 404 Not Found\n"),
+            DownloadOutcome::Http
+        );
+    }
+
+    #[test]
+    fn a_wget_network_or_disk_failure_is_local_not_a_missing_asset() {
+        use super::{classify_wget_failure, DownloadOutcome, FailureCause};
+        assert!(matches!(
+            classify_wget_failure(Some(1), "wget: bad address 'github.com'\n"),
+            DownloadOutcome::Local(FailureCause::Network(_))
+        ));
+        assert!(matches!(classify_wget_failure(Some(4), ""), DownloadOutcome::Local(FailureCause::Network(_))));
+        assert!(matches!(
+            classify_wget_failure(Some(1), "wget: can't open '/x/tina4.tmp': Permission denied\n"),
+            DownloadOutcome::Local(FailureCause::Write(_))
+        ));
+        assert!(matches!(classify_wget_failure(Some(1), "?"), DownloadOutcome::Local(FailureCause::Unclassified(_))));
+    }
+
+    #[test]
+    fn wget_and_curl_get_equivalent_arguments() {
+        use crate::console::Downloader;
+        let url = "https://api.github.com/x";
+        assert_eq!(
+            Downloader::Wget.stdout_args(url, &["User-Agent: tina4-cli"]),
+            vec!["-qO-", "--header", "User-Agent: tina4-cli", url]
+        );
+        assert_eq!(
+            Downloader::Curl.stdout_args(url, &["User-Agent: tina4-cli"]),
+            vec!["-fsSL", "-H", "User-Agent: tina4-cli", url]
+        );
+        assert_eq!(Downloader::Wget.file_args(url, "/tmp/t"), vec!["-q", "-O", "/tmp/t", url]);
+        assert_eq!(Downloader::Wget.stdout_command(url), format!("wget -qO- {url}"));
     }
 
     // ---- v2 cleanup: which binary is old ---------------------------------

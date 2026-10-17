@@ -133,12 +133,18 @@ fn install_python() {
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status();
-            warn_if_python_too_old();
         } else {
             run_install_commands(&[(
                 "sudo",
                 &["apt-get", "install", "-y", "python3.12", "python3.12-venv"],
             )]);
+        }
+        // Checked whether Python was just installed or already there. Elsewhere
+        // uv can fetch its own 3.12+ for tina4python, so only warn; on 32-bit
+        // x86 (iSH) uv itself dies with SIGILL, so nothing below can work.
+        let too_old = check_exists("apk") && python_too_old();
+        if too_old && cfg!(target_arch = "x86") {
+            return;
         }
         ensure_uv_unix();
     }
@@ -157,18 +163,25 @@ fn ensure_uv_unix() {
         println!("  {} uv already installed", icon_ok().green());
         return;
     }
+    let Some(dl) = crate::console::unix_downloader() else {
+        eprintln!("  {} Cannot install uv: {}", icon_fail().red(), crate::console::NO_DOWNLOADER);
+        return;
+    };
     println!("  {} Installing uv...", icon_play().green());
     let status = Command::new("sh")
-        .args(["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"])
+        .args([
+            "-c",
+            &format!("{} | sh", dl.stdout_command("https://astral.sh/uv/install.sh")),
+        ])
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .status();
+    // A pipeline's status is its LAST command's, so a failed download still
+    // "succeeds": `sh` reads nothing and exits 0. Believe only a uv on PATH.
+    refresh_uv_path_unix();
     match status {
-        Ok(s) if s.success() => {
-            println!("  {} uv installed", icon_ok().green());
-            refresh_uv_path_unix();
-        }
-        Ok(s) => eprintln!("  {} uv installer exited with {}", icon_fail().red(), s),
+        Ok(_) if check_exists("uv") => println!("  {} uv installed", icon_ok().green()),
+        Ok(s) => eprintln!("  {} uv was not installed (installer exited with {})", icon_fail().red(), s),
         Err(e) => eprintln!("  {} Failed to launch shell: {}", icon_fail().red(), e),
     }
 }
@@ -659,19 +672,23 @@ fn install_codeql() {
 /// tina4-python needs Python 3.12+. Older Alpine releases ship older Python
 /// (iSH's App Store snapshot is Alpine v3.14, which has 3.9), so say so plainly
 /// instead of letting `uv tool install` fail with a resolver error later.
-fn warn_if_python_too_old() {
+/// True (after warning) when the installed Python is too old.
+fn python_too_old() -> bool {
     let out = get_version("python3", "--version");
     if let Some((major, minor)) = parse_python_version(&out) {
         if (major, minor) < (3, 12) {
             println!(
-                "  {} Python {}.{} is too old - Tina4 needs 3.12+. On Alpine/iSH, point \
-                 /etc/apk/repositories at Alpine v3.20 or newer, then: apk upgrade -U && apk add python3",
+                "  {} Python {}.{} is too old - Tina4 needs 3.12+, which Alpine ships from \
+                 v3.20. iSH on iOS is pinned to Alpine 3.14 (and uv does not run under its \
+                 emulator), so Python projects are not supported there yet.",
                 icon_warn().yellow(),
                 major,
                 minor
             );
+            return true;
         }
     }
+    false
 }
 
 /// "Python 3.9.18" -> (3, 9). None when the text is not a Python version line.
@@ -681,17 +698,6 @@ fn parse_python_version(text: &str) -> Option<(u32, u32)> {
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
     Some((major, minor))
-}
-
-#[cfg(test)]
-mod python_version_tests {
-    #[test]
-    fn parses_python_version_lines() {
-        assert_eq!(super::parse_python_version("Python 3.9.18\n"), Some((3, 9)));
-        assert_eq!(super::parse_python_version("Python 3.12.4"), Some((3, 12)));
-        assert_eq!(super::parse_python_version(""), None);
-        assert_eq!(super::parse_python_version("command not found"), None);
-    }
 }
 
 fn check_exists(cmd: &str) -> bool {
@@ -732,7 +738,13 @@ fn install_tina4_cli(cli_name: &str, pkg_cmd: &str, args: &[&str]) {
         println!("  {} {} already installed", icon_ok().green(), cli_name);
     } else if check_exists(pkg_cmd) {
         println!("  {} Installing {}...", icon_play().green(), cli_name);
-        let _ = Command::new(crate::console::resolve_cmd(pkg_cmd)).args(args).status();
+        match Command::new(crate::console::resolve_cmd(pkg_cmd)).args(args).status() {
+            Ok(s) if s.success() => {}
+            // Say so: a crashed installer (uv dies with SIGILL under iSH's
+            // emulator) otherwise ends the run in silence.
+            Ok(s) => eprintln!("  {} {} was not installed ({} exited with {})", icon_fail().red(), cli_name, pkg_cmd, s),
+            Err(e) => eprintln!("  {} {} was not installed: {}", icon_fail().red(), cli_name, e),
+        }
     } else {
         println!(
             "  {} Cannot install {} — {} not found",
@@ -740,5 +752,16 @@ fn install_tina4_cli(cli_name: &str, pkg_cmd: &str, args: &[&str]) {
             cli_name,
             pkg_cmd
         );
+    }
+}
+
+#[cfg(test)]
+mod python_version_tests {
+    #[test]
+    fn parses_python_version_lines() {
+        assert_eq!(super::parse_python_version("Python 3.9.18\n"), Some((3, 9)));
+        assert_eq!(super::parse_python_version("Python 3.12.4"), Some((3, 12)));
+        assert_eq!(super::parse_python_version(""), None);
+        assert_eq!(super::parse_python_version("command not found"), None);
     }
 }

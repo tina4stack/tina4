@@ -461,7 +461,7 @@ fn elevate_for_install(lang: &str, ai: AiChoice, projects_dir: &Path, name: &str
     println!("  {} Approve the Windows prompt — a new window will finish the install.", icon_info().blue());
     println!();
 
-    let Ok(exe) = std::env::current_exe() else { return false };
+    let Ok(exe) = crate::console::current_exe() else { return false };
     // Start-Process … -Verb RunAs raises the UAC prompt and launches the elevated
     // child. Environment variables do NOT cross that boundary — the elevated
     // process gets a fresh environment — so the answers ride on ARGV instead
@@ -1408,7 +1408,7 @@ fn whats_next(project_path: &Path, ai: AiChoice, elevated: bool) {
                 println!();
                 // Re-exec ourselves as `tina4 serve` inside the project so it
                 // picks up app.py/index.php/app.rb/app.ts and serves THIS project.
-                let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("tina4"));
+                let exe = crate::console::current_exe().unwrap_or_else(|_| PathBuf::from("tina4"));
                 let _ = Command::new(exe).arg("serve").current_dir(project_path).status();
             } else {
                 println!("  {} No problem — run {} when you're ready.", icon_info().blue(), "tina4 serve".cyan());

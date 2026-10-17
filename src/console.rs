@@ -74,6 +74,131 @@ pub fn is_windows() -> bool {
     cfg!(target_os = "windows")
 }
 
+/// True on Android (Termux). Checked at RUNTIME as well as compile time: the
+/// release binary Termux users get is the static musl build, which is compiled
+/// for `target_os = "linux"`, so `cfg!` alone would miss it. Android has Bionic,
+/// not glibc, so anything that picks a binary or a package manager needs this.
+pub fn is_android() -> bool {
+    cfg!(target_os = "android")
+        || std::env::var_os("TERMUX_VERSION").is_some()
+        || std::env::var("PREFIX").is_ok_and(|p| p.contains("/com.termux/"))
+}
+
+/// `std::env::current_exe()`, corrected for Termux. termux-exec launches
+/// binaries through the system linker (`/apex/.../linker64 <binary>`), so
+/// /proc/self/exe names the linker, and self-update or uninstall would act on
+/// it. termux-exec puts the real path in TERMUX_EXEC__PROC_SELF_EXE.
+pub fn current_exe() -> std::io::Result<std::path::PathBuf> {
+    let exe = std::env::current_exe()?;
+    Ok(termux_real_exe(&exe, std::env::var_os("TERMUX_EXEC__PROC_SELF_EXE")).unwrap_or(exe))
+}
+
+/// The real binary when `exe` is Android's linker and termux-exec named one.
+fn termux_real_exe(
+    exe: &std::path::Path,
+    proc_self_exe: Option<std::ffi::OsString>,
+) -> Option<std::path::PathBuf> {
+    let is_linker = exe
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n == "linker" || n == "linker64");
+    if !is_linker {
+        return None;
+    }
+    proc_self_exe.map(std::path::PathBuf::from).filter(|p| p.is_absolute())
+}
+
+#[cfg(test)]
+mod current_exe_tests {
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn termux_linker_exec_resolves_to_the_real_binary() {
+        let real = "/data/data/com.termux/files/usr/bin/tina4";
+        assert_eq!(
+            super::termux_real_exe(Path::new("/apex/com.android.runtime/bin/linker64"), Some(real.into())),
+            Some(PathBuf::from(real))
+        );
+    }
+
+    #[test]
+    fn anything_else_keeps_its_own_path() {
+        // Not the linker: a stray env var must not redirect the update.
+        let real = "/data/data/com.termux/files/usr/bin/tina4";
+        assert_eq!(super::termux_real_exe(Path::new("/usr/local/bin/tina4"), Some(real.into())), None);
+        // The linker, but termux-exec named nothing usable.
+        assert_eq!(super::termux_real_exe(Path::new("/system/bin/linker64"), None), None);
+        assert_eq!(super::termux_real_exe(Path::new("/system/bin/linker64"), Some("tina4".into())), None);
+    }
+}
+
+/// The command-line HTTP client to shell out to on Unix. curl when it is
+/// installed, otherwise wget: Alpine and iSH ship only busybox wget, Termux
+/// only curl, and most desktops have both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Downloader {
+    Curl,
+    Wget,
+}
+
+/// What to tell someone with neither downloader installed.
+pub const NO_DOWNLOADER: &str =
+    "neither curl nor wget is installed -- install one (e.g. `apk add curl`, `pkg install curl`, `apt install curl`)";
+
+pub fn unix_downloader() -> Option<Downloader> {
+    if which::which("curl").is_ok() {
+        Some(Downloader::Curl)
+    } else if which::which("wget").is_ok() {
+        Some(Downloader::Wget)
+    } else {
+        None
+    }
+}
+
+impl Downloader {
+    pub fn program(self) -> &'static str {
+        match self {
+            Downloader::Curl => "curl",
+            Downloader::Wget => "wget",
+        }
+    }
+
+    /// Arguments that print `url` to stdout, failing on an HTTP error.
+    /// `headers` are `Name: value` lines. busybox wget has no -L: it always
+    /// follows redirects, like GNU wget.
+    pub fn stdout_args(self, url: &str, headers: &[&str]) -> Vec<String> {
+        let (mut args, flag) = match self {
+            Downloader::Curl => (vec!["-fsSL".to_string()], "-H"),
+            Downloader::Wget => (vec!["-qO-".to_string()], "--header"),
+        };
+        for h in headers {
+            args.push(flag.to_string());
+            args.push(h.to_string());
+        }
+        args.push(url.to_string());
+        args
+    }
+
+    /// Arguments that save `url` to `dest`, failing on an HTTP error.
+    pub fn file_args(self, url: &str, dest: &str) -> Vec<String> {
+        match self {
+            Downloader::Curl => vec!["-fsSL", "-o", dest, url],
+            Downloader::Wget => vec!["-q", "-O", dest, url],
+        }
+        .into_iter()
+        .map(String::from)
+        .collect()
+    }
+
+    /// A shell command that prints `url` to stdout, for `... | sh` pipelines.
+    pub fn stdout_command(self, url: &str) -> String {
+        match self {
+            Downloader::Curl => format!("curl -LsSf {}", url),
+            Downloader::Wget => format!("wget -qO- {}", url),
+        }
+    }
+}
+
 /// Run a shell command string cross-platform.
 /// On Unix uses `sh -c`, on Windows uses `cmd /C`.
 pub fn shell_exec(cmd: &str) -> std::io::Result<std::process::ExitStatus> {

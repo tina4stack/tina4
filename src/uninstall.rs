@@ -24,7 +24,7 @@ struct Target {
 
 pub fn run(dry_run: bool, assume_yes: bool) {
     let global = collect_global();
-    let binary = std::env::current_exe().ok().filter(|p| p.exists());
+    let binary = crate::console::current_exe().ok().filter(|p| p.exists());
     let project = collect_project();
 
     println!();

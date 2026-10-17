@@ -2682,34 +2682,33 @@ fn binary_name_candidates(
     let musl_first = musl_first || arch == "x86";
     let ext = if windows { ".exe" } else { "" };
 
-    let os_variants: Vec<&str> = if macos {
-        vec!["darwin", "macos"]
+    let arch_variants: &[&str] = match arch {
+        "aarch64" => &["arm64", "aarch64"],
+        "x86" => &["386"],
+        _ => &["amd64", "x86_64"],
+    };
+    asset_os_variants(macos, windows, android, musl_first)
+        .iter()
+        .flat_map(|os| arch_variants.iter().map(move |a| format!("tina4-{}-{}{}", os, a, ext)))
+        .collect()
+}
+
+/// The OS part of the asset name, best match first.
+fn asset_os_variants(macos: bool, windows: bool, android: bool, musl: bool) -> &'static [&'static str] {
+    if macos {
+        &["darwin", "macos"]
     } else if windows {
-        vec!["windows"]
+        &["windows"]
     } else if android {
         // Only the native Android build runs under Termux (see above).
-        vec!["android"]
-    } else if musl_first {
+        &["android"]
+    } else if musl {
         // Only the musl asset: falling back to the glibc one would install a
         // binary that cannot run here.
-        vec!["linux-musl"]
+        &["linux-musl"]
     } else {
-        vec!["linux"]
-    };
-
-    let arch_variants: Vec<&str> = match arch {
-        "aarch64" => vec!["arm64", "aarch64"],
-        "x86" => vec!["386"],
-        _ => vec!["amd64", "x86_64"],
-    };
-
-    let mut names = Vec::new();
-    for os in &os_variants {
-        for arch in &arch_variants {
-            names.push(format!("tina4-{}-{}{}", os, arch, ext));
-        }
+        &["linux"]
     }
-    names
 }
 
 /// What one download attempt did, and whether another asset name could help.
@@ -2829,31 +2828,22 @@ fn download_with_wget(url: &str, dest: &str) -> DownloadOutcome {
 /// exits 1 for everything, so its message has to tell the cases apart.
 fn classify_wget_failure(code: Option<i32>, stderr: &str) -> DownloadOutcome {
     let msg = stderr.to_ascii_lowercase();
-    if code == Some(8) || msg.contains("server returned error") {
-        return DownloadOutcome::Http;
-    }
-    if code == Some(4)
-        || code == Some(5)
-        || msg.contains("bad address")
-        || msg.contains("can't connect")
-        || msg.contains("connection refused")
-        || msg.contains("timed out")
-    {
-        return DownloadOutcome::Local(FailureCause::Network(format!(
-            "wget exited {} -- it could not reach the server",
-            code.unwrap_or(-1)
-        )));
-    }
-    if code == Some(3) || msg.contains("can't open") || msg.contains("no space") {
-        return DownloadOutcome::Local(FailureCause::Write(format!(
-            "wget exited {} -- it could not write the file",
-            code.unwrap_or(-1)
-        )));
-    }
-    DownloadOutcome::Local(FailureCause::Unclassified(match code {
-        Some(c) => format!("wget exited {}", c),
+    let says = |words: &[&str]| words.iter().any(|w| msg.contains(w));
+    let exited = |what: &str| match code {
+        Some(c) => format!("wget exited {}{}", c, what),
         None => "wget was killed by a signal".to_string(),
-    }))
+    };
+    if code == Some(8) || says(&["server returned error"]) {
+        DownloadOutcome::Http
+    } else if matches!(code, Some(4 | 5))
+        || says(&["bad address", "can't connect", "connection refused", "timed out"])
+    {
+        DownloadOutcome::Local(FailureCause::Network(exited(" -- it could not reach the server")))
+    } else if code == Some(3) || says(&["can't open", "no space"]) {
+        DownloadOutcome::Local(FailureCause::Write(exited(" -- it could not write the file")))
+    } else {
+        DownloadOutcome::Local(FailureCause::Unclassified(exited("")))
+    }
 }
 
 fn classify_curl_status(status: &std::process::ExitStatus) -> DownloadOutcome {

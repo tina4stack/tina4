@@ -104,53 +104,62 @@ fn install_python() {
                 .status();
         }
     } else if console::is_android() {
-        // Termux: no sudo, and apt's python3.12 package names do not exist.
-        // Termux packages both Python and uv (built against Bionic) - use
-        // them. The astral.sh installer has no Android build, and
-        // `uv python install` has no Android interpreters to download, so
-        // neither is attempted here.
-        if !(check_exists("python3") || check_exists("python")) || !check_exists("uv") {
-            run_install_commands(&[("pkg", &["install", "-y", "python", "uv"])]);
-        } else {
-            println!("  {} Python and uv already installed", icon_ok().green());
-        }
-    } else {
-        // Linux: the distro's Python (apt), then uv on top.
-        if check_exists("python3") || check_exists("python") {
-            println!("  {} Python already installed", icon_ok().green());
-        } else if check_exists("apk") {
-            // Alpine - including iSH on iOS, which runs as root with no sudo.
-            // python3 ONLY: `apk add` is all-or-nothing, and older Alpine
-            // releases (iSH's App Store snapshot is v3.14) have no `uv`
-            // package, so asking for both would install neither. uv is
-            // added best-effort here and otherwise by ensure_uv_unix below.
-            run_install_commands(&[
-                ("apk", &["add", "python3"]),
-                ("sudo", &["apk", "add", "python3"]),
-            ]);
-            let _ = Command::new("apk")
-                .args(["add", "uv"])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-        } else {
-            run_install_commands(&[(
-                "sudo",
-                &["apt-get", "install", "-y", "python3.12", "python3.12-venv"],
-            )]);
-        }
-        // Checked whether Python was just installed or already there. Elsewhere
-        // uv can fetch its own 3.12+ for tina4python, so only warn; on 32-bit
-        // x86 (iSH) uv itself dies with SIGILL, so nothing below can work.
-        let too_old = check_exists("apk") && python_too_old();
-        if too_old && cfg!(target_arch = "x86") {
-            return;
-        }
-        ensure_uv_unix();
+        install_python_termux();
+    } else if !install_python_linux() {
+        return;
     }
 
     // Install tina4python (user-level uv tool — pure Python, no build step).
     install_tina4_cli("tina4python", "uv", &["tool", "install", "tina4-python"]);
+}
+
+/// Termux: no sudo, and apt's python3.12 package names do not exist. Termux
+/// packages both Python and uv (built against Bionic) - use them. The astral.sh
+/// installer has no Android build, and `uv python install` has no Android
+/// interpreters to download, so neither is attempted here.
+fn install_python_termux() {
+    if !(check_exists("python3") || check_exists("python")) || !check_exists("uv") {
+        run_install_commands(&[("pkg", &["install", "-y", "python", "uv"])]);
+    } else {
+        println!("  {} Python and uv already installed", icon_ok().green());
+    }
+}
+
+/// Linux: the distro's Python (apk or apt), then uv on top. False when nothing
+/// after this can work, so tina4python is not attempted.
+fn install_python_linux() -> bool {
+    if check_exists("python3") || check_exists("python") {
+        println!("  {} Python already installed", icon_ok().green());
+    } else if check_exists("apk") {
+        // Alpine - including iSH on iOS, which runs as root with no sudo.
+        // python3 ONLY: `apk add` is all-or-nothing, and older Alpine
+        // releases (iSH's App Store snapshot is v3.14) have no `uv`
+        // package, so asking for both would install neither. uv is
+        // added best-effort here and otherwise by ensure_uv_unix below.
+        run_install_commands(&[
+            ("apk", &["add", "python3"]),
+            ("sudo", &["apk", "add", "python3"]),
+        ]);
+        let _ = Command::new("apk")
+            .args(["add", "uv"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    } else {
+        run_install_commands(&[(
+            "sudo",
+            &["apt-get", "install", "-y", "python3.12", "python3.12-venv"],
+        )]);
+    }
+    // Checked whether Python was just installed or already there. Elsewhere
+    // uv can fetch its own 3.12+ for tina4python, so only warn; on 32-bit
+    // x86 (iSH) uv itself dies with SIGILL, so nothing below can work.
+    let too_old = check_exists("apk") && python_too_old();
+    if too_old && cfg!(target_arch = "x86") {
+        return false;
+    }
+    ensure_uv_unix();
+    true
 }
 
 /// Install uv (the Python package manager) on macOS/Linux via the official

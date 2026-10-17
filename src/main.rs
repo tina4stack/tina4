@@ -1342,6 +1342,9 @@ fn start_language_server(
     port: u16,
     host: &str,
 ) -> Option<std::process::Child> {
+    // TINA4_PORT / TINA4_HOST are what current frameworks read; bare PORT is
+    // deprecated and warns when it is the only one set. PORT and HOST are still
+    // passed for framework versions that predate the TINA4_ names.
     let port_s = port.to_string();
 
     let result = match info.language.as_str() {
@@ -1365,8 +1368,8 @@ fn start_language_server(
             if venv_python.exists() {
                 let mut cmd = std::process::Command::new(&venv_python);
                 cmd.args(["app.py", "--managed"])
-                    .env("PORT", &port_s)
-                    .env("HOST", host)
+                    .env("TINA4_PORT", &port_s).env("PORT", &port_s)
+                    .env("TINA4_HOST", host).env("HOST", host)
                     .stdout(std::process::Stdio::inherit())
                     .stderr(std::process::Stdio::inherit());
                 set_process_group(&mut cmd).spawn()
@@ -1375,16 +1378,16 @@ fn start_language_server(
                 // layout). uv can still resolve it -- but only if uv is here.
                 let mut cmd = std::process::Command::new("uv");
                 cmd.args(["run", "python", "app.py", "--managed"])
-                    .env("PORT", &port_s)
-                    .env("HOST", host)
+                    .env("TINA4_PORT", &port_s).env("PORT", &port_s)
+                    .env("TINA4_HOST", host).env("HOST", host)
                     .stdout(std::process::Stdio::inherit())
                     .stderr(std::process::Stdio::inherit());
                 set_process_group(&mut cmd).spawn()
             } else {
                 let mut cmd = std::process::Command::new(console::python_cmd());
                 cmd.args(["app.py", "--managed"])
-                    .env("PORT", &port_s)
-                    .env("HOST", host)
+                    .env("TINA4_PORT", &port_s).env("PORT", &port_s)
+                    .env("TINA4_HOST", host).env("HOST", host)
                     .stdout(std::process::Stdio::inherit())
                     .stderr(std::process::Stdio::inherit());
                 set_process_group(&mut cmd).spawn()
@@ -1438,16 +1441,16 @@ fn start_language_server(
                 // once the parent/child lifecycle is understood.
                 let mut cmd = std::process::Command::new(console::resolve_cmd("bundle"));
                 cmd.args(["exec", "ruby", "app.rb", "--managed"])
-                    .env("PORT", &port_s)
-                    .env("HOST", host)
+                    .env("TINA4_PORT", &port_s).env("PORT", &port_s)
+                    .env("TINA4_HOST", host).env("HOST", host)
                     .stdout(std::process::Stdio::inherit())
                     .stderr(std::process::Stdio::inherit());
                 set_process_group(&mut cmd).spawn()
             } else {
                 let mut cmd = std::process::Command::new("ruby");
                 cmd.args(["app.rb", "--managed"])
-                    .env("PORT", &port_s)
-                    .env("HOST", host)
+                    .env("TINA4_PORT", &port_s).env("PORT", &port_s)
+                    .env("TINA4_HOST", host).env("HOST", host)
                     .stdout(std::process::Stdio::inherit())
                     .stderr(std::process::Stdio::inherit());
                 set_process_group(&mut cmd).spawn()
@@ -1479,8 +1482,8 @@ fn start_language_server(
             if built.exists() {
                 let mut cmd = std::process::Command::new(console::resolve_cmd("node"));
                 cmd.args(["dist/app.js", "--managed"])
-                    .env("PORT", &port_s)
-                    .env("HOST", host)
+                    .env("TINA4_PORT", &port_s).env("PORT", &port_s)
+                    .env("TINA4_HOST", host).env("HOST", host)
                     .stdout(std::process::Stdio::inherit())
                     .stderr(std::process::Stdio::inherit());
                 return set_process_group(&mut cmd).spawn().map_err(|e| {
@@ -1491,8 +1494,8 @@ fn start_language_server(
             let entry = if std::path::Path::new("app.ts").exists() { "app.ts" } else { "app.js" };
             let mut cmd = std::process::Command::new(console::resolve_cmd("npx"));
             cmd.args(["tsx", entry, "--managed"])
-                .env("PORT", &port_s)
-                .env("HOST", host)
+                .env("TINA4_PORT", &port_s).env("PORT", &port_s)
+                .env("TINA4_HOST", host).env("HOST", host)
                 .stdout(std::process::Stdio::inherit())
                 .stderr(std::process::Stdio::inherit());
             set_process_group(&mut cmd).spawn()

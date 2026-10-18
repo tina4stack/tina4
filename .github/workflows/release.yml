@@ -167,9 +167,13 @@ jobs:
 
       - name: Build (cargo-ndk, android)
         if: matrix.target == 'aarch64-linux-android'
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME || env.ANDROID_NDK_ROOT }}
-        run: cargo ndk -t arm64-v8a -P 24 build --release --locked
+        # The runner exposes the NDK as a SHELL env var ($ANDROID_NDK_ROOT); the
+        # ${{ env.* }} expression context only sees vars declared in a workflow
+        # env: block, never the runner's own - so resolve it in the shell here.
+        run: |
+          export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_NDK_ROOT}"
+          echo "Using Android NDK at: $ANDROID_NDK_HOME"
+          cargo ndk -t arm64-v8a -P 24 build --release --locked
 
       # --locked forces the committed Cargo.lock - the build can't silently
       # resolve a different dependency set than the one that was reviewed.

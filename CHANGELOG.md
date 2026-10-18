@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.8.101 - 2026-10-18
+
+- fix(release): the Android (Termux) and iSH (iOS) assets now build and ship. The 3.8.100 release pipeline could not produce `tina4-android-arm64` - the workflow read the NDK path from `ANDROID_NDK_LATEST_HOME`, empty on current `ubuntu-latest` runners, so cargo-ndk aborted the whole run. The path is now resolved in the shell from `$ANDROID_NDK_ROOT`. The client binary is unchanged from 3.8.100; this is the build that actually carries the Android and iSH assets.
+
 ## 3.8.100 - 2026-10-18
 
 - feat(install): Termux (Android) and iSH (iOS) are first-class. On Android the installer fetches a native, position-independent `tina4-android-arm64` build (built via the NDK, API 24) into `$PREFIX/bin` - the static musl binary that Android's loader rejects with `unexpected e_type: 2` is never used; on iSH it installs the static i686 musl build. Both self-update in place (#91).

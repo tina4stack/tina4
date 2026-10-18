@@ -1,12 +1,12 @@
 {
-    "version": "3.8.101",
+    "version": "3.8.100",
     "description": "Unified CLI for the Tina4 framework - Python, PHP, Ruby, Node.js (scaffold, serve, migrate, metrics).",
     "homepage": "https://tina4.com",
     "license": "MPL-2.0",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/tina4stack/tina4/releases/download/v3.8.101/tina4-windows-amd64.exe#/tina4.exe",
-            "hash": "e1b60bd9bdbe0c0e2bc17cecfc529d5bba2b29ca602bacdfac68203cc3457752"
+            "url": "https://github.com/tina4stack/tina4/releases/download/v3.8.100/tina4-windows-amd64.exe#/tina4.exe",
+            "hash": "11962981dfe56c57240bb883c9937e09d35ea631214654e4dc0b270ea0be0b6b"
         }
     },
     "bin": "tina4.exe",

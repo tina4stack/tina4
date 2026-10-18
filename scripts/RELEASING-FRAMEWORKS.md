@@ -163,7 +163,7 @@ Verify against the registries:
 curl -sf https://pypi.org/pypi/tina4-python/3.13.<ver>/json | head -c 100
 curl -sf https://rubygems.org/api/v1/versions/tina4.json | grep 3.13.<ver>
 curl -sf https://registry.npmjs.org/tina4-nodejs | grep 3.13.<ver>
-curl -sf https://packagist.org/packages/tina4stack/tina4-php.json | grep 3.13.<ver>
+curl -sf https://packagist.org/packages/tina4stack/tina4php.json | grep 3.13.<ver>
 ```
 
 Packagist mirrors GitHub via webhook; give it a minute.
@@ -342,7 +342,7 @@ the public URL.
 curl -sfI https://pypi.org/pypi/tina4-python/3.13.<ver>/
 curl -sf https://rubygems.org/api/v1/versions/tina4.json | grep 3.13.<ver>
 curl -sf https://registry.npmjs.org/tina4-nodejs | grep 3.13.<ver>
-curl -sf https://packagist.org/packages/tina4stack/tina4-php.json | grep 3.13.<ver>
+curl -sf https://packagist.org/packages/tina4stack/tina4php.json | grep 3.13.<ver>
 
 # Installer bootstrap (Jenkins may take a minute to redeploy)
 curl -sf https://tina4.com/install-skills.sh | grep primary_url

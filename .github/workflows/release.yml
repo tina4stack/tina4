@@ -31,6 +31,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # On a tag push this is empty -> checkout the pushed tag (default).
+          # On a workflow_dispatch re-publish it is the tag input, so every job
+          # builds/publishes the TAGGED commit, not main HEAD.
+          ref: ${{ inputs.tag || github.ref_name }}
       # Run cargo-deny natively on our pinned toolchain. The Docker
       # cargo-deny-action bundles an older Cargo that cannot parse edition2024
       # dependency manifests (e.g. clap_lex); a prebuilt cargo-deny on a current
@@ -119,6 +124,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # On a tag push this is empty -> checkout the pushed tag (default).
+          # On a workflow_dispatch re-publish it is the tag input, so every job
+          # builds/publishes the TAGGED commit, not main HEAD.
+          ref: ${{ inputs.tag || github.ref_name }}
 
       - name: Install Rust (pinned)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2025
@@ -262,6 +272,11 @@ jobs:
       # the workspace, which would wipe a dist/ populated earlier. We need the
       # tree for Cargo.toml's [package.metadata.deb], LICENSE, and README.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # On a tag push this is empty -> checkout the pushed tag (default).
+          # On a workflow_dispatch re-publish it is the tag input, so every job
+          # builds/publishes the TAGGED commit, not main HEAD.
+          ref: ${{ inputs.tag || github.ref_name }}
 
       # Toolchain for cargo-deb. We do NOT recompile: the .deb reuses the exact
       # linux binaries this release already built (--no-build), so the packaged
@@ -356,6 +371,11 @@ jobs:
       - name: Upload all assets to the draft Release
         uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
         with:
+          # Pin the release to the resolved tag. Without this, action-gh-release
+          # defaults to github.ref, which on a workflow_dispatch is the branch
+          # (main), so assets never reached the tag's release and the check below
+          # saw 0 of N. On a tag push inputs.tag is empty -> github.ref_name.
+          tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
             dist/*
             SHA256SUMS
@@ -392,7 +412,7 @@ jobs:
             # with all 8 assets present on the draft. GET /releases DOES include
             # drafts, so match on tag_name there instead.
             got=$(gh api "repos/${{ github.repository }}/releases" --paginate \
-                    --jq ".[] | select(.tag_name==\"${{ github.ref_name }}\") | .assets[].name" \
+                    --jq ".[] | select(.tag_name==\"${{ inputs.tag || github.ref_name }}\") | .assets[].name" \
                     2>/dev/null | sort || true)
             [ "$(printf '%s' "$got" | grep -c .)" -ge "$want" ] && break
             echo "attempt $attempt: $(printf '%s' "$got" | grep -c .) of $want assets listed, waiting..."
@@ -418,7 +438,7 @@ jobs:
     # Publish the source crate ONLY on a final version tag (vX.Y.Z) - never on a
     # prerelease/RC tag (vX.Y.Z-rc.N) or a manual branch dispatch, so an RC dry
     # run can exercise the binary pipeline without pushing to crates.io.
-    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    if: ${{ (startsWith(github.ref, 'refs/tags/v') || inputs.tag != '') && !contains(inputs.tag || github.ref_name, '-') }}
     runs-on: ubuntu-latest
     # Gate the registry publish behind a protected environment. Configure
     # required reviewers / a tag deployment-branch rule on the `release`
@@ -428,6 +448,11 @@ jobs:
     environment: release
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # On a tag push this is empty -> checkout the pushed tag (default).
+          # On a workflow_dispatch re-publish it is the tag input, so every job
+          # builds/publishes the TAGGED commit, not main HEAD.
+          ref: ${{ inputs.tag || github.ref_name }}
 
       - name: Install Rust (pinned)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2025
@@ -468,7 +493,7 @@ jobs:
   # images.
   publish-cli-image:
     needs: [build, release-assets]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.tag != '' }}
     runs-on: ubuntu-latest
     # Same protected environment as publish-crate (ADR-0081): gate the GHCR push
     # behind required reviewers / a tag deployment-branch rule in repo Settings.
@@ -478,6 +503,11 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          # On a tag push this is empty -> checkout the pushed tag (default).
+          # On a workflow_dispatch re-publish it is the tag input, so every job
+          # builds/publishes the TAGGED commit, not main HEAD.
+          ref: ${{ inputs.tag || github.ref_name }}
 
       - name: Download musl binaries
         uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
@@ -529,7 +559,7 @@ jobs:
           provenance: mode=max
           push: true
           tags: |
-            ghcr.io/tina4stack/tina4-cli:${{ github.ref_name }}
+            ghcr.io/tina4stack/tina4-cli:${{ inputs.tag || github.ref_name }}
             ghcr.io/tina4stack/tina4-cli:latest
 
       - name: Verify the pushed image actually runs
@@ -539,4 +569,4 @@ jobs:
         run: |
           set -eux
           docker run --rm --pull=always \
-            ghcr.io/tina4stack/tina4-cli:${{ github.ref_name }} --version
+            ghcr.io/tina4stack/tina4-cli:${{ inputs.tag || github.ref_name }} --version

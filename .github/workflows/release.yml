@@ -157,7 +157,8 @@ jobs:
           python3 -m ziglang version
 
       # Android goes through cargo-ndk with the NDK preinstalled on the
-      # ubuntu runner ($ANDROID_NDK_LATEST_HOME), which wires up the NDK's
+      # ubuntu runner ($ANDROID_NDK_ROOT; older images set $ANDROID_NDK_LATEST_HOME),
+      # which wires up the NDK's
       # clang for the C dependencies (tree-sitter grammars, ring) and the link.
       - name: Install cargo-ndk (android)
         if: matrix.target == 'aarch64-linux-android'
@@ -167,7 +168,7 @@ jobs:
       - name: Build (cargo-ndk, android)
         if: matrix.target == 'aarch64-linux-android'
         env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME || env.ANDROID_NDK_ROOT }}
         run: cargo ndk -t arm64-v8a -P 24 build --release --locked
 
       # --locked forces the committed Cargo.lock - the build can't silently

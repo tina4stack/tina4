@@ -1,5 +1,9 @@
 # Changelog
 
+## 3.8.102 - 2026-10-19
+
+- feat(metrics): `tina4 metrics` now carries a stable rule id and a concrete remedy on every finding, and `--suggest` prints the refactoring suggestion for each offender instead of only the symptom. Feature 141, slice A (#66).
+
 ## 3.8.101 - 2026-10-18
 
 - fix(release): the Android (Termux) and iSH (iOS) assets now build and ship. The 3.8.100 release pipeline could not produce `tina4-android-arm64` - the workflow read the NDK path from `ANDROID_NDK_LATEST_HOME`, empty on current `ubuntu-latest` runners, so cargo-ndk aborted the whole run. The path is now resolved in the shell from `$ANDROID_NDK_ROOT`. The client binary is unchanged from 3.8.100; this is the build that actually carries the Android and iSH assets.

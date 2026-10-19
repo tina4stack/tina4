@@ -2320,6 +2320,72 @@ pub(crate) struct Offender {
     pub severity: String,
     pub score: f64,
     pub detail: String,
+    /// Stable, never-recycled rule identifier for the SPECIFIC detector that
+    /// fired (feature 141). A `kind` is the family; a `rule_id` names the exact
+    /// case inside it so a deterministic remedy can be attached. Retire a
+    /// published id with a tombstone, never repoint it (the CWE contract).
+    pub rule_id: String,
+    /// The deterministic structural refactoring this rule points at. It names
+    /// the MOVE (extract, unify, split), never a design pattern - naming a
+    /// pattern needs the code's intent, which a metric does not carry.
+    pub remedy: String,
+}
+
+/// The frozen rule catalogue (feature 141). ONE pure function maps a `kind`
+/// (plus, for `complexity`, the function's own line count) to its stable
+/// `rule_id` and its remedy. Ranges are reserved by category so new detectors
+/// take the next free number without ever renumbering an existing one:
+///   M0xx complexity/structure of a function, D0xx duplication,
+///   S0xx file-level size/structure, C1xx coverage, U9xx tooling.
+///
+/// Only cases the engine can discriminate from data it ALREADY computes ship a
+/// rule id. `complexity` splits on the function's line count - a long function
+/// (`loc` >= LONG_METHOD_LOC) is a long method (extract), a short-but-branchy
+/// one is dense logic (guard clauses / dispatch). The finer nesting-specific,
+/// switch-specific and parameter-count rules are deliberately NOT assigned yet:
+/// they need per-function sub-metrics (nesting depth, arm count, parameter
+/// count) the AST walk does not produce today, and a rule id that cannot be
+/// told apart from its kind would be a synonym, not a layer. Those land as new
+/// M0xx numbers when the sub-metrics do - additive, no repoint.
+const LONG_METHOD_LOC: usize = 50;
+fn rule_for(kind: &str, loc: usize) -> (&'static str, &'static str) {
+    match kind {
+        "complexity" if loc >= LONG_METHOD_LOC => (
+            "TINA4-M001",
+            "long method: extract cohesive steps into their own named methods",
+        ),
+        "complexity" => (
+            "TINA4-M002",
+            "dense logic: invert with guard clauses, or replace a fat conditional with a dispatch table or polymorphism",
+        ),
+        "duplication" => (
+            "TINA4-D010",
+            "unify the repeated blocks into one shared helper (DRY)",
+        ),
+        "large_file" => (
+            "TINA4-S020",
+            "split the file by responsibility into smaller cohesive units",
+        ),
+        "too_many_functions" => (
+            "TINA4-S021",
+            "group related functions into cohesive units or a separate module",
+        ),
+        "low_maintainability" => (
+            "TINA4-S022",
+            "reduce size and branching together; this usually means a split",
+        ),
+        "no_test_reference" => (
+            "TINA4-C101",
+            "add a test that references this file (coverage, not a refactor)",
+        ),
+        "unparsed" => (
+            "TINA4-U901",
+            "the engine could not read this file; update the CLI or check the file - it was NOT measured",
+        ),
+        // An unknown kind gets no id rather than a wrong one. Empty strings
+        // serialise as absent-meaning fields and print nothing under --suggest.
+        _ => ("", ""),
+    }
 }
 
 fn severity_rank(sev: &str) -> u8 {
@@ -2347,6 +2413,7 @@ fn build_offenders(files: &[FileMetrics], functions: &[FunctionInfo]) -> Vec<Off
     for fn_info in by_cc.iter() {
         let cc = fn_info.complexity;
         if cc > 10 {
+            let (rule_id, remedy) = rule_for("complexity", fn_info.loc);
             items.push(Offender {
                 file: fn_info.file.clone(),
                 line: fn_info.line,
@@ -2358,6 +2425,8 @@ fn build_offenders(files: &[FileMetrics], functions: &[FunctionInfo]) -> Vec<Off
                 // tags subprocess output with a minimal locale (LANG=C) then
                 // raised on the first string operation. Also the house style.
                 detail: format!("{} - cyclomatic complexity {}", fn_info.name, cc),
+                rule_id: rule_id.to_string(),
+                remedy: remedy.to_string(),
             });
         }
     }
@@ -2374,6 +2443,8 @@ fn build_offenders(files: &[FileMetrics], functions: &[FunctionInfo]) -> Vec<Off
                 severity: "warn".to_string(),
                 score: fm.loc as f64 / 100.0,
                 detail: format!("{} LOC (max 500)", fm.loc),
+                rule_id: rule_for("large_file", 0).0.to_string(),
+                remedy: rule_for("large_file", 0).1.to_string(),
             });
         }
         if fm.functions > 20 {
@@ -2384,6 +2455,8 @@ fn build_offenders(files: &[FileMetrics], functions: &[FunctionInfo]) -> Vec<Off
                 severity: "warn".to_string(),
                 score: fm.functions as f64 / 4.0,
                 detail: format!("{} functions (max 20)", fm.functions),
+                rule_id: rule_for("too_many_functions", 0).0.to_string(),
+                remedy: rule_for("too_many_functions", 0).1.to_string(),
             });
         }
         // A low file-level MI is only a real maintainability signal when the
@@ -2412,6 +2485,8 @@ fn build_offenders(files: &[FileMetrics], functions: &[FunctionInfo]) -> Vec<Off
                     "maintainability index {:.1} (min 40), avg complexity {:.1}",
                     fm.maintainability, fm.avg_complexity
                 ),
+                rule_id: rule_for("low_maintainability", 0).0.to_string(),
+                remedy: rule_for("low_maintainability", 0).1.to_string(),
             });
         }
         if !fm.has_referencing_test {
@@ -2422,6 +2497,8 @@ fn build_offenders(files: &[FileMetrics], functions: &[FunctionInfo]) -> Vec<Off
                 severity: "info".to_string(),
                 score: fm.loc as f64 / 100.0,
                 detail: "no referencing test found (this is not coverage)".to_string(),
+                rule_id: rule_for("no_test_reference", 0).0.to_string(),
+                remedy: rule_for("no_test_reference", 0).1.to_string(),
             });
         }
     }
@@ -2459,6 +2536,8 @@ fn refusal_offenders(refused: &[RefusedFile]) -> Vec<Offender> {
             // Bigger unreadable files are a bigger hole in the report.
             score: r.lines as f64 / 100.0,
             detail: format!("NOT MEASURED - {}", r.reason),
+            rule_id: rule_for("unparsed", 0).0.to_string(),
+            remedy: rule_for("unparsed", 0).1.to_string(),
         })
         .collect()
 }
@@ -2505,6 +2584,8 @@ fn clone_offenders(groups: &[CloneGroup]) -> Vec<Offender> {
                     where_,
                     g.lines * (g.copies - 1)
                 ),
+                rule_id: rule_for("duplication", 0).0.to_string(),
+                remedy: rule_for("duplication", 0).1.to_string(),
             }
         })
         .collect()
@@ -3253,6 +3334,10 @@ pub struct RunOptions {
     pub include_non_production: bool,
     pub no_history: bool,
     pub fail_on_regression: bool,
+    /// Print each offender's rule id and remedy under its row (feature 141).
+    /// Opt-in and additive: the default human table is unchanged, and the
+    /// rule id / remedy are always present in `--json` regardless of this flag.
+    pub suggest: bool,
 }
 
 /// `tina4 metrics` — native, language-agnostic. Returns the process exit code.
@@ -3266,6 +3351,7 @@ pub fn run(opts: RunOptions) -> i32 {
         include_non_production,
         no_history,
         fail_on_regression,
+        suggest,
     } = opts;
     if let Some(f) = &fail_on {
         if f != "warn" && f != "error" {
@@ -3387,7 +3473,7 @@ pub fn run(opts: RunOptions) -> i32 {
         return exit_code;
     }
 
-    print_human(&summary, &shown);
+    print_human(&summary, &shown, suggest);
     match &delta {
         Some(d) => print_delta_human(d, &scan_root),
         None if !no_history && !fail_on_regression => println!(
@@ -3402,7 +3488,7 @@ pub fn run(opts: RunOptions) -> i32 {
     exit_code
 }
 
-fn print_human(summary: &Summary, shown: &[Offender]) {
+fn print_human(summary: &Summary, shown: &[Offender], suggest: bool) {
     use std::io::IsTerminal;
     let use_color = std::io::stdout().is_terminal();
     let paint = |text: &str, code: &str| -> String {
@@ -3481,6 +3567,14 @@ fn print_human(summary: &Summary, shown: &[Offender]) {
             "  {:>3}  {}  {:<kw$}  {:<lw$}  {}",
             i + 1, sev_cell, o.kind, loc_cells[i], o.detail, kw = kind_w, lw = loc_w
         );
+        // --suggest: a dim indented line naming the rule and the move to make.
+        // Opt-in so the default table stays byte-identical to before feature 141.
+        if suggest && !o.rule_id.is_empty() {
+            println!(
+                "       {}",
+                paint(&format!("\u{2192} {}  {}", o.rule_id, o.remedy), "2")
+            );
+        }
     }
     println!();
 }
@@ -4069,6 +4163,9 @@ pub fn sub(a: i32, b: i32) -> i32 {
     fn func_with(cc: u32) -> FunctionInfo {
         FunctionInfo { name: "f".into(), file: "x.py".into(), line: 1, complexity: cc, loc: 1 }
     }
+    fn func_with_loc(cc: u32, loc: usize) -> FunctionInfo {
+        FunctionInfo { name: "f".into(), file: "x.py".into(), line: 1, complexity: cc, loc }
+    }
 
     #[test]
     fn offender_low_maintainability_severity_split_at_20() {
@@ -4119,6 +4216,86 @@ pub fn sub(a: i32, b: i32) -> i32 {
         assert_eq!(err[0].severity, "error");
         // CC <= 10 is not an offender.
         assert!(build_offenders(&[], &[func_with(10)]).is_empty());
+    }
+
+    // ── Feature 141: rule ids + remedies ────────────────────────────────────
+
+    #[test]
+    fn complexity_splits_into_long_method_vs_dense_logic_by_loc() {
+        // A long function (loc >= 50) with high cc is a LONG METHOD -> M001.
+        let long = build_offenders(&[], &[func_with_loc(25, 80)]);
+        assert_eq!(long[0].kind, "complexity");
+        assert_eq!(long[0].rule_id, "TINA4-M001");
+        assert!(long[0].remedy.contains("extract"));
+        // A short-but-branchy function is DENSE LOGIC -> M002, never M001.
+        let dense = build_offenders(&[], &[func_with_loc(25, 12)]);
+        assert_eq!(dense[0].rule_id, "TINA4-M002");
+        assert_ne!(dense[0].rule_id, "TINA4-M001", "a short dense function must not read as a long method");
+        assert!(dense[0].remedy.contains("guard clauses") || dense[0].remedy.contains("dispatch"));
+        // The boundary is LONG_METHOD_LOC: exactly 50 is long, 49 is dense.
+        assert_eq!(build_offenders(&[], &[func_with_loc(15, 50)])[0].rule_id, "TINA4-M001");
+        assert_eq!(build_offenders(&[], &[func_with_loc(15, 49)])[0].rule_id, "TINA4-M002");
+    }
+
+    #[test]
+    fn each_file_level_kind_maps_to_its_stable_rule_id() {
+        // large_file -> S020
+        let big = build_offenders(&[file_with(90.0, 900, 1, true)], &[]);
+        let lf = big.iter().find(|o| o.kind == "large_file").unwrap();
+        assert_eq!(lf.rule_id, "TINA4-S020");
+        assert!(lf.remedy.contains("split"));
+        // too_many_functions -> S021
+        let many = build_offenders(&[file_with(90.0, 10, 21, true)], &[]);
+        assert_eq!(many.iter().find(|o| o.kind == "too_many_functions").unwrap().rule_id, "TINA4-S021");
+        // low_maintainability -> S022
+        let lowmi = build_offenders(&[file_with(15.0, 10, 1, true)], &[]);
+        assert_eq!(lowmi.iter().find(|o| o.kind == "low_maintainability").unwrap().rule_id, "TINA4-S022");
+        // no_test_reference -> C101 (info)
+        let untested = build_offenders(&[file_with(90.0, 10, 1, false)], &[]);
+        let nt = untested.iter().find(|o| o.kind == "no_test_reference").unwrap();
+        assert_eq!(nt.rule_id, "TINA4-C101");
+        assert_eq!(nt.severity, "info");
+    }
+
+    #[test]
+    fn rule_for_is_the_frozen_catalogue() {
+        // Pin the published ids so a recycle/repoint is a test failure (the
+        // never-recycle contract). loc only matters for complexity.
+        assert_eq!(rule_for("complexity", 80).0, "TINA4-M001");
+        assert_eq!(rule_for("complexity", 10).0, "TINA4-M002");
+        assert_eq!(rule_for("duplication", 0).0, "TINA4-D010");
+        assert_eq!(rule_for("large_file", 0).0, "TINA4-S020");
+        assert_eq!(rule_for("too_many_functions", 0).0, "TINA4-S021");
+        assert_eq!(rule_for("low_maintainability", 0).0, "TINA4-S022");
+        assert_eq!(rule_for("no_test_reference", 0).0, "TINA4-C101");
+        assert_eq!(rule_for("unparsed", 0).0, "TINA4-U901");
+        // Every assigned rule carries a non-empty remedy; an unknown kind gets
+        // NO id rather than a wrong one.
+        for kind in ["complexity","duplication","large_file","too_many_functions","low_maintainability","no_test_reference","unparsed"] {
+            let (id, remedy) = rule_for(kind, 0);
+            assert!(!id.is_empty() && !remedy.is_empty(), "{kind} must have an id and remedy");
+        }
+        assert_eq!(rule_for("something_new", 0), ("", ""));
+    }
+
+    #[test]
+    fn rule_id_and_remedy_serialise_into_json() {
+        let offs = build_offenders(&[], &[func_with_loc(25, 80)]);
+        let value = serde_json::to_value(&offs[0]).unwrap();
+        assert_eq!(value["rule_id"], "TINA4-M001");
+        assert!(value["remedy"].as_str().unwrap().contains("extract"));
+    }
+
+    #[test]
+    fn duplication_offender_carries_its_rule_id() {
+        let group = CloneGroup {
+            first_file: "a.py".into(), first_line: 1, lines: 40, copies: 2,
+            cross_file: true, files: vec!["a.py".into(), "b.py".into()],
+            occurrences: vec![],
+        };
+        let offs = clone_offenders(&[group]);
+        assert_eq!(offs[0].rule_id, "TINA4-D010");
+        assert!(offs[0].remedy.contains("unify"));
     }
 
     #[test]

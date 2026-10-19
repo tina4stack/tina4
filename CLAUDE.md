@@ -56,7 +56,19 @@ tina4 metrics                    Report code-health top offenders (complexity, l
                                  Flags: --top N, --json, --fail-on warn|error (CI gate),
                                  --fail-on-regression (ratchet CI gate), --path DIR|FILE,
                                  repeatable --exclude GLOB,
-                                 --include-non-production, and --no-history. RUN HISTORY
+                                 --include-non-production, --no-history, and --suggest.
+                                 RULE IDS (feature 141): every offender carries a stable,
+                                 never-recycled rule_id and a remedy naming the refactoring
+                                 move. A `kind` is the family; the rule_id names the exact
+                                 case inside it. complexity splits by function length -
+                                 TINA4-M001 (long method) vs TINA4-M002 (dense logic) - and
+                                 duplication/large_file/too_many_functions/low_maintainability/
+                                 no_test_reference/unparsed map to D010/S020/S021/S022/C101/
+                                 U901. `--json` always carries rule_id + remedy; `--suggest`
+                                 prints the remedy under each row (the default table is
+                                 unchanged). The remedy names the MOVE (extract, unify, split),
+                                 never a design pattern - intent a metric does not carry stays
+                                 out of the engine. RUN HISTORY
                                  (3.8.80): each scan records .tina4-metrics.json in the
                                  scan root, and the next scan of the same scope reports a
                                  "Since last run" delta (offenders / duplicate lines / avg

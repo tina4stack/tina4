@@ -338,121 +338,66 @@ fn check_runtime(language: &str) {
     println!("\n{} Checking {} runtime...", icon_play().green(), language.cyan());
 
     match language {
-        "python" => {
-            let py = console::python_cmd();
-            if cmd_exists(py) {
-                println!("  {} {} found", icon_ok().green(), py);
-            } else {
-                println!("  {} python not found — attempting install", icon_warn().yellow());
-                if console::is_windows() {
-                    eprintln!(
-                        "  {} Please install Python 3: https://www.python.org/downloads/",
-                        icon_fail().red()
-                    );
-                    std::process::exit(1);
-                } else if cmd_exists("brew") {
-                    if !run_cmd("brew", &["install", "python"]) {
-                        eprintln!(
-                            "  {} brew install failed. Please install Python 3 manually:\n      https://www.python.org/downloads/",
-                            icon_fail().red()
-                        );
-                        std::process::exit(1);
-                    }
-                } else {
-                    eprintln!(
-                        "  {} Please install Python 3: https://www.python.org/downloads/",
-                        icon_fail().red()
-                    );
-                    std::process::exit(1);
-                }
-            }
-        }
-        "php" => {
-            if cmd_exists("php") {
-                println!("  {} php found", icon_ok().green());
-            } else {
-                println!("  {} php not found — attempting install", icon_warn().yellow());
-                if console::is_windows() {
-                    eprintln!(
-                        "  {} Please install PHP: https://www.php.net/downloads",
-                        icon_fail().red()
-                    );
-                    std::process::exit(1);
-                } else if cmd_exists("brew") {
-                    if !run_cmd("brew", &["install", "php"]) {
-                        eprintln!(
-                            "  {} brew install failed. Please install PHP manually:\n      https://www.php.net/downloads",
-                            icon_fail().red()
-                        );
-                        std::process::exit(1);
-                    }
-                } else {
-                    eprintln!(
-                        "  {} Please install PHP: https://www.php.net/downloads",
-                        icon_fail().red()
-                    );
-                    std::process::exit(1);
-                }
-            }
-        }
-        "ruby" => {
-            if cmd_exists("ruby") {
-                println!("  {} ruby found", icon_ok().green());
-            } else {
-                println!("  {} ruby not found — attempting install", icon_warn().yellow());
-                if console::is_windows() {
-                    eprintln!(
-                        "  {} Please install Ruby: https://rubyinstaller.org/",
-                        icon_fail().red()
-                    );
-                    std::process::exit(1);
-                } else if cmd_exists("brew") {
-                    if !run_cmd("brew", &["install", "ruby"]) {
-                        eprintln!(
-                            "  {} brew install failed. Please install Ruby manually:\n      https://www.ruby-lang.org/en/downloads/",
-                            icon_fail().red()
-                        );
-                        std::process::exit(1);
-                    }
-                } else {
-                    eprintln!(
-                        "  {} Please install Ruby: https://www.ruby-lang.org/en/downloads/",
-                        icon_fail().red()
-                    );
-                    std::process::exit(1);
-                }
-            }
-        }
-        "nodejs" | "tina4js" => {
-            if cmd_exists("node") {
-                println!("  {} node found", icon_ok().green());
-            } else {
-                println!("  {} node not found — attempting install", icon_warn().yellow());
-                if console::is_windows() {
-                    eprintln!(
-                        "  {} Please install Node.js: https://nodejs.org/",
-                        icon_fail().red()
-                    );
-                    std::process::exit(1);
-                } else if cmd_exists("brew") {
-                    if !run_cmd("brew", &["install", "node"]) {
-                        eprintln!(
-                            "  {} brew install failed. Please install Node.js manually:\n      https://nodejs.org/",
-                            icon_fail().red()
-                        );
-                        std::process::exit(1);
-                    }
-                } else {
-                    eprintln!(
-                        "  {} Please install Node.js: https://nodejs.org/",
-                        icon_fail().red()
-                    );
-                    std::process::exit(1);
-                }
-            }
-        }
+        "python" => ensure_runtime(
+            "python", console::python_cmd(), "python",
+            "Please install Python 3: https://www.python.org/downloads/",
+            "brew install failed. Please install Python 3 manually:\n      https://www.python.org/downloads/",
+            "Please install Python 3: https://www.python.org/downloads/",
+        ),
+        "php" => ensure_runtime(
+            "php", "php", "php",
+            "Please install PHP: https://www.php.net/downloads",
+            "brew install failed. Please install PHP manually:\n      https://www.php.net/downloads",
+            "Please install PHP: https://www.php.net/downloads",
+        ),
+        "ruby" => ensure_runtime(
+            "ruby", "ruby", "ruby",
+            // Windows has its own installer; brew/manual paths use ruby-lang.org.
+            "Please install Ruby: https://rubyinstaller.org/",
+            "brew install failed. Please install Ruby manually:\n      https://www.ruby-lang.org/en/downloads/",
+            "Please install Ruby: https://www.ruby-lang.org/en/downloads/",
+        ),
+        "nodejs" | "tina4js" => ensure_runtime(
+            "node", "node", "node",
+            "Please install Node.js: https://nodejs.org/",
+            "brew install failed. Please install Node.js manually:\n      https://nodejs.org/",
+            "Please install Node.js: https://nodejs.org/",
+        ),
         _ => {}
     }
+}
+
+/// Ensure a language runtime is on PATH, installing via Homebrew where possible
+/// or printing the per-OS manual-install guidance and exiting. `cmd` is probed
+/// and shown in the found message; `label` names the runtime in the not-found
+/// line; `brew_pkg` is the formula. The three messages are kept separate because
+/// a runtime's Windows installer URL can differ from its brew/manual URL (Ruby).
+fn ensure_runtime(
+    label: &str,
+    cmd: &str,
+    brew_pkg: &str,
+    windows_msg: &str,
+    brew_fail_msg: &str,
+    else_msg: &str,
+) {
+    if cmd_exists(cmd) {
+        println!("  {} {} found", icon_ok().green(), cmd);
+        return;
+    }
+    println!("  {} {} not found — attempting install", icon_warn().yellow(), label);
+    if console::is_windows() {
+        eprintln!("  {} {}", icon_fail().red(), windows_msg);
+        std::process::exit(1);
+    }
+    if cmd_exists("brew") {
+        if !run_cmd("brew", &["install", brew_pkg]) {
+            eprintln!("  {} {}", icon_fail().red(), brew_fail_msg);
+            std::process::exit(1);
+        }
+        return;
+    }
+    eprintln!("  {} {}", icon_fail().red(), else_msg);
+    std::process::exit(1);
 }
 
 // -- Step 2: Package manager -------------------------------------------------

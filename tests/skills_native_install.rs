@@ -23,6 +23,13 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Guarantees a unique directory name even when two parallel tests call
+/// `private_dir` with the same label in the same nanosecond (the timestamp alone
+/// is not enough - both tests build the "fixtures" dir, and a coincident clock
+/// read gave them the same name and an AlreadyExists collision).
+static DIR_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// The ref the fixtures live under. A test-only value, so the run never depends
 /// on the installer's shipped default.
@@ -83,8 +90,9 @@ fn private_dir(label: &str) -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
+    let seq = DIR_SEQ.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "tina4-native-skills-{}-{label}-{stamp}",
+        "tina4-native-skills-{}-{label}-{stamp}-{seq}",
         std::process::id()
     ));
     fs::create_dir(&dir).expect("could not create a private temp directory");
@@ -179,12 +187,16 @@ fn the_native_installer_needs_no_shell_on_path() {
     let home = private_dir("home-noshell");
     let bin = private_dir("curl-only-bin");
 
-    // Copy the real curl in (a symlink to a missing target would spawn-fail and
-    // be indistinguishable from a shell being absent). Nothing else goes in --
-    // no sh, no bash, no powershell.
+    // SYMLINK the real curl in - do NOT copy it. On macOS /usr/bin/curl is a
+    // code-signed platform binary; a COPY has no valid signature, so AMFI kills
+    // it with SIGKILL (exit 137) the moment the installer spawns it, and the test
+    // fails on every Mac for a reason that has nothing to do with the shell. A
+    // symlink to the EXISTING real curl runs the signed binary unchanged and
+    // works on Linux too. (The old concern - "a symlink to a MISSING target would
+    // spawn-fail" - does not apply: real_curl exists.) Nothing else goes in: no
+    // sh, no bash, no powershell.
     let real_curl = which_curl();
-    fs::copy(&real_curl, bin.join("curl")).expect("could not stage curl");
-    fs::set_permissions(bin.join("curl"), fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(&real_curl, bin.join("curl")).expect("could not stage curl");
     assert!(!bin.join("sh").exists() && !bin.join("bash").exists() && !bin.join("powershell").exists());
 
     let out = run_install(&home, &file_url(&fixtures), Some(&bin));

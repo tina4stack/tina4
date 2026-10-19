@@ -1,6 +1,6 @@
 [package]
 name = "tina4"
-version = "3.8.97"
+version = "3.8.101"
 edition = "2021"
 description = "Tina4 — Unified CLI for Python, PHP, Ruby, and Node.js frameworks"
 license = "MPL-2.0"
@@ -70,6 +70,9 @@ reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], defau
 # on Windows, the exact spawn the native installer exists to remove.
 ring = "0.17"
 tokio = { version = "1", features = ["full"] }
+# SIZE-MEASUREMENT: local LLM gateway HTTP server. Rides the hyper/tokio already
+# pulled by reqwest, so its marginal binary cost is what we are measuring here.
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tree-sitter = "0.26"

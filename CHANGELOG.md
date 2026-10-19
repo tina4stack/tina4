@@ -1,5 +1,21 @@
 # Changelog
 
+## 3.8.101 - 2026-10-18
+
+- fix(release): the Android (Termux) and iSH (iOS) assets now build and ship. The 3.8.100 release pipeline could not produce `tina4-android-arm64` - the workflow read the NDK path from `ANDROID_NDK_LATEST_HOME`, empty on current `ubuntu-latest` runners, so cargo-ndk aborted the whole run. The path is now resolved in the shell from `$ANDROID_NDK_ROOT`. The client binary is unchanged from 3.8.100; this is the build that actually carries the Android and iSH assets.
+
+## 3.8.100 - 2026-10-18
+
+- feat(install): Termux (Android) and iSH (iOS) are first-class. On Android the installer fetches a native, position-independent `tina4-android-arm64` build (built via the NDK, API 24) into `$PREFIX/bin` - the static musl binary that Android's loader rejects with `unexpected e_type: 2` is never used; on iSH it installs the static i686 musl build. Both self-update in place (#91).
+- fix(env): a UTF-8 byte order mark at the start of a `.env` file no longer hides the first variable (#89).
+- fix(install): the PHP install hint points at `tina4stack/tina4php`, the published Composer package (#87).
+- serve: forwards `TINA4_PORT` and `TINA4_HOST` to the framework.
+
+## 3.8.99 - 2026-10-15
+
+- feat(cli): `tina4 uninstall` removes everything the client put on the machine - the config and credentials, the installed Tina4 AI skills across Claude, Codex and Cursor, and the binary itself. It lists every target first and asks before it removes anything; `--dry-run` only reports and `--yes` skips the prompts. The current project's own `.tina4/`, `.tina4-metrics.json` and `.tina4-docs` are a separate, explicit opt-in, so an uninstall never searches the rest of the filesystem (#84).
+- refactor: a code-quality batch across the metrics engine, doctor, watcher and serve supervision - import resolution, Halstead scoring and filesystem-event handling split into focused helpers, and the dead respawn machinery removed - with no behaviour change (#73-#83).
+
 ## 3.8.96 — 2026-10-04
 
 - fix(skills): `tina4 skills` / `tina4 update` now install the CURRENT published skills. The native installer carried a hardcoded 8-skill list and a baked `3.13.138` ref, so it could neither advance to a newer ref nor install a newly added skill - it attempted an 8-skill install against the 9-skill `3.13.146` ref and failed checksum. It is now data-driven: the ref is resolved from the served `install-skills.sh` (so a skills release reaches `tina4 update` with no CLI release), and the exact file set is derived from the published `skills.sha256` manifest (any skills, any one-level-nested references). CDN-fallback repo routing is a rule, not a list, so a new skill needs no change here and a wrong guess only loses the fallback, never the primary tier. Guards added so the installer can never again drift from the manifest (#60).

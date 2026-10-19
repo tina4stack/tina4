@@ -33,6 +33,7 @@ pub fn run(lang: &str) {
         "ruby" | "rb" => install_ruby(),
         "nodejs" | "node" | "js" => install_nodejs(),
         "tina4-js" | "tina4js" | "js-frontend" => install_tina4_js(),
+        "codeql" => install_codeql(),
         "all" => {
             install_python();
             install_php();
@@ -41,7 +42,7 @@ pub fn run(lang: &str) {
         }
         _ => {
             eprintln!(
-                "{} Unknown target: {}. Use: python, php, ruby, nodejs, tina4-js, all",
+                "{} Unknown target: {}. Use: python, php, ruby, nodejs, tina4-js, codeql, all",
                 icon_fail().red(),
                 lang
             );
@@ -102,21 +103,63 @@ fn install_python() {
                 .stderr(std::process::Stdio::inherit())
                 .status();
         }
-    } else {
-        // Linux: the distro's Python (apt), then uv on top.
-        if check_exists("python3") || check_exists("python") {
-            println!("  {} Python already installed", icon_ok().green());
-        } else {
-            run_install_commands(&[(
-                "sudo",
-                &["apt-get", "install", "-y", "python3.12", "python3.12-venv"],
-            )]);
-        }
-        ensure_uv_unix();
+    } else if console::is_android() {
+        install_python_termux();
+    } else if !install_python_linux() {
+        return;
     }
 
     // Install tina4python (user-level uv tool — pure Python, no build step).
     install_tina4_cli("tina4python", "uv", &["tool", "install", "tina4-python"]);
+}
+
+/// Termux: no sudo, and apt's python3.12 package names do not exist. Termux
+/// packages both Python and uv (built against Bionic) - use them. The astral.sh
+/// installer has no Android build, and `uv python install` has no Android
+/// interpreters to download, so neither is attempted here.
+fn install_python_termux() {
+    if !(check_exists("python3") || check_exists("python")) || !check_exists("uv") {
+        run_install_commands(&[("pkg", &["install", "-y", "python", "uv"])]);
+    } else {
+        println!("  {} Python and uv already installed", icon_ok().green());
+    }
+}
+
+/// Linux: the distro's Python (apk or apt), then uv on top. False when nothing
+/// after this can work, so tina4python is not attempted.
+fn install_python_linux() -> bool {
+    if check_exists("python3") || check_exists("python") {
+        println!("  {} Python already installed", icon_ok().green());
+    } else if check_exists("apk") {
+        // Alpine - including iSH on iOS, which runs as root with no sudo.
+        // python3 ONLY: `apk add` is all-or-nothing, and older Alpine
+        // releases (iSH's App Store snapshot is v3.14) have no `uv`
+        // package, so asking for both would install neither. uv is
+        // added best-effort here and otherwise by ensure_uv_unix below.
+        run_install_commands(&[
+            ("apk", &["add", "python3"]),
+            ("sudo", &["apk", "add", "python3"]),
+        ]);
+        let _ = Command::new("apk")
+            .args(["add", "uv"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    } else {
+        run_install_commands(&[(
+            "sudo",
+            &["apt-get", "install", "-y", "python3.12", "python3.12-venv"],
+        )]);
+    }
+    // Checked whether Python was just installed or already there. Elsewhere
+    // uv can fetch its own 3.12+ for tina4python, so only warn; on 32-bit
+    // x86 (iSH) uv itself dies with SIGILL, so nothing below can work.
+    let too_old = check_exists("apk") && python_too_old();
+    if too_old && cfg!(target_arch = "x86") {
+        return false;
+    }
+    ensure_uv_unix();
+    true
 }
 
 /// Install uv (the Python package manager) on macOS/Linux via the official
@@ -129,18 +172,25 @@ fn ensure_uv_unix() {
         println!("  {} uv already installed", icon_ok().green());
         return;
     }
+    let Some(dl) = crate::console::unix_downloader() else {
+        eprintln!("  {} Cannot install uv: {}", icon_fail().red(), crate::console::NO_DOWNLOADER);
+        return;
+    };
     println!("  {} Installing uv...", icon_play().green());
     let status = Command::new("sh")
-        .args(["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"])
+        .args([
+            "-c",
+            &format!("{} | sh", dl.stdout_command("https://astral.sh/uv/install.sh")),
+        ])
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .status();
+    // A pipeline's status is its LAST command's, so a failed download still
+    // "succeeds": `sh` reads nothing and exits 0. Believe only a uv on PATH.
+    refresh_uv_path_unix();
     match status {
-        Ok(s) if s.success() => {
-            println!("  {} uv installed", icon_ok().green());
-            refresh_uv_path_unix();
-        }
-        Ok(s) => eprintln!("  {} uv installer exited with {}", icon_fail().red(), s),
+        Ok(_) if check_exists("uv") => println!("  {} uv installed", icon_ok().green()),
+        Ok(s) => eprintln!("  {} uv was not installed (installer exited with {})", icon_fail().red(), s),
         Err(e) => eprintln!("  {} Failed to launch shell: {}", icon_fail().red(), e),
     }
 }
@@ -282,7 +332,7 @@ fn install_php() {
     }
 
     println!(
-        "  {} Install tina4php: composer global require tina4stack/tina4-php",
+        "  {} Install tina4php: composer global require tina4stack/tina4php",
         icon_info().blue()
     );
 }
@@ -593,6 +643,72 @@ fn refresh_brew_path_macos() {
     std::env::set_var("PATH", parts.join(":"));
 }
 
+fn install_codeql() {
+    println!("\n{} Installing CodeQL (powers `tina4 codeql`)...", icon_play().green());
+
+    if check_exists("codeql") {
+        println!("  {} codeql already installed", icon_ok().green());
+    } else if console::is_windows() {
+        // CodeQL has no native Windows package that lands `codeql` on PATH, so
+        // we guide rather than guess: the gh extension or the official zip.
+        println!("  {} CodeQL has no native Windows package.", icon_warn().yellow());
+        println!("     Install the GitHub CLI, then: {}", "gh extensions install github/gh-codeql".cyan());
+        println!(
+            "     or download {} from {} and add it to PATH",
+            "codeql-win64.zip".cyan(),
+            "https://github.com/github/codeql-cli-binaries/releases".cyan()
+        );
+        return;
+    } else {
+        // macOS + Linux: Homebrew ships a codeql formula.
+        run_install_commands(&[("brew", &["install", "codeql"])]);
+    }
+
+    // The query packs the security-extended suite needs (idempotent re-download).
+    if check_exists("codeql") {
+        println!("  {} Downloading CodeQL query packs...", icon_play().green());
+        let _ = Command::new("codeql")
+            .args([
+                "pack", "download",
+                "codeql/javascript-queries", "codeql/ruby-queries",
+                "codeql/python-queries", "codeql/actions-queries",
+            ])
+            .status();
+        println!("  {} Pre-check a repo with: {}", icon_info().blue(), "tina4 codeql".cyan());
+    }
+}
+
+/// tina4-python needs Python 3.12+. Older Alpine releases ship older Python
+/// (iSH's App Store snapshot is Alpine v3.14, which has 3.9), so say so plainly
+/// instead of letting `uv tool install` fail with a resolver error later.
+/// True (after warning) when the installed Python is too old.
+fn python_too_old() -> bool {
+    let out = get_version("python3", "--version");
+    if let Some((major, minor)) = parse_python_version(&out) {
+        if (major, minor) < (3, 12) {
+            println!(
+                "  {} Python {}.{} is too old - Tina4 needs 3.12+, which Alpine ships from \
+                 v3.20. iSH on iOS is pinned to Alpine 3.14 (and uv does not run under its \
+                 emulator), so Python projects are not supported there yet.",
+                icon_warn().yellow(),
+                major,
+                minor
+            );
+            return true;
+        }
+    }
+    false
+}
+
+/// "Python 3.9.18" -> (3, 9). None when the text is not a Python version line.
+fn parse_python_version(text: &str) -> Option<(u32, u32)> {
+    let ver = text.trim().strip_prefix("Python ")?;
+    let mut parts = ver.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
 fn check_exists(cmd: &str) -> bool {
     which::which(cmd).is_ok()
 }
@@ -631,7 +747,13 @@ fn install_tina4_cli(cli_name: &str, pkg_cmd: &str, args: &[&str]) {
         println!("  {} {} already installed", icon_ok().green(), cli_name);
     } else if check_exists(pkg_cmd) {
         println!("  {} Installing {}...", icon_play().green(), cli_name);
-        let _ = Command::new(crate::console::resolve_cmd(pkg_cmd)).args(args).status();
+        match Command::new(crate::console::resolve_cmd(pkg_cmd)).args(args).status() {
+            Ok(s) if s.success() => {}
+            // Say so: a crashed installer (uv dies with SIGILL under iSH's
+            // emulator) otherwise ends the run in silence.
+            Ok(s) => eprintln!("  {} {} was not installed ({} exited with {})", icon_fail().red(), cli_name, pkg_cmd, s),
+            Err(e) => eprintln!("  {} {} was not installed: {}", icon_fail().red(), cli_name, e),
+        }
     } else {
         println!(
             "  {} Cannot install {} — {} not found",
@@ -639,5 +761,16 @@ fn install_tina4_cli(cli_name: &str, pkg_cmd: &str, args: &[&str]) {
             cli_name,
             pkg_cmd
         );
+    }
+}
+
+#[cfg(test)]
+mod python_version_tests {
+    #[test]
+    fn parses_python_version_lines() {
+        assert_eq!(super::parse_python_version("Python 3.9.18\n"), Some((3, 9)));
+        assert_eq!(super::parse_python_version("Python 3.12.4"), Some((3, 12)));
+        assert_eq!(super::parse_python_version(""), None);
+        assert_eq!(super::parse_python_version("command not found"), None);
     }
 }

@@ -27,13 +27,6 @@
       "https://github.com/connorskees/grass/blob/e0bb9e2eabfc3a58e42b03089cd7b22c68d09d0b/LICENSE"
     ]
   },
-  "objc2@0.6.4": {
-    "file": "objc2-0.6.4.txt",
-    "sha256": "311d9714868bcca9aefbb82317b7b3a2b7f71ca442e0ee91ad157d40fec47318",
-    "sources": [
-      "https://github.com/madsmtm/objc2/blob/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md"
-    ]
-  },
   "objc2-encode@4.1.0": {
     "file": "objc2-encode-4.1.0.txt",
     "sha256": "f82a830e43d1545198ff5895c7b3359e0020cc82fa7e1c0c03f5d98116344dc7",
@@ -41,12 +34,19 @@
       "https://github.com/madsmtm/objc2/blob/8d214f5477365ffcbcbb7de058c86ed9a518efb7/LICENSE.md"
     ]
   },
-  "r-efi@5.3.0": {
-    "file": "r-efi-5.3.0.txt",
-    "sha256": "76c43b76ba9f6f5196fa6f49cdb1ec03415469e4e3d68b3fd2898ea5da95ba28",
+  "objc2@0.6.4": {
+    "file": "objc2-0.6.4.txt",
+    "sha256": "311d9714868bcca9aefbb82317b7b3a2b7f71ca442e0ee91ad157d40fec47318",
     "sources": [
-      "https://github.com/r-efi/r-efi/blob/97b55bed1c2c91dcbf787674849f05337ff80b33/README.md",
-      "https://github.com/r-efi/r-efi/blob/97b55bed1c2c91dcbf787674849f05337ff80b33/AUTHORS"
+      "https://github.com/madsmtm/objc2/blob/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md"
+    ]
+  },
+  "r-efi@6.0.0": {
+    "file": "r-efi-6.0.0.txt",
+    "sha256": "778f369e0bce04f96acfdf6c6b83c887a692c479eecf266c0a9409ed2a4315dc",
+    "sources": [
+      "https://github.com/r-efi/r-efi/blob/7e1b0322d31d625f81a5656096330934f9cd835d/README.md",
+      "https://github.com/r-efi/r-efi/blob/7e1b0322d31d625f81a5656096330934f9cd835d/AUTHORS"
     ]
   },
   "tree-sitter-ruby@0.23.1": {
@@ -61,15 +61,6 @@
     "sha256": "3272983479a7b82d149d79cbf96badb735bb5a6ae74c2042a4efc0fc7e79b85a",
     "sources": [
       "https://github.com/tree-sitter/tree-sitter-typescript/blob/f975a621f4e7f532fe322e13c4f79495e0a7b2e7/LICENSE"
-    ]
-  },
-  "wasip2@1.0.2+wasi-0.2.9": {
-    "file": "wasip2-1.0.2+wasi-0.2.9.txt",
-    "sha256": "ebb20cbf739dcb82cb184ddb0117114124b3471fec6c5da7c2e82e6d752e8b78",
-    "sources": [
-      "https://github.com/bytecodealliance/wasi-rs/blob/06ce201370fcde0d1b0d47cac8ecb1b0b312c9f9/LICENSE-APACHE",
-      "https://github.com/bytecodealliance/wasi-rs/blob/06ce201370fcde0d1b0d47cac8ecb1b0b312c9f9/LICENSE-Apache-2.0_WITH_LLVM-exception",
-      "https://github.com/bytecodealliance/wasi-rs/blob/06ce201370fcde0d1b0d47cac8ecb1b0b312c9f9/LICENSE-MIT"
     ]
   }
 }

@@ -34,6 +34,11 @@ const IGNORED_SUBSTRINGS: &[&str] = &[
     "/target/",
     "/logs/",
     "/.tina4/",
+    // The native metrics engine writes this run-history file on every scan
+    // (unless --no-history). The dashboard scans with --no-history, but a
+    // manual `tina4 metrics` in a watched project must not trigger a reload
+    // loop either - the file is a generated artifact, not source.
+    ".tina4-metrics.json",
 ];
 
 /// File extensions whose events we always ignore.
@@ -94,13 +99,6 @@ fn file_mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
-/// Atomic flag the watcher SETS when it detects a code-file change.
-/// Main's serve loop polls this flag (via try_wait + check) and, when
-/// it sees the flag set, kills the child it owns + respawns. Decouples
-/// the watcher from the child's lifecycle (the watcher doesn't need
-/// to own a reference to the child — it just shouts "restart please").
-type RespawnHandle = std::sync::Arc<std::sync::atomic::AtomicBool>;
-
 fn is_code_change(file: &str) -> bool {
     // Files that require a process restart because language runtimes
     // cache modules in memory. CSS/SCSS/template changes go via the
@@ -119,19 +117,101 @@ fn is_code_change(file: &str) -> bool {
 /// the child process (main's respawn loop spins up a fresh one). On
 /// asset changes (CSS/SCSS/templates), POST /__dev/api/reload so the
 /// framework signals the browser to soft-reload. Blocks forever.
-pub fn watch_and_reload(port: u16, _respawn: Option<RespawnHandle>) {
-    let (tx, rx) = mpsc::channel();
-    // Use PollWatcher instead of RecommendedWatcher (FSEvents on macOS)
-    // because FSEvents stops delivering events when the parent process
-    // is detached (setsid / start_new_session=True), which is exactly
-    // how the dev admin spawns tina4 serve from a Python subprocess.
-    // PollWatcher just stat()s every interval — works in every context,
-    // costs ~1s of latency per change.
-    let config = Config::default().with_poll_interval(Duration::from_secs(1));
+/// Subscribe the watcher to src/ + migrations/ (recursively) and .env, resolving
+/// each path to an absolute form first (notify needs that on macOS). Warns if
+/// nothing could be watched. Split out of watch_and_reload.
+/// Handle one meaningful filesystem event: drop spurious re-fires via an mtime
+/// check, debounce bursts, classify the change (css/code/reload), and fire a
+/// best-effort POST to the framework's /__dev/api/reload. Split out of
+/// watch_and_reload's event loop; each early `return` was a `continue` there.
+fn handle_fs_event(
+    event: &Event,
+    mtimes: &mut HashMap<PathBuf, SystemTime>,
+    last_reload: &mut Instant,
+    url: &str,
+) {
+    // Layer 1+2+3: event-kind / path / extension filter
+    if !is_meaningful_event(event) {
+        return;
+    }
 
-    let mut watcher: PollWatcher =
-        PollWatcher::new(tx, config).expect("Failed to create watcher");
+    // Layer 4: real-mtime check. On overlayfs the watcher
+    // polls and re-fires events for unchanged files; skip
+    // if the mtime hasn't advanced since we last saw it.
+    let mut any_changed = false;
+    let mut changed_path: Option<PathBuf> = None;
+    for p in &event.paths {
+        if let Some(mt) = file_mtime(p) {
+            match mtimes.get(p) {
+                Some(prev) if *prev == mt => continue,
+                _ => {
+                    mtimes.insert(p.clone(), mt);
+                    any_changed = true;
+                    if changed_path.is_none() {
+                        changed_path = Some(p.clone());
+                    }
+                }
+            }
+        } else {
+            // File doesn't exist (Remove event) — still meaningful
+            any_changed = true;
+            if changed_path.is_none() {
+                changed_path = Some(p.clone());
+            }
+        }
+    }
+    if !any_changed {
+        eprintln!("[watcher]   ↳ no mtime change (or already seen)");
+        return;
+    }
 
+    // Global debounce: coalesce bursts within 500ms
+    if last_reload.elapsed() < Duration::from_millis(500) {
+        eprintln!("[watcher]   ↳ debounced ({}ms since last)", last_reload.elapsed().as_millis());
+        return;
+    }
+    *last_reload = Instant::now();
+    eprintln!("[watcher]   ↳ FIRING: file={}", changed_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default());
+
+    let file = changed_path
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    // Determine type: css for .css/.scss, code-change for
+    // .py/.php/.rb/.ts/.js/.env (triggers respawn),
+    // reload for everything else (templates, markdown).
+    let is_code = is_code_change(&file);
+    let reload_type = if file.ends_with(".css") || file.ends_with(".scss") {
+        "css"
+    } else if is_code {
+        "code"
+    } else {
+        "reload"
+    };
+
+    // Code changes do NOT respawn the worker anymore. The
+    // framework re-imports changed modules in-process on
+    // POST /__dev/api/reload (the server stays up — the dev
+    // dashboard and WebSocket connections survive) and pushes
+    // an instant WebSocket reload to the browser. Everything
+    // falls through to the single POST below. The `_respawn`
+    // handle is retained by main only for crash recovery.
+
+    // POST to the framework's reload endpoint (assets path)
+    let body = format!(
+        r#"{{"type":"{}","file":"{}"}}"#,
+        reload_type,
+        file.replace('\\', "/")
+    );
+
+    // Fire-and-forget HTTP POST (don't block the watcher)
+    let url_clone = url.to_string();
+    std::thread::spawn(move || {
+        let _ = ureq_post(&url_clone, &body);
+    });
+}
+
+fn subscribe_watch_dirs(watcher: &mut PollWatcher) {
     let dirs = ["src", "migrations"];
     let mut watched_count = 0;
     for dir in &dirs {
@@ -160,6 +240,22 @@ pub fn watch_and_reload(port: u16, _respawn: Option<RespawnHandle>) {
         eprintln!("{} watcher started but watching ZERO directories — file changes won't fire",
             icon_fail().red());
     }
+}
+
+pub fn watch_and_reload(port: u16) {
+    let (tx, rx) = mpsc::channel();
+    // Use PollWatcher instead of RecommendedWatcher (FSEvents on macOS)
+    // because FSEvents stops delivering events when the parent process
+    // is detached (setsid / start_new_session=True), which is exactly
+    // how the dev admin spawns tina4 serve from a Python subprocess.
+    // PollWatcher just stat()s every interval — works in every context,
+    // costs ~1s of latency per change.
+    let config = Config::default().with_poll_interval(Duration::from_secs(1));
+
+    let mut watcher: PollWatcher =
+        PollWatcher::new(tx, config).expect("Failed to create watcher");
+
+    subscribe_watch_dirs(&mut watcher);
 
     // Track last known mtime per file so we can drop spurious events.
     let mut mtimes: HashMap<PathBuf, SystemTime> = HashMap::new();
@@ -168,87 +264,7 @@ pub fn watch_and_reload(port: u16, _respawn: Option<RespawnHandle>) {
 
     loop {
         match rx.recv() {
-            Ok(Ok(event)) => {
-                // Layer 1+2+3: event-kind / path / extension filter
-                if !is_meaningful_event(&event) {
-                    continue;
-                }
-
-                // Layer 4: real-mtime check. On overlayfs the watcher
-                // polls and re-fires events for unchanged files; skip
-                // if the mtime hasn't advanced since we last saw it.
-                let mut any_changed = false;
-                let mut changed_path: Option<PathBuf> = None;
-                for p in &event.paths {
-                    if let Some(mt) = file_mtime(p) {
-                        match mtimes.get(p) {
-                            Some(prev) if *prev == mt => continue,
-                            _ => {
-                                mtimes.insert(p.clone(), mt);
-                                any_changed = true;
-                                if changed_path.is_none() {
-                                    changed_path = Some(p.clone());
-                                }
-                            }
-                        }
-                    } else {
-                        // File doesn't exist (Remove event) — still meaningful
-                        any_changed = true;
-                        if changed_path.is_none() {
-                            changed_path = Some(p.clone());
-                        }
-                    }
-                }
-                if !any_changed {
-                    eprintln!("[watcher]   ↳ no mtime change (or already seen)");
-                    continue;
-                }
-
-                // Global debounce: coalesce bursts within 500ms
-                if last_reload.elapsed() < Duration::from_millis(500) {
-                    eprintln!("[watcher]   ↳ debounced ({}ms since last)", last_reload.elapsed().as_millis());
-                    continue;
-                }
-                last_reload = Instant::now();
-                eprintln!("[watcher]   ↳ FIRING: file={}", changed_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default());
-
-                let file = changed_path
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_default();
-
-                // Determine type: css for .css/.scss, code-change for
-                // .py/.php/.rb/.ts/.js/.env (triggers respawn),
-                // reload for everything else (templates, markdown).
-                let is_code = is_code_change(&file);
-                let reload_type = if file.ends_with(".css") || file.ends_with(".scss") {
-                    "css"
-                } else if is_code {
-                    "code"
-                } else {
-                    "reload"
-                };
-
-                // Code changes do NOT respawn the worker anymore. The
-                // framework re-imports changed modules in-process on
-                // POST /__dev/api/reload (the server stays up — the dev
-                // dashboard and WebSocket connections survive) and pushes
-                // an instant WebSocket reload to the browser. Everything
-                // falls through to the single POST below. The `_respawn`
-                // handle is retained by main only for crash recovery.
-
-                // POST to the framework's reload endpoint (assets path)
-                let body = format!(
-                    r#"{{"type":"{}","file":"{}"}}"#,
-                    reload_type,
-                    file.replace('\\', "/")
-                );
-
-                // Fire-and-forget HTTP POST (don't block the watcher)
-                let url_clone = url.clone();
-                std::thread::spawn(move || {
-                    let _ = ureq_post(&url_clone, &body);
-                });
-            }
+            Ok(Ok(event)) => handle_fs_event(&event, &mut mtimes, &mut last_reload, &url),
             Ok(Err(e)) => {
                 // `notify` emitted an error event — log and continue.
                 eprintln!("{} Watcher event error: {}", icon_fail().red(), e);
@@ -480,6 +496,18 @@ mod tests {
         let e = ev(
             EventKind::Modify(ModifyKind::Data(DataChange::Any)),
             "/project/data/app.db-wal",
+        );
+        assert!(!is_meaningful_event(&e));
+    }
+
+    #[test]
+    fn tina4_metrics_history_file_is_ignored() {
+        // Regression: a `tina4 metrics` scan writes .tina4-metrics.json; the
+        // watcher must not treat that write as a source change, or the dashboard
+        // reloads itself every time it measures (a ~2-second reload loop).
+        let e = ev(
+            EventKind::Modify(ModifyKind::Data(DataChange::Any)),
+            "/project/src/.tina4-metrics.json",
         );
         assert!(!is_meaningful_event(&e));
     }

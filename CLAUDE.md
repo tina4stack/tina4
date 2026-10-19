@@ -1,6 +1,6 @@
 # Tina4 CLI
 
-Version 3.8.97 — Unified CLI for Python, PHP, Ruby, Node.js, and tina4-js projects.
+Version 3.8.101 — Unified CLI for Python, PHP, Ruby, Node.js, and tina4-js projects.
 
 ## Build & Test
 
@@ -38,7 +38,7 @@ tina4 doctor                     Check installed languages/tools, ports, AND glo
                                  Tina4 AI-skills currency (~/.claude/skills vs the latest
                                  published ref). Strictly READ-ONLY: it reports + suggests a
                                  refresh; it writes nothing and NEVER touches a project CLAUDE.md.
-tina4 install <target>           Install a language runtime or tina4-js
+tina4 install <target>           Install a language runtime, tina4-js, or codeql (for tina4 codeql)
 tina4 generate <what> <name>     Generate model, route, migration, middleware
 tina4 migrate                    Run database migrations
 tina4 test                       Run tests
@@ -129,6 +129,26 @@ tina4 metrics                    Report code-health top offenders (complexity, l
                                  listed under `unparsed` in --json, counted as
                                  `files_refused` in the summary, and raised as a `warn`
                                  offender so --fail-on warn goes red on it.
+tina4 codeql                     Run CodeQL locally as a pre-check, matching CI's GitHub
+                                 "default setup (extended)" scan (the per-language
+                                 security-extended suite) over JS/TS, Ruby, Python and
+                                 GitHub Actions — so findings show BEFORE CI. Needs the
+                                 codeql CLI (`brew install codeql`, then
+                                 `codeql pack download codeql/javascript-queries
+                                 codeql/ruby-queries codeql/python-queries
+                                 codeql/actions-queries`). Auto-detects the project
+                                 language (+ actions when .github/workflows exists);
+                                 override with repeatable --language, skip workflows with
+                                 --no-actions, scan elsewhere with --path. Creates a
+                                 throwaway DB per language, analyses the security-extended
+                                 suite, prints findings grouped by rule id + file:line, and
+                                 EXITS WITH THE FINDING COUNT so it gates a pre-push hook:
+                                 `tina4 codeql || { echo "CodeQL findings"; exit 1; }`.
+                                 PHP is skipped (no CodeQL support; CI uses Semgrep). Faithful
+                                 to CI: it only flags source→sink taint flows, not a grep.
+                                 Cost is DB creation (actions/ruby/python seconds; a full
+                                 JS/TS monorepo a few minutes), so it is a pre-push / on-demand
+                                 check, not pre-commit.
 tina4 scss                       Compile SCSS files
 tina4 ai                         Detect AI tools and install context
 tina4 deploy <target> [--runtime R]
@@ -142,6 +162,16 @@ tina4 deploy <target> [--runtime R]
                                  docker-entrypoint.fpm.sh for fpm. --runtime on a
                                  non-PHP project is REFUSED, not ignored.
 tina4 update                     Self-update the binary
+tina4 uninstall [--dry-run] [--yes]
+                                 Remove everything tina4 put on this machine: the
+                                 config + credentials, the installed AI skills (the
+                                 tina4-* folders + .tina4-skills-ref marker across
+                                 ~/.claude, ~/.agents, ~/.cursor), and the binary
+                                 itself. Lists every target first and asks before it
+                                 removes anything. --dry-run only reports; --yes skips
+                                 the prompts. The current project's ./.tina4,
+                                 .tina4-metrics.json and .tina4-docs are offered as a
+                                 separate, explicit opt-in - no filesystem-wide search.
 ```
 
 ## Windows `tina4 setup` — the "drops to the prompt" symptom (RESOLVED in 3.8.40)

@@ -13,7 +13,12 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+/// Makes each holder's ready-file name unique even when two tests pick the same
+/// ephemeral port in the same process.
+static HOLDER_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn temp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -35,30 +40,73 @@ fn free_port() -> u16 {
         .port()
 }
 
-/// A separate process listening on `port`, so a wrong kill is observable and
-/// cannot take the test harness down with it.
-fn holder(port: u16) -> Option<Child> {
+/// A separate process that LISTENS on a free port, so a wrong kill is observable
+/// and cannot take the test harness down with it. Returns the port it actually
+/// bound together with the child, so the port is genuinely OWNED by this holder.
+///
+/// Identity-guarded readiness (TAKEOVER): the child announces itself by creating
+/// a unique ready-file only IT writes, after a successful bind. The old version
+/// inferred readiness from a bare "the port is now taken" probe - which ANY
+/// racing process satisfies, so under parallel load two tests could pick the same
+/// ephemeral port (free_port releases it before the holder binds), one holder
+/// would win the bind and the other's python would exit on OSError, yet holder()
+/// returned that DEAD child as the "holder". serve then correctly left the real
+/// listener alone, the test inspected the wrong (dead) child, and it flaked with
+/// "serve killed a process that is not Tina4's". Owning port selection here and
+/// retrying on a lost bind race removes that misdiagnosis.
+fn holder() -> Option<(u16, Child)> {
     let python = ["python3", "python"]
         .into_iter()
         .find(|p| Command::new(p).arg("-V").output().is_ok())?;
-    let child = Command::new(python)
-        .args([
-            "-c",
-            &format!(
-                "import socket,time\ns=socket.socket()\ns.bind(('127.0.0.1',{}))\ns.listen()\ntime.sleep(60)",
-                port
-            ),
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
-        assert!(Instant::now() < deadline, "the holder never bound {}", port);
-        std::thread::sleep(Duration::from_millis(50));
+    for _ in 0..25 {
+        let port = free_port();
+        let uniq = HOLDER_SEQ.fetch_add(1, Ordering::Relaxed);
+        let ready = std::env::temp_dir().join(format!(
+            "tina4-holder-ready-{}-{}-{}",
+            std::process::id(),
+            port,
+            uniq
+        ));
+        let _ = fs::remove_file(&ready);
+        // bind; on OSError (someone else holds this port) exit non-zero WITHOUT
+        // writing the ready-file, so holder() knows this child lost the race.
+        let code = format!(
+            "import socket,sys\n\
+             s=socket.socket()\n\
+             try:\n    s.bind(('127.0.0.1',{port}))\n\
+             except OSError:\n    sys.exit(3)\n\
+             s.listen()\n\
+             open(r'{ready}','w').close()\n\
+             import time; time.sleep(60)\n",
+            ready = ready.display()
+        );
+        let mut child = Command::new(python)
+            .args(["-c", &code])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if ready.exists() {
+                let _ = fs::remove_file(&ready);
+                return Some((port, child)); // OUR child bound and said so.
+            }
+            match child.try_wait() {
+                Ok(Some(_)) => break, // lost the bind race (or python error) -> fresh port
+                Ok(None) => {}
+                Err(_) => break,
+            }
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let _ = fs::remove_file(&ready);
     }
-    Some(child)
+    None
 }
 
 fn alive(child: &mut Child) -> bool {
@@ -119,8 +167,7 @@ fn serve(dir: &Path, args: &[&str]) -> (i32, String) {
 #[test]
 fn a_foreign_holder_of_an_explicit_port_is_left_running() {
     let dir = temp_dir("foreign-explicit");
-    let port = free_port();
-    let Some(mut other) = holder(port) else {
+    let Some((port, mut other)) = holder() else {
         eprintln!("skipped: no python to hold the port");
         return;
     };
@@ -139,8 +186,7 @@ fn a_foreign_holder_of_an_explicit_port_is_left_running() {
 #[test]
 fn a_foreign_holder_of_the_default_port_is_left_running() {
     let dir = temp_dir("foreign-default");
-    let port = free_port();
-    let Some(mut other) = holder(port) else {
+    let Some((port, mut other)) = holder() else {
         eprintln!("skipped: no python to hold the port");
         return;
     };
@@ -158,8 +204,7 @@ fn a_foreign_holder_of_the_default_port_is_left_running() {
 #[test]
 fn a_pid_file_naming_another_process_does_not_make_the_holder_ours() {
     let dir = temp_dir("stale-record");
-    let port = free_port();
-    let Some(mut other) = holder(port) else {
+    let Some((port, mut other)) = holder() else {
         eprintln!("skipped: no python to hold the port");
         return;
     };
@@ -179,8 +224,7 @@ fn a_pid_file_naming_another_process_does_not_make_the_holder_ours() {
 #[test]
 fn this_projects_own_dev_server_is_still_reclaimed() {
     let dir = temp_dir("own");
-    let port = free_port();
-    let Some(mut ours) = holder(port) else {
+    let Some((port, mut ours)) = holder() else {
         eprintln!("skipped: no python to hold the port");
         return;
     };
@@ -207,8 +251,7 @@ fn this_projects_own_dev_server_is_still_reclaimed() {
 #[test]
 fn a_connected_client_is_not_named_as_the_holder() {
     let dir = temp_dir("client");
-    let port = free_port();
-    let Some(mut other) = holder(port) else {
+    let Some((port, mut other)) = holder() else {
         eprintln!("skipped: no python to hold the port");
         return;
     };
@@ -238,8 +281,7 @@ fn a_connected_client_is_not_named_as_the_holder() {
 #[test]
 fn opt_out_leaves_even_our_own_server_running() {
     let dir = temp_dir("optout");
-    let port = free_port();
-    let Some(mut ours) = holder(port) else {
+    let Some((port, mut ours)) = holder() else {
         eprintln!("skipped: no python to hold the port");
         return;
     };
@@ -268,8 +310,7 @@ fn opt_out_leaves_even_our_own_server_running() {
 #[test]
 fn production_leaves_even_our_own_server_running() {
     let dir = temp_dir("prod");
-    let port = free_port();
-    let Some(mut ours) = holder(port) else {
+    let Some((port, mut ours)) = holder() else {
         eprintln!("skipped: no python to hold the port");
         return;
     };

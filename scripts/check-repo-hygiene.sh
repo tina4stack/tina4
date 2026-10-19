@@ -15,8 +15,10 @@
 #   3. zero-byte tracked files — the usual shape of a truncated or half-staged
 #      commit;
 #   4. junk / editor / OS / merge-leftover files that should never be tracked
-#      (.DS_Store, *.swp/*.swo, *~, *.bak, *.orig, *.rej), plus a stray
-#      .tina4-metrics.json (per-project run-history data, never the CLI's own);
+#      (.DS_Store, *.swp/*.swo, *~, *.bak, *.orig, *.rej), plus a STRAY
+#      .tina4-metrics.json (per-project run-history data) left anywhere other
+#      than the one committed ratchet baseline at src/.tina4-metrics.json, which
+#      the Metrics regression gate reads and is allowed;
 #   5. NUL bytes inside a text-source file — a corrupt or truly-binary file
 #      masquerading as source.
 #
@@ -49,7 +51,10 @@ done
 [ -n "$empty" ] && fail "zero-byte tracked files (truncated or half-staged?):" $empty
 
 # 4) junk / editor / OS / merge-leftover files that must never be tracked
-junk=$(git ls-files | grep -E '(^|/)\.DS_Store$|(^|/)\.tina4-metrics\.json$|\.(swp|swo|orig|rej|bak)$|~$' || true)
+# The committed ratchet baseline src/.tina4-metrics.json is deliberately tracked
+# (the Metrics gate diffs against it); exclude exactly that path, so a stray
+# .tina4-metrics.json left anywhere else is still caught.
+junk=$(git ls-files | grep -E '(^|/)\.DS_Store$|(^|/)\.tina4-metrics\.json$|\.(swp|swo|orig|rej|bak)$|~$' | grep -vxF 'src/.tina4-metrics.json' || true)
 [ -n "$junk" ] && fail "junk / hidden / merge-leftover files must not be tracked:" $junk
 
 # 5) NUL bytes in a text-source file (corrupt or mislabelled binary)

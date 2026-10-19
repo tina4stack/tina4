@@ -198,6 +198,21 @@ def gate_backend(report: Report, binary: str, proj: Path, language: str, fixture
         if globs is not None:
             check_globs(report, proj, globs, f"crud {name}")
 
+        # ADR-0094: the crud route file must render the to_crud admin PAGE (the
+        # REST backend is AutoCrud; this one file owns the GET /admin/<table>
+        # page via Crud.to_crud / Crud::toCrud / toCrud). Assert the generated
+        # route actually wires it, so "generate crud" can never regress to a
+        # hand-written list/detail that bypasses to_crud.
+        marker = lang.get("crud_admin_marker")
+        if marker and files is not None:
+            route_file = next((proj / r for r in files if "src/routes/" in r), None)
+            if route_file is not None and route_file.is_file():
+                body = route_file.read_text(errors="ignore")
+                if marker in body:
+                    report.ok(f"crud {name}: route renders the to_crud admin page")
+                else:
+                    report.fail(f"crud {name}: route does not render to_crud (no '{marker}')")
+
     # 3. routes — bug 2: the generated routes must actually LOAD and be listed.
     res = run(binary, ["routes"], proj)
     combined = res.stdout + res.stderr
@@ -216,7 +231,7 @@ def gate_backend(report: Report, binary: str, proj: Path, language: str, fixture
     segments = {seg for p in paths for seg in p.strip("/").split("/")}
     for entry in fixture["crud"]:
         bug = entry.get("known_framework_bug")
-        want = entry["route_plural"]
+        want = entry["route_segment"]
         present = want in segments
         bad = sorted({b for b in entry.get("must_not_appear", []) if any(b in p for p in paths)})
         clean = present and not bad

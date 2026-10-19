@@ -44,6 +44,120 @@ pub fn run() {
     );
     println!();
 
+    print_runtime_table();
+
+    print_cli_table();
+
+    // --- CodeQL (optional, powers `tina4 codeql`) ---
+    check_codeql();
+
+    // --- Tina4 AI skills (global ~/.claude/skills) ---
+    check_skills_currency();
+    check_codex_skills_currency();
+    check_cursor_skills_currency();
+
+    // --- macOS build tools (Xcode Command Line Tools) ---
+    // Homebrew, git, and the PHP/Ruby/Node runtimes need these; Python (uv) does
+    // not. On a fresh Mac they're the usual reason `tina4 setup` can't install.
+    if cfg!(target_os = "macos") {
+        println!();
+        println!("  {}", "Build tools (macOS)".bold());
+        println!("  {}", "─".repeat(70));
+        let clt = std::process::Command::new("xcode-select")
+            .arg("-p")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if clt {
+            println!(
+                "  {} {:<28} {}",
+                icon_ok().green(),
+                "Xcode Command Line Tools",
+                "installed".cyan()
+            );
+        } else {
+            println!(
+                "  {} {:<28} {}  {}  {}",
+                icon_fail().red(),
+                "Xcode Command Line Tools",
+                "not installed".dimmed(),
+                "→".dimmed(),
+                "needed for Homebrew/git/PHP/Ruby/Node — run: xcode-select --install (Python needs none)".yellow()
+            );
+        }
+    }
+
+    // --- Port availability ---
+    println!();
+    println!("  {}", "Ports".bold());
+    println!("  {}", "─".repeat(70));
+
+    let ports = [
+        (7145u16, "PHP"),
+        (7146u16, "Python"),
+        (7147u16, "Ruby"),
+        (7148u16, "Node.js"),
+        (5173u16, "tina4js"),
+    ];
+
+    for (port, lang) in &ports {
+        let free = std::net::TcpListener::bind(("127.0.0.1", *port)).is_ok();
+        let icon = if free {
+            icon_ok().green().to_string()
+        } else {
+            icon_warn().yellow().to_string()
+        };
+        let status = if free {
+            "free".green().to_string()
+        } else {
+            format!("{}", "in use".yellow())
+        };
+        println!(
+            "  {} {:<6} ({:<8}) {}",
+            icon, port, lang, status
+        );
+    }
+
+    // --- Windows PATH sanity check ---
+    #[cfg(windows)]
+    {
+        println!();
+        println!("  {}", "Windows PATH".bold());
+        println!("  {}", "─".repeat(70));
+        check_windows_path();
+    }
+
+    // --- Current project detection ---
+    println!();
+    match crate::detect::detect_language() {
+        Some(info) => {
+            let version_suffix = info
+                .version
+                .as_deref()
+                .map(|v| format!(" (v{})", v))
+                .unwrap_or_default();
+            println!(
+                "  {} Current directory: {} project{}",
+                icon_play().green(),
+                info.language.cyan(),
+                version_suffix.dimmed()
+            );
+        }
+        None => {
+            println!(
+                "  {} No Tina4 project detected in current directory",
+                icon_info().blue()
+            );
+        }
+    }
+
+    println!();
+}
+
+/// Render the language-runtime + package-manager table in `tina4 doctor`.
+fn print_runtime_table() {
     let tools = [
         ToolCheck {
             name: "Python",
@@ -137,7 +251,10 @@ pub fn run() {
             tool.name, status_icon, ver, pkg_icon, pkg_name, pkg_ver
         );
     }
+}
 
+/// Render the Tina4 per-language CLI availability table in `tina4 doctor`.
+fn print_cli_table() {
     // --- Tina4 CLIs ---
     println!();
     println!("  {}", "Tina4 CLIs".bold());
@@ -183,104 +300,6 @@ pub fn run() {
         };
         println!("  {} {:<16} {:<12} {}", icon, cli.name, cli.lang, status_text);
     }
-
-    // --- Tina4 AI skills (global ~/.claude/skills) ---
-    check_skills_currency();
-    check_codex_skills_currency();
-    check_cursor_skills_currency();
-
-    // --- macOS build tools (Xcode Command Line Tools) ---
-    // Homebrew, git, and the PHP/Ruby/Node runtimes need these; Python (uv) does
-    // not. On a fresh Mac they're the usual reason `tina4 setup` can't install.
-    if cfg!(target_os = "macos") {
-        println!();
-        println!("  {}", "Build tools (macOS)".bold());
-        println!("  {}", "─".repeat(70));
-        let clt = std::process::Command::new("xcode-select")
-            .arg("-p")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if clt {
-            println!(
-                "  {} {:<28} {}",
-                icon_ok().green(),
-                "Xcode Command Line Tools",
-                "installed".cyan()
-            );
-        } else {
-            println!(
-                "  {} {:<28} {}  {}  {}",
-                icon_fail().red(),
-                "Xcode Command Line Tools",
-                "not installed".dimmed(),
-                "→".dimmed(),
-                "needed for Homebrew/git/PHP/Ruby/Node — run: xcode-select --install (Python needs none)".yellow()
-            );
-        }
-    }
-
-    // --- Port availability ---
-    println!();
-    println!("  {}", "Ports".bold());
-    println!("  {}", "─".repeat(70));
-
-    let ports = [
-        (7145u16, "PHP"),
-        (7146u16, "Python"),
-        (7147u16, "Ruby"),
-        (7148u16, "Node.js"),
-        (5173u16, "tina4js"),
-    ];
-
-    for (port, lang) in &ports {
-        let free = std::net::TcpListener::bind(("127.0.0.1", *port)).is_ok();
-        let icon = if free {
-            icon_ok().green().to_string()
-        } else {
-            icon_warn().yellow().to_string()
-        };
-        let status = if free {
-            "free".green().to_string()
-        } else {
-            format!("{}", "in use".yellow())
-        };
-        println!(
-            "  {} {:<6} ({:<8}) {}",
-            icon, port, lang, status
-        );
-    }
-
-    // --- Windows PATH sanity check ---
-    #[cfg(windows)]
-    {
-        println!();
-        println!("  {}", "Windows PATH".bold());
-        println!("  {}", "─".repeat(70));
-        check_windows_path();
-    }
-
-    // --- Current project detection ---
-    println!();
-    match crate::detect::detect_language() {
-        Some(info) => {
-            println!(
-                "  {} Current directory: {} project",
-                icon_play().green(),
-                info.language.cyan()
-            );
-        }
-        None => {
-            println!(
-                "  {} No Tina4 project detected in current directory",
-                icon_info().blue()
-            );
-        }
-    }
-
-    println!();
 }
 
 #[cfg(windows)]
@@ -325,6 +344,51 @@ fn check_tool(commands: &[&str], version_flag: &str) -> (bool, String) {
         }
     }
     (false, String::new())
+}
+
+/// Report the CodeQL CLI that powers `tina4 codeql`. It is OPTIONAL -- a pre-check
+/// developers opt into, not a runtime requirement -- so a missing one is a warn
+/// with the platform's install command, never a hard failure. CodeQL has no
+/// native package on Windows/Linux, so those fall back to the gh extension or the
+/// official release zip.
+fn check_codeql() {
+    println!();
+    println!("  {}", "CodeQL pre-check (tina4 codeql)".bold());
+    println!("  {}", "─".repeat(70));
+
+    let packs = "codeql pack download codeql/javascript-queries codeql/ruby-queries \
+codeql/python-queries codeql/actions-queries";
+    let (found, version) = check_tool(&["codeql"], "version");
+    if found {
+        let shown = if version.is_empty() {
+            "installed".to_string()
+        } else {
+            format!("installed  {version}")
+        };
+        println!("  {} {:<28} {}", icon_ok().green(), "codeql CLI", shown.cyan());
+        println!("       {} {}", "packs:".dimmed(), packs.dimmed());
+    } else {
+        let install = if cfg!(target_os = "macos") {
+            "brew install codeql".to_string()
+        } else if cfg!(target_os = "windows") {
+            "gh extensions install github/gh-codeql   \
+(or download codeql-win64.zip from github.com/github/codeql-cli-binaries/releases and add it to PATH)"
+                .to_string()
+        } else {
+            "brew install codeql   \
+(or download codeql-linux64.zip from github.com/github/codeql-cli-binaries/releases and add it to PATH)"
+                .to_string()
+        };
+        println!(
+            "  {} {:<28} {}  {}  {}",
+            icon_warn().yellow(),
+            "codeql CLI",
+            "not found (optional)".dimmed(),
+            "→".dimmed(),
+            format!("run: {install}").yellow()
+        );
+        println!("       {} {}", "then:".dimmed(), packs.yellow());
+    }
 }
 
 fn strip_ansi(s: &str) -> String {

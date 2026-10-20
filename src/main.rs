@@ -337,6 +337,15 @@ enum AiSubcommand {
     },
 }
 
+/// Android denies apps hard links, so every uv that tina4 starts (uv sync,
+/// uv run, uv tool install) would warn "Failed to hardlink files" and then
+/// copy anyway. Ask for the copy up front; a user's own setting wins.
+fn prefer_uv_copy_on_android() {
+    if console::is_android() && std::env::var_os("UV_LINK_MODE").is_none() {
+        std::env::set_var("UV_LINK_MODE", "copy");
+    }
+}
+
 fn main() {
     #[cfg(unix)]
     // Rust ignores SIGPIPE, which turns a normal early-closing pipeline
@@ -348,12 +357,7 @@ fn main() {
 
     console::enable_ansi();
 
-    // Android denies apps hard links, so every uv that tina4 starts (uv sync,
-    // uv run, uv tool install) would warn "Failed to hardlink files" and then
-    // copy anyway. Ask for the copy up front; a user's own setting wins.
-    if console::is_android() && std::env::var_os("UV_LINK_MODE").is_none() {
-        std::env::set_var("UV_LINK_MODE", "copy");
-    }
+    prefer_uv_copy_on_android();
 
     // Top-level help is the ONLY place the manifest is consumed: render clap's
     // help for the native conductor commands, then append the framework's

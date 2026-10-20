@@ -597,6 +597,8 @@ fn ensure_git() {
     println!("  {} Installing Git...", icon_play().green());
     let ok = if console::is_windows() {
         run_status("choco", &["install", "git", "-y"])
+    } else if console::is_android() {
+        crate::install::termux_install(&["git"])
     } else if which::which("brew").is_ok() {
         run_status("brew", &["install", "git"])
     } else {

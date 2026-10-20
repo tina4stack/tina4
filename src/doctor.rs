@@ -368,6 +368,17 @@ codeql/python-queries codeql/actions-queries";
         println!("  {} {:<28} {}", icon_ok().green(), "codeql CLI", shown.cyan());
         println!("       {} {}", "packs:".dimmed(), packs.dimmed());
     } else {
+        if crate::console::is_android() {
+            // GitHub publishes no CodeQL CLI for Android and Termux packages none,
+            // so there is nothing to tell anyone to install here.
+            println!(
+                "  {} {:<28} {}",
+                icon_warn().yellow(),
+                "codeql CLI",
+                "not available on Android (optional) - run the pre-check on a desktop machine".dimmed()
+            );
+            return;
+        }
         let install = if cfg!(target_os = "macos") {
             "brew install codeql".to_string()
         } else if cfg!(target_os = "windows") {

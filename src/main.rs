@@ -348,6 +348,13 @@ fn main() {
 
     console::enable_ansi();
 
+    // Android denies apps hard links, so every uv that tina4 starts (uv sync,
+    // uv run, uv tool install) would warn "Failed to hardlink files" and then
+    // copy anyway. Ask for the copy up front; a user's own setting wins.
+    if console::is_android() && std::env::var_os("UV_LINK_MODE").is_none() {
+        std::env::set_var("UV_LINK_MODE", "copy");
+    }
+
     // Top-level help is the ONLY place the manifest is consumed: render clap's
     // help for the native conductor commands, then append the framework's
     // DISCOVERED commands. `--refresh` re-queries past the fingerprint cache.
@@ -3269,6 +3276,15 @@ mod tests {
         // non-PIE static musl build, so neither may ever be a fallback.
         let names = super::binary_name_candidates(false, false, true, "aarch64", false);
         assert_eq!(names[0], "tina4-android-arm64");
+        assert!(names.iter().all(|n| n.starts_with("tina4-android-")));
+    }
+
+    #[test]
+    fn termux_on_x86_64_updates_to_the_android_amd64_asset() {
+        // The emulator, Chromebooks and x86 tablets: the release publishes
+        // tina4-android-amd64, the same name install.sh asks for.
+        let names = super::binary_name_candidates(false, false, true, "x86_64", false);
+        assert_eq!(names[0], "tina4-android-amd64");
         assert!(names.iter().all(|n| n.starts_with("tina4-android-")));
     }
 

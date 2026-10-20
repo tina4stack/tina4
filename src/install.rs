@@ -111,6 +111,37 @@ fn install_python() {
 
     // Install tina4python (user-level uv tool — pure Python, no build step).
     install_tina4_cli("tina4python", "uv", &["tool", "install", "tina4-python"]);
+
+    if console::is_android() {
+        termux_local_bin_on_path();
+    }
+}
+
+/// uv tool puts tina4python in ~/.local/bin. Most Linux shell profiles add that
+/// directory to PATH; Termux's never does, so the tool would stay unreachable.
+/// `uv tool update-shell` adds it to the shell startup files (Termux's
+/// etc/profile still sources ~/.bashrc, so nothing else changes). New sessions
+/// see it; the current shell does not.
+fn termux_local_bin_on_path() {
+    let Ok(home) = std::env::var("HOME") else { return };
+    let bin = format!("{home}/.local/bin");
+    let original = std::env::var("PATH").unwrap_or_default();
+    if original.split(':').any(|p| p == bin) {
+        return;
+    }
+    let ok = Command::new(crate::console::resolve_cmd("uv"))
+        .args(["tool", "update-shell"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if ok {
+        println!(
+            "  {} Added {} to PATH - open a new Termux session to use tina4python",
+            icon_info().blue(),
+            bin
+        );
+    }
 }
 
 /// Termux: no sudo, and apt's python3.12 package names do not exist. Termux
@@ -119,7 +150,7 @@ fn install_python() {
 /// interpreters to download, so neither is attempted here.
 fn install_python_termux() {
     if !(check_exists("python3") || check_exists("python")) || !check_exists("uv") {
-        run_install_commands(&[("pkg", &["install", "-y", "python", "uv"])]);
+        termux_install(termux_packages("python"));
     } else {
         println!("  {} Python and uv already installed", icon_ok().green());
     }
@@ -309,6 +340,8 @@ fn install_php() {
 
     if check_exists("php") {
         println!("  {} PHP already installed", icon_ok().green());
+    } else if console::is_android() {
+        termux_install(termux_packages("php"));
     } else {
         run_install_commands(&[
             ("choco", &["install", "php", "-y"]),
@@ -325,6 +358,10 @@ fn install_php() {
         if console::is_windows() {
             // Chocolatey ships a `composer` package (pulls in PHP if needed).
             run_install_commands(&[("choco", &["install", "composer", "-y"])]);
+        } else if console::is_android() {
+            // getcomposer.org's installer targets /usr/local/bin, which Termux
+            // does not have; Termux packages composer into $PREFIX/bin.
+            termux_install(&["composer"]);
         } else {
             let script = r#"php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');" && php composer-setup.php --install-dir=/usr/local/bin --filename=composer && php -r "unlink('composer-setup.php');" "#;
             let _ = console::shell_exec(script);
@@ -355,6 +392,8 @@ fn install_ruby() {
         } else {
             println!("  {} Ruby already installed ({})", icon_ok().green(), version.trim());
         }
+    } else if console::is_android() {
+        termux_install(termux_packages("ruby"));
     } else {
         run_install_commands(&[
             ("choco", &["install", "ruby", "-y"]),
@@ -373,6 +412,10 @@ fn install_ruby() {
             .status();
     }
 
+    if console::is_android() {
+        termux_ruby_build_config();
+    }
+
     // Install tina4ruby
     install_tina4_cli("tina4ruby", "gem", &["install", "tina4ruby"]);
 }
@@ -382,6 +425,8 @@ fn install_nodejs() {
 
     if check_exists("node") {
         println!("  {} Node.js already installed", icon_ok().green());
+    } else if console::is_android() {
+        termux_install(termux_packages("nodejs"));
     } else {
         run_install_commands(&[
             // Windows, admin-free FIRST: winget installs the Node LTS to the user
@@ -722,6 +767,68 @@ fn get_version(cmd: &str, flag: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The Termux (Android) packages that give a language its runtime and package
+/// manager. Termux has no sudo and none of apt's distro package names, and the
+/// Homebrew / NodeSource / getcomposer.org paths install to locations Termux
+/// does not have (/usr/local/bin). Termux's own `pkg` builds every one of these
+/// against Bionic and installs into $PREFIX.
+pub fn termux_packages(lang: &str) -> &'static [&'static str] {
+    match lang {
+        "python" | "py" => &["python", "uv"],
+        "php" => &["php", "composer"],
+        // The sqlite3 gem's library comes from termux_ruby_build_config.
+        "ruby" | "rb" => &["ruby"],
+        "nodejs" | "node" | "js" | "tina4js" => &["nodejs-lts"],
+        _ => &[],
+    }
+}
+
+/// `pkg install -y` the given Termux packages. True when pkg succeeded.
+pub fn termux_install(packages: &[&str]) -> bool {
+    println!("  {} Running: pkg install -y {}", icon_play().green(), packages.join(" "));
+    match Command::new(crate::console::resolve_cmd("pkg"))
+        .args(["install", "-y"])
+        .args(packages)
+        .status()
+    {
+        Ok(s) if s.success() => {
+            println!("  {} Installed successfully", icon_ok().green());
+            true
+        }
+        _ => {
+            eprintln!(
+                "  {} pkg install failed. Run it yourself: pkg install {}",
+                icon_fail().red(),
+                packages.join(" ")
+            );
+            false
+        }
+    }
+}
+
+/// The sqlite3 gem publishes precompiled builds for Linux (glibc and musl),
+/// macOS and Windows, but none for Android, so on Termux bundler compiles it.
+/// Its default source build vendors SQLite through mini_portile2, which is not
+/// installed, and fails; building against Termux's own libsqlite works. Set
+/// globally so a later plain `bundle install` builds it the same way.
+pub fn termux_ruby_build_config() {
+    // Termux's ruby package does not depend on libsqlite.
+    let header = std::env::var("PREFIX")
+        .map(|p| std::path::Path::new(&p).join("include/sqlite3.h").exists())
+        .unwrap_or(false);
+    if !header {
+        termux_install(&["libsqlite"]);
+    }
+    let ok = Command::new(crate::console::resolve_cmd("bundle"))
+        .args(["config", "set", "--global", "build.sqlite3", "--enable-system-libraries"])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    if ok {
+        println!("  {} Bundler set to build sqlite3 against Termux's SQLite", icon_ok().green());
+    }
+}
+
 fn run_install_commands(attempts: &[(&str, &[&str])]) {
     for (cmd, args) in attempts {
         if check_exists(cmd) {
@@ -761,6 +868,31 @@ fn install_tina4_cli(cli_name: &str, pkg_cmd: &str, args: &[&str]) {
             cli_name,
             pkg_cmd
         );
+    }
+}
+
+#[cfg(test)]
+mod termux_package_tests {
+    #[test]
+    fn every_runtime_init_can_ask_for_has_termux_packages() {
+        // init's ensure_runtime passes these labels; an empty list would run a
+        // bare `pkg install -y` and report success with nothing installed.
+        for label in ["python", "php", "ruby", "node"] {
+            assert!(!super::termux_packages(label).is_empty(), "{label}");
+        }
+        // and the names `tina4 install` accepts
+        for lang in ["py", "rb", "nodejs", "js", "tina4js"] {
+            assert!(!super::termux_packages(lang).is_empty(), "{lang}");
+        }
+    }
+
+    #[test]
+    fn each_runtime_brings_its_package_manager() {
+        assert!(super::termux_packages("python").contains(&"uv"));
+        assert!(super::termux_packages("php").contains(&"composer"));
+        // npm ships inside nodejs-lts, bundler inside ruby
+        assert_eq!(super::termux_packages("nodejs"), ["nodejs-lts"]);
+        assert!(super::termux_packages("ruby").contains(&"ruby"));
     }
 }
 

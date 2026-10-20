@@ -389,6 +389,14 @@ fn ensure_runtime(
         eprintln!("  {} {}", icon_fail().red(), windows_msg);
         std::process::exit(1);
     }
+    // Termux (Android): its own `pkg` is the package manager, the way Homebrew
+    // is on macOS. The runtime's package manager comes in the same install.
+    if console::is_android() {
+        if !crate::install::termux_install(crate::install::termux_packages(label)) {
+            std::process::exit(1);
+        }
+        return;
+    }
     if cmd_exists("brew") {
         if !run_cmd("brew", &["install", brew_pkg]) {
             eprintln!("  {} {}", icon_fail().red(), brew_fail_msg);
@@ -411,7 +419,10 @@ fn check_package_manager(language: &str) {
                 println!("  {} uv found", icon_ok().green());
             } else {
                 println!("  {} uv not found — installing", icon_warn().yellow());
-                let ok = if console::is_windows() {
+                // astral.sh's installer has no Android build; Termux packages uv.
+                let ok = if console::is_android() {
+                    crate::install::termux_install(&["uv"])
+                } else if console::is_windows() {
                     run_cmd(
                         "powershell",
                         &["-ExecutionPolicy", "ByPass", "-c", "irm https://astral.sh/uv/install.ps1 | iex"],
@@ -442,6 +453,10 @@ fn check_package_manager(language: &str) {
                         icon_fail().red()
                     );
                     std::process::exit(1);
+                } else if console::is_android() {
+                    if !crate::install::termux_install(&["composer"]) {
+                        std::process::exit(1);
+                    }
                 } else if cmd_exists("brew") {
                     if !run_cmd("brew", &["install", "composer"]) {
                         eprintln!(
@@ -471,6 +486,9 @@ fn check_package_manager(language: &str) {
                     );
                     std::process::exit(1);
                 }
+            }
+            if console::is_android() {
+                crate::install::termux_ruby_build_config();
             }
         }
         "nodejs" | "tina4js" => {

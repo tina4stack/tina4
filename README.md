@@ -29,6 +29,14 @@ The script auto-detects your OS and architecture, downloads the correct binary f
 TINA4_INSTALL_DIR=~/.local/bin curl -fsSL https://raw.githubusercontent.com/tina4stack/tina4/main/install.sh | sh
 ```
 
+### Android (Termux)
+
+The same script. On Termux it installs the native Android build (`tina4-android-arm64` or `tina4-android-amd64`) into `$PREFIX/bin`, with no root. `tina4 install`, `tina4 init`, and `tina4 setup` then install runtimes with Termux's `pkg`.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/tina4stack/tina4/main/install.sh | sh
+```
+
 ### Windows (PowerShell)
 
 ```powershell

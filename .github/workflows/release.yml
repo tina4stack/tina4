@@ -103,7 +103,16 @@ jobs:
           - target: aarch64-linux-android
             os: ubuntu-latest
             name: tina4-android-arm64
+            ndk_abi: arm64-v8a
             run_smoke: false    # Android ARM, can't run on the x64 runner
+          # x86_64 Android: the emulator, Chromebooks and x86 tablets. Without
+          # it Termux there has no build at all - installer and self-update look
+          # for tina4-android-amd64 and nothing else can exec under Bionic.
+          - target: x86_64-linux-android
+            os: ubuntu-latest
+            name: tina4-android-amd64
+            ndk_abi: x86_64
+            run_smoke: false    # Bionic-linked, needs Android's linker64
           - target: x86_64-apple-darwin
             os: macos-latest
             name: tina4-darwin-amd64
@@ -171,19 +180,19 @@ jobs:
       # which wires up the NDK's
       # clang for the C dependencies (tree-sitter grammars, ring) and the link.
       - name: Install cargo-ndk (android)
-        if: matrix.target == 'aarch64-linux-android'
+        if: endsWith(matrix.target, '-linux-android')
         # Pinned, like zig and RUST_VERSION: never float in a release job.
         run: cargo install --locked cargo-ndk --version 4.1.2
 
       - name: Build (cargo-ndk, android)
-        if: matrix.target == 'aarch64-linux-android'
+        if: endsWith(matrix.target, '-linux-android')
         # The runner exposes the NDK as a SHELL env var ($ANDROID_NDK_ROOT); the
         # ${{ env.* }} expression context only sees vars declared in a workflow
         # env: block, never the runner's own - so resolve it in the shell here.
         run: |
           export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_NDK_ROOT}"
           echo "Using Android NDK at: $ANDROID_NDK_HOME"
-          cargo ndk -t arm64-v8a -P 24 build --release --locked
+          cargo ndk -t ${{ matrix.ndk_abi }} -P 24 build --release --locked
 
       # --locked forces the committed Cargo.lock - the build can't silently
       # resolve a different dependency set than the one that was reviewed.
@@ -198,7 +207,7 @@ jobs:
         run: cargo zigbuild --release --locked --target aarch64-unknown-linux-gnu.2.28
 
       - name: Build
-        if: matrix.target != 'aarch64-unknown-linux-musl' && matrix.target != 'aarch64-unknown-linux-gnu' && matrix.target != 'i686-unknown-linux-musl' && matrix.target != 'aarch64-linux-android'
+        if: matrix.target != 'aarch64-unknown-linux-musl' && matrix.target != 'aarch64-unknown-linux-gnu' && matrix.target != 'i686-unknown-linux-musl' && !endsWith(matrix.target, '-linux-android')
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Rename binary (Unix)
@@ -305,7 +314,7 @@ jobs:
         run: |
           set -eu
           expected="tina4-linux-amd64 tina4-linux-arm64 tina4-linux-musl-amd64 \
-                    tina4-linux-musl-arm64 tina4-linux-musl-386 tina4-android-arm64 tina4-darwin-amd64 tina4-darwin-arm64 \
+                    tina4-linux-musl-arm64 tina4-linux-musl-386 tina4-android-arm64 tina4-android-amd64 tina4-darwin-amd64 tina4-darwin-arm64 \
                     tina4-windows-amd64.exe"
           missing=""
           for f in $expected; do [ -f "dist/$f" ] || missing="$missing $f"; done
@@ -393,7 +402,7 @@ jobs:
           # ONE source of truth for the expected set. The threshold below is
           # DERIVED from it, so adding a build target can never leave a hardcoded
           # count out of step with the names actually checked.
-          EXPECTED="tina4-linux-amd64 tina4-linux-arm64 tina4-linux-musl-amd64 tina4-linux-musl-arm64 tina4-linux-musl-386 tina4-android-arm64 tina4-darwin-amd64 tina4-darwin-arm64 tina4-windows-amd64.exe LICENSE NOTICE COMMERCIAL-LICENSE.md tina4.spdx.json THIRD-PARTY-NOTICES.txt LICENSE-INVENTORY.json SHA256SUMS"
+          EXPECTED="tina4-linux-amd64 tina4-linux-arm64 tina4-linux-musl-amd64 tina4-linux-musl-arm64 tina4-linux-musl-386 tina4-android-arm64 tina4-android-amd64 tina4-darwin-amd64 tina4-darwin-arm64 tina4-windows-amd64.exe LICENSE NOTICE COMMERCIAL-LICENSE.md tina4.spdx.json THIRD-PARTY-NOTICES.txt LICENSE-INVENTORY.json SHA256SUMS"
           want=$(printf '%s\n' $EXPECTED | grep -c .)
 
           # `|| true` matters under `set -eu`: a transient non-zero from gh (rate

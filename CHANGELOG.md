@@ -1,5 +1,10 @@
 # Changelog
 
+## 3.8.103 - 2026-10-21
+
+- feat(android): on Termux the installer provisions the project runtime with `pkg` - `tina4 init` and `tina4 doctor` detect Termux and reach for `pkg install` (python, php, ruby, nodejs) instead of the Linux package managers that Termux has no room for, so a fresh phone sets up without a single manual step.
+- feat(release): ship a native `tina4-android-amd64` (x86_64) build alongside the arm64 one, so the Android emulator, Chromebooks and x86 tablets run the client under Bionic rather than falling back to a musl binary their loader rejects (#103).
+
 ## 3.8.102 - 2026-10-19
 
 - feat(metrics): `tina4 metrics` now carries a stable rule id and a concrete remedy on every finding, and `--suggest` prints the refactoring suggestion for each offender instead of only the symptom. Feature 141, slice A (#66).

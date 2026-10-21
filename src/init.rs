@@ -389,6 +389,14 @@ fn ensure_runtime(
         eprintln!("  {} {}", icon_fail().red(), windows_msg);
         std::process::exit(1);
     }
+    // Termux (Android): its own `pkg` is the package manager, the way Homebrew
+    // is on macOS. The runtime's package manager comes in the same install.
+    if console::is_android() {
+        if !crate::install::termux_install(crate::install::termux_packages(label)) {
+            std::process::exit(1);
+        }
+        return;
+    }
     if cmd_exists("brew") {
         if !run_cmd("brew", &["install", brew_pkg]) {
             eprintln!("  {} {}", icon_fail().red(), brew_fail_msg);
@@ -402,6 +410,52 @@ fn ensure_runtime(
 
 // -- Step 2: Package manager -------------------------------------------------
 
+/// Install uv: astral.sh's installer everywhere except Termux, which packages it.
+fn install_uv() -> bool {
+    if console::is_android() {
+        crate::install::termux_install(&["uv"])
+    } else if console::is_windows() {
+        run_cmd(
+            "powershell",
+            &["-ExecutionPolicy", "ByPass", "-c", "irm https://astral.sh/uv/install.ps1 | iex"],
+        )
+    } else {
+        run_cmd(
+            "sh",
+            &["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"],
+        )
+    }
+}
+
+/// Install Composer, or exit with where to get it when there is no installer to use.
+fn install_composer() {
+    if console::is_windows() {
+        eprintln!(
+            "  {} Please install Composer: https://getcomposer.org/Composer-Setup.exe",
+            icon_fail().red()
+        );
+        std::process::exit(1);
+    } else if console::is_android() {
+        if !crate::install::termux_install(&["composer"]) {
+            std::process::exit(1);
+        }
+    } else if cmd_exists("brew") {
+        if !run_cmd("brew", &["install", "composer"]) {
+            eprintln!(
+                "  {} Failed to install composer. Install it manually:\n      https://getcomposer.org/download/",
+                icon_fail().red()
+            );
+            std::process::exit(1);
+        }
+    } else {
+        eprintln!(
+            "  {} Please install Composer: https://getcomposer.org/download/",
+            icon_fail().red()
+        );
+        std::process::exit(1);
+    }
+}
+
 fn check_package_manager(language: &str) {
     println!("\n{} Checking package manager...", icon_play().green());
 
@@ -411,18 +465,7 @@ fn check_package_manager(language: &str) {
                 println!("  {} uv found", icon_ok().green());
             } else {
                 println!("  {} uv not found — installing", icon_warn().yellow());
-                let ok = if console::is_windows() {
-                    run_cmd(
-                        "powershell",
-                        &["-ExecutionPolicy", "ByPass", "-c", "irm https://astral.sh/uv/install.ps1 | iex"],
-                    )
-                } else {
-                    run_cmd(
-                        "sh",
-                        &["-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"],
-                    )
-                };
-                if !ok {
+                if !install_uv() {
                     eprintln!(
                         "  {} Failed to install uv. Install it manually:\n      curl -LsSf https://astral.sh/uv/install.sh | sh",
                         icon_fail().red()
@@ -436,27 +479,7 @@ fn check_package_manager(language: &str) {
                 println!("  {} composer found", icon_ok().green());
             } else {
                 println!("  {} composer not found — attempting install", icon_warn().yellow());
-                if console::is_windows() {
-                    eprintln!(
-                        "  {} Please install Composer: https://getcomposer.org/Composer-Setup.exe",
-                        icon_fail().red()
-                    );
-                    std::process::exit(1);
-                } else if cmd_exists("brew") {
-                    if !run_cmd("brew", &["install", "composer"]) {
-                        eprintln!(
-                            "  {} Failed to install composer. Install it manually:\n      https://getcomposer.org/download/",
-                            icon_fail().red()
-                        );
-                        std::process::exit(1);
-                    }
-                } else {
-                    eprintln!(
-                        "  {} Please install Composer: https://getcomposer.org/download/",
-                        icon_fail().red()
-                    );
-                    std::process::exit(1);
-                }
+                install_composer();
             }
         }
         "ruby" => {
@@ -471,6 +494,9 @@ fn check_package_manager(language: &str) {
                     );
                     std::process::exit(1);
                 }
+            }
+            if console::is_android() {
+                crate::install::termux_ruby_build_config();
             }
         }
         "nodejs" | "tina4js" => {

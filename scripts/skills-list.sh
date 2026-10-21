@@ -25,7 +25,8 @@
 skills_dev_refs="auth-and-services.md data-and-orm.md deployment.md routes-and-api.md templates-and-frontend.md realtime.md web-push.md ai-coder-rule-path.svg"
 
 # Per-language developer skills come from their own framework repo. The shared
-# skills (tina4-js, tina4-maintainer, tina4-architect, tina4-design) have a
+# skills (tina4-js, tina4-maintainer, tina4-architect, tina4-design, tina4-seo,
+# tina4-a11y) have a
 # canonical copy in tina4-python and are served from there.
 skills_entries() {
   cat <<EOF
@@ -37,6 +38,8 @@ tina4-python|tina4-js|html-and-components.md signals-and-reactivity.md persisten
 tina4-python|tina4-maintainer|cli-and-deployment.md frond-and-frontend.md routing-and-orm.md subsystems.md checklists/pr-review.md checklists/release.md checklists/signing.md checklists/parity-sweep.md
 tina4-python|tina4-architect|
 tina4-python|tina4-design|phase-1-intake.md phase-2-market-research.md design-tokens.md brand-guidelines.md ui-guide.md handoff.md website.md design-record-templates.md
+tina4-python|tina4-seo|ai-discovery.md content-audit.md discovery-audit.md entity-eeat.md favicon-package.md meta-tags.md robots-sitemap.md structured-data.md templates-and-guards.md validation-and-handoff.md
+tina4-python|tina4-a11y|aria-and-live-regions.md contrast-and-colour.md discovery-and-scope.md forms.md images-and-media.md interactive-semantics.md keyboard-and-focus.md landmarks-and-structure.md validation-and-handoff.md zoom-reflow-motion.md
 tina4|tina4-cli|commands.md
 EOF
 }

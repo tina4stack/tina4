@@ -346,6 +346,23 @@ fn prefer_uv_copy_on_android() {
     }
 }
 
+/// The App Store build of iSH kills a process with SIGSYS on any system call it
+/// does not implement, where Linux returns ENOSYS. Python 3.12+ probes
+/// pidfd_open on its first request, so every Python dev server died there.
+/// An ignored signal stays ignored across exec, so ignoring it here lets the
+/// servers tina4 starts get ENOSYS and carry on with their own fallback.
+#[cfg(unix)]
+fn ignore_sigsys_on_ish() {
+    if console::is_ish() {
+        unsafe {
+            libc::signal(libc::SIGSYS, libc::SIG_IGN);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn ignore_sigsys_on_ish() {}
+
 fn main() {
     #[cfg(unix)]
     // Rust ignores SIGPIPE, which turns a normal early-closing pipeline
@@ -358,6 +375,7 @@ fn main() {
     console::enable_ansi();
 
     prefer_uv_copy_on_android();
+    ignore_sigsys_on_ish();
 
     // Top-level help is the ONLY place the manifest is consumed: render clap's
     // help for the native conductor commands, then append the framework's
@@ -1264,18 +1282,17 @@ fn install_production_server(info: &detect::ProjectInfo) {
     }
 }
 
-/// Apply pre_exec to put the child in its own process group on Unix,
+/// Put the child in its own process group on Unix,
 /// so we can kill the entire group on restart (prevents EADDRINUSE).
 #[cfg(unix)]
 fn set_process_group(cmd: &mut std::process::Command) -> &mut std::process::Command {
     use std::os::unix::process::CommandExt;
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setpgid(0, 0);
-            Ok(())
-        });
-    }
-    cmd
+    // process_group, not a pre_exec setpgid: any pre_exec closure forces std's
+    // fork path, which opens an AF_UNIX SOCK_SEQPACKET socketpair. iSH (iOS)
+    // only emulates stream and datagram sockets, so every server spawn failed
+    // there with EINVAL. process_group(0) does the same setpgid(0, 0) through
+    // posix_spawn.
+    cmd.process_group(0)
 }
 
 #[cfg(not(unix))]

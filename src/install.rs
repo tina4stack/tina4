@@ -103,9 +103,7 @@ fn install_python() {
                 .stderr(std::process::Stdio::inherit())
                 .status();
         }
-    } else if console::is_android() {
-        install_python_termux();
-    } else if !install_python_linux() {
+    } else if !install_python_linux_family() {
         return;
     }
 
@@ -153,6 +151,43 @@ fn install_python_termux() {
         termux_install(termux_packages("python"));
     } else {
         println!("  {} Python and uv already installed", icon_ok().green());
+    }
+}
+
+/// Python on iSH, Termux or a Linux distro. True when tina4python should then
+/// be installed with uv; iSH takes no uv, so it stops here.
+fn install_python_linux_family() -> bool {
+    if console::is_ish() {
+        install_python_ish();
+        false
+    } else if console::is_android() {
+        install_python_termux();
+        true
+    } else {
+        install_python_linux()
+    }
+}
+
+/// iSH (iOS): Alpine's python3 only. No uv and no global tina4python - uv
+/// crashes under iSH, and each project gets tina4-python in its own .venv from
+/// `tina4 init`, which is where `tina4 serve` runs it from.
+fn install_python_ish() {
+    if ish_install_runtime("python") {
+        println!(
+            "  {} Projects get tina4-python in their own .venv: tina4 init python <name>",
+            icon_info().blue()
+        );
+    }
+}
+
+/// iSH (iOS): print why a language cannot run there. True when it cannot.
+pub fn refused_on_ish(lang: &str) -> bool {
+    match ish_unsupported(lang) {
+        Some(why) if console::is_ish() => {
+            eprintln!("  {} Not available on iSH (iOS): {}.", icon_fail().red(), why);
+            true
+        }
+        _ => false,
     }
 }
 
@@ -337,6 +372,9 @@ fn refresh_uv_path_unix() {
 
 fn install_php() {
     println!("\n{} Installing PHP...", icon_play().green());
+    if refused_on_ish("php") {
+        return;
+    }
 
     if check_exists("php") {
         println!("  {} PHP already installed", icon_ok().green());
@@ -377,7 +415,11 @@ fn install_php() {
 fn install_ruby() {
     println!("\n{} Installing Ruby...", icon_play().green());
 
-    if check_exists("ruby") {
+    if console::is_ish() {
+        if !ish_install_runtime("ruby") {
+            return;
+        }
+    } else if check_exists("ruby") {
         let version = get_version("ruby", "--version");
         // Check if it's system Ruby (2.x) vs modern Ruby (3+/4+)
         if version.starts_with("ruby 2") {
@@ -422,6 +464,9 @@ fn install_ruby() {
 
 fn install_nodejs() {
     println!("\n{} Installing Node.js...", icon_play().green());
+    if refused_on_ish("nodejs") {
+        return;
+    }
 
     if check_exists("node") {
         println!("  {} Node.js already installed", icon_ok().green());
@@ -732,9 +777,7 @@ fn python_too_old() -> bool {
     if let Some((major, minor)) = parse_python_version(&out) {
         if (major, minor) < (3, 12) {
             println!(
-                "  {} Python {}.{} is too old - Tina4 needs 3.12+, which Alpine ships from \
-                 v3.20. iSH on iOS is pinned to Alpine 3.14 (and uv does not run under its \
-                 emulator), so Python projects are not supported there yet.",
+                "  {} Python {}.{} is too old - Tina4 needs 3.12+, which Alpine ships from v3.20.",
                 icon_warn().yellow(),
                 major,
                 minor
@@ -829,6 +872,119 @@ pub fn termux_ruby_build_config() {
     }
 }
 
+/// iSH (iOS): the Alpine packages that give a language a runtime the emulator
+/// can run. iSH runs as root with no sudo, and Alpine is its only package
+/// source. Python gets no uv: uv dies with SIGILL under iSH as soon as it
+/// resolves a package, so its dependencies go through `venv` + pip instead.
+/// ruby-bundler brings `bundle`; the scaffold's sqlite3 gem ships a prebuilt
+/// x86-linux-musl build, so nothing is compiled.
+pub fn ish_packages(lang: &str) -> &'static [&'static str] {
+    match lang {
+        "python" | "py" => &["python3"],
+        "ruby" | "rb" => &["ruby", "ruby-bundler"],
+        _ => &[],
+    }
+}
+
+/// iSH (iOS): why a language cannot run there, or None when it can. Both are
+/// the emulator's limits, not Tina4's, so nothing is installed for them.
+pub fn ish_unsupported(lang: &str) -> Option<&'static str> {
+    match lang {
+        "php" => Some(
+            "PHP projects need Composer, which cannot run under iSH: the emulator \
+             computes PHP's SHA-512 wrongly, so Composer fails its own signature \
+             check (and PHP 8.5 crashes on start)",
+        ),
+        "nodejs" | "node" | "js" | "tina4js" | "tina4-js" | "js-frontend" => Some(
+            "Node.js projects need npm, which crashes under iSH (and node itself \
+             does not start on the App Store build of iSH)",
+        ),
+        _ => None,
+    }
+}
+
+/// `apk add` the given packages. True when apk succeeded.
+pub fn apk_install(packages: &[&str]) -> bool {
+    println!("  {} Running: apk add {}", icon_play().green(), packages.join(" "));
+    match Command::new("apk").arg("add").args(packages).status() {
+        Ok(s) if s.success() => {
+            println!("  {} Installed successfully", icon_ok().green());
+            true
+        }
+        _ => {
+            eprintln!(
+                "  {} apk add failed. Run it yourself: apk add {}",
+                icon_fail().red(),
+                packages.join(" ")
+            );
+            false
+        }
+    }
+}
+
+/// iSH (iOS): install the language's runtime with apk, then confirm it is new
+/// enough. The App Store build of iSH starts on Alpine 3.14, whose Python (3.9)
+/// and Ruby (2.7) are both too old for Tina4, so say how to move apk to a
+/// current Alpine instead of failing later in the dependency install.
+pub fn ish_install_runtime(lang: &str) -> bool {
+    println!("  {} iOS (iSH) support is experimental.", icon_warn().yellow());
+    let packages = ish_packages(lang);
+    if packages.iter().any(|p| !check_exists(ish_command(p))) && !apk_install(packages) {
+        return false;
+    }
+    if ish_runtime_too_old(lang) {
+        println!("  {} On iSH, point apk at a current Alpine, then upgrade and re-run:", icon_info().blue());
+        println!("      printf '%s\\n' {ALPINE_LATEST}/main {ALPINE_LATEST}/community > /etc/apk/repositories");
+        println!("      apk upgrade --available");
+        return false;
+    }
+    true
+}
+
+const ALPINE_LATEST: &str = "https://dl-cdn.alpinelinux.org/alpine/latest-stable";
+
+/// The command an Alpine package provides, for the "already installed" check.
+fn ish_command(package: &str) -> &str {
+    match package {
+        "ruby-bundler" => "bundle",
+        other => other,
+    }
+}
+
+fn ish_runtime_too_old(lang: &str) -> bool {
+    match lang {
+        "python" | "py" => python_too_old(),
+        "ruby" | "rb" => ruby_too_old(),
+        _ => false,
+    }
+}
+
+/// tina4ruby needs Ruby 3.1+. True (after warning) when the installed Ruby is older.
+fn ruby_too_old() -> bool {
+    let out = get_version("ruby", "--version");
+    match parse_ruby_version(&out) {
+        Some((major, minor)) if (major, minor) < (3, 1) => {
+            println!(
+                "  {} Ruby {}.{} is too old - Tina4 needs 3.1+.",
+                icon_warn().yellow(),
+                major,
+                minor
+            );
+            true
+        }
+        _ => false,
+    }
+}
+
+/// "ruby 3.4.9 (2026-03-11 ...)" -> (3, 4). None when the text is not a Ruby version line.
+fn parse_ruby_version(text: &str) -> Option<(u32, u32)> {
+    let ver = text.trim().strip_prefix("ruby ")?;
+    let mut parts = ver.split(['.', ' ']);
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
 fn run_install_commands(attempts: &[(&str, &[&str])]) {
     for (cmd, args) in attempts {
         if check_exists(cmd) {
@@ -904,5 +1060,39 @@ mod python_version_tests {
         assert_eq!(super::parse_python_version("Python 3.12.4"), Some((3, 12)));
         assert_eq!(super::parse_python_version(""), None);
         assert_eq!(super::parse_python_version("command not found"), None);
+    }
+}
+
+#[cfg(test)]
+mod ish_tests {
+    #[test]
+    fn every_language_init_takes_is_either_installable_or_refused_on_ish() {
+        // check_runtime passes these to ish_runtime. An empty package list that
+        // is not refused would run a bare `apk add` and report success.
+        for lang in ["python", "php", "ruby", "nodejs", "tina4js", "py", "rb", "node", "js"] {
+            let refused = super::ish_unsupported(lang).is_some();
+            let packages = !super::ish_packages(lang).is_empty();
+            assert!(refused != packages, "{lang}: refused={refused} packages={packages}");
+        }
+    }
+
+    #[test]
+    fn python_on_ish_never_installs_uv() {
+        assert!(!super::ish_packages("python").contains(&"uv"));
+    }
+
+    #[test]
+    fn every_ish_package_maps_to_the_command_it_provides() {
+        assert_eq!(super::ish_command("python3"), "python3");
+        assert_eq!(super::ish_command("ruby"), "ruby");
+        assert_eq!(super::ish_command("ruby-bundler"), "bundle");
+    }
+
+    #[test]
+    fn parses_ruby_version_lines() {
+        assert_eq!(super::parse_ruby_version("ruby 3.4.9 (2026-03-11 revision 76cca827ab) +PRISM [i586-linux-musl]\n"), Some((3, 4)));
+        assert_eq!(super::parse_ruby_version("ruby 2.7.8p225 (2023-03-30 revision 1f4d455848) [i586-linux-musl]"), Some((2, 7)));
+        assert_eq!(super::parse_ruby_version(""), None);
+        assert_eq!(super::parse_ruby_version("sh: ruby: not found"), None);
     }
 }

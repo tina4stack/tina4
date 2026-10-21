@@ -9,7 +9,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use crate::console::{self, icon_fail, icon_ok, icon_play, icon_warn};
+use crate::console::{self, icon_fail, icon_info, icon_ok, icon_play, icon_warn};
 
 /// A random 64-hex-character (256-bit) secret for a freshly scaffolded project,
 /// so no two scaffolds share a JWT signing key and `tina4 env --migrate` can
@@ -337,6 +337,11 @@ fn run_cmd_in(dir: &str, cmd: &str, args: &[&str]) -> bool {
 fn check_runtime(language: &str) {
     println!("\n{} Checking {} runtime...", icon_play().green(), language.cyan());
 
+    if console::is_ish() {
+        ish_runtime(language);
+        return;
+    }
+
     match language {
         "python" => ensure_runtime(
             "python", console::python_cmd(), "python",
@@ -364,6 +369,14 @@ fn check_runtime(language: &str) {
             "Please install Node.js: https://nodejs.org/",
         ),
         _ => {}
+    }
+}
+
+/// iSH (iOS): Alpine's runtime via apk, or exit saying why the language cannot
+/// run in the emulator, or how to move apk to an Alpine new enough for it.
+fn ish_runtime(language: &str) {
+    if crate::install::refused_on_ish(language) || !crate::install::ish_install_runtime(language) {
+        std::process::exit(1);
     }
 }
 
@@ -456,24 +469,30 @@ fn install_composer() {
     }
 }
 
+/// uv for Python projects, installed when missing. Not on iSH, where uv
+/// crashes (SIGILL) resolving packages: install_deps uses venv + pip there.
+fn ensure_uv() {
+    if console::is_ish() {
+        println!("  {} iSH: dependencies install with venv + pip (uv cannot run here)", icon_info().blue());
+    } else if cmd_exists("uv") {
+        println!("  {} uv found", icon_ok().green());
+    } else {
+        println!("  {} uv not found — installing", icon_warn().yellow());
+        if !install_uv() {
+            eprintln!(
+                "  {} Failed to install uv. Install it manually:\n      curl -LsSf https://astral.sh/uv/install.sh | sh",
+                icon_fail().red()
+            );
+            std::process::exit(1);
+        }
+    }
+}
+
 fn check_package_manager(language: &str) {
     println!("\n{} Checking package manager...", icon_play().green());
 
     match language {
-        "python" => {
-            if cmd_exists("uv") {
-                println!("  {} uv found", icon_ok().green());
-            } else {
-                println!("  {} uv not found — installing", icon_warn().yellow());
-                if !install_uv() {
-                    eprintln!(
-                        "  {} Failed to install uv. Install it manually:\n      curl -LsSf https://astral.sh/uv/install.sh | sh",
-                        icon_fail().red()
-                    );
-                    std::process::exit(1);
-                }
-            }
-        }
+        "python" => ensure_uv(),
         "php" => {
             if cmd_exists("composer") {
                 println!("  {} composer found", icon_ok().green());
@@ -1476,6 +1495,7 @@ fn install_deps(language: &str, path: &str) {
     );
 
     let ok = match language {
+        "python" if console::is_ish() => pip_install_deps(path),
         "python" => run_cmd_in(path, "uv", &["sync"]),
         "php" => run_cmd_in(path, "composer", &["install"]),
         "ruby" => run_cmd_in(path, "bundle", &["install"]),
@@ -1492,6 +1512,19 @@ fn install_deps(language: &str, path: &str) {
         );
     }
 }
+
+/// iSH: Python's own venv, then pip installs the dependencies pyproject.toml
+/// lists (read with tomllib, so edits to the list are honoured). `tina4 serve`
+/// runs .venv/bin/python when it exists.
+fn pip_install_deps(path: &str) -> bool {
+    let venv_python = format!("{}/.venv/bin/python", path);
+    run_cmd_in(path, "python3", &["-m", "venv", ".venv"])
+        && run_cmd_in(path, &venv_python, &["-c", PIP_INSTALL_PYPROJECT_DEPS])
+}
+
+const PIP_INSTALL_PYPROJECT_DEPS: &str = "import subprocess, sys, tomllib\n\
+deps = tomllib.load(open('pyproject.toml', 'rb'))['project'].get('dependencies', [])\n\
+sys.exit(subprocess.call([sys.executable, '-m', 'pip', 'install', *deps]))\n";
 
 // -- File helpers ------------------------------------------------------------
 

@@ -599,6 +599,8 @@ fn ensure_git() {
         run_status("choco", &["install", "git", "-y"])
     } else if console::is_android() {
         crate::install::termux_install(&["git"])
+    } else if console::is_ish() {
+        crate::install::apk_install(&["git"])
     } else if which::which("brew").is_ok() {
         run_status("brew", &["install", "git"])
     } else {

@@ -10,7 +10,12 @@
 # docs/public so the existing Jenkins-on-main deploy publishes it to
 # https://tina4.com/skills/<ref>/ with no new pipeline.
 #
-#   scripts/gen-skills-bundle.sh <ref> [--docs DIR] [--ideacloneroot DIR] [--dry-run]
+#   scripts/gen-skills-bundle.sh <ref> [--docs DIR] [--ideacloneroot DIR] [--dry-run] [--allow-regress]
+#
+# Refuses to stage a bundle that ships LESS than the one tina4.com serves now
+# (latest/version): a published skill missing, or a SKILL.md shrunk by more than
+# TINA4_SKILLS_MAX_SHRINK percent (default 15). See check-skills-regression.sh.
+# --allow-regress stages it anyway, for an intentional removal.
 #
 # Layout produced (FLAT, stage-relative -- identical to what install-skills.sh
 # stages, so serving it and re-staging it is a perfect round-trip):
@@ -35,12 +40,14 @@ ref=""
 docs_dir="${TINA4_DOCS_DIR:-$tina4_dir/../tina4-documentation}"
 ideacloneroot="${TINA4_IDEA_ROOT:-$(cd "$tina4_dir/.." && pwd)}"
 dry_run=0
+allow_regress=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --docs) docs_dir="$2"; shift 2 ;;
     --ideacloneroot) ideacloneroot="$2"; shift 2 ;;
     --dry-run) dry_run=1; shift ;;
+    --allow-regress) allow_regress=1; shift ;;
     -h|--help) grep '^#' "$0" | sed 's/^#\{1,\} \{0,1\}//'; exit 0 ;;
     -*) echo "unknown flag: $1" >&2; exit 2 ;;
     *) ref="$1"; shift ;;
@@ -48,7 +55,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$ref" ]; then
-  echo "usage: $0 <ref> [--docs DIR] [--ideacloneroot DIR] [--dry-run]" >&2
+  echo "usage: $0 <ref> [--docs DIR] [--ideacloneroot DIR] [--dry-run] [--allow-regress]" >&2
   exit 2
 fi
 if ! printf '%s' "$ref" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
@@ -104,6 +111,24 @@ skills_entries | while IFS='|' read -r repo skill refs; do
   done
   echo "  + $skill  ($repo)"
 done
+
+# Never silently ship less than tina4.com serves now. latest/ is only bumped
+# post-tag, so at staging time it still names the previous public release.
+prev_ref=""
+if [ -f "$docs_dir/docs/public/skills/latest/version" ]; then
+  prev_ref="$(tr -d ' \r\n' < "$docs_dir/docs/public/skills/latest/version")"
+fi
+if [ -n "$prev_ref" ] && [ "$prev_ref" != "$ref" ] && [ -d "$docs_dir/docs/public/skills/$prev_ref" ]; then
+  echo "Checking against the published $prev_ref bundle"
+  if ! bash "$script_dir/check-skills-regression.sh" "$docs_dir/docs/public/skills/$prev_ref" "$bundle"; then
+    if [ "$allow_regress" -eq 1 ]; then
+      echo "  --allow-regress given: staging anyway -- make sure the removal is intentional" >&2
+    else
+      rm -rf "$bundle"
+      exit 1
+    fi
+  fi
+fi
 
 # The manifest in the bundle MUST be the same generator's output as the committed
 # tina4/skills.sha256, so a tina4.com download verifies against the identical bytes.

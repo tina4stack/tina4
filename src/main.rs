@@ -346,22 +346,88 @@ fn prefer_uv_copy_on_android() {
     }
 }
 
-/// The App Store build of iSH kills a process with SIGSYS on any system call it
-/// does not implement, where Linux returns ENOSYS. Python 3.12+ probes
-/// pidfd_open on its first request, so every Python dev server died there.
-/// An ignored signal stays ignored across exec, so ignoring it here lets the
-/// servers tina4 starts get ENOSYS and carry on with their own fallback.
-#[cfg(unix)]
-fn ignore_sigsys_on_ish() {
-    if console::is_ish() {
+/// The App Store build of iSH raises SIGSYS on any system call it does not
+/// implement, where Linux returns ENOSYS, and leaves the call's result register
+/// holding the syscall number. Left at its default the signal kills the process
+/// (Python 3.12+ probes pidfd_open on its first request, so every Python dev
+/// server died there). Ignoring it is worse: the call then "succeeds" with its
+/// own number, so musl's pwrite, which tries pwritev2 first, reports 379 bytes
+/// written and writes none, and SQLite silently loses every write.
+///
+/// The fix is to answer the signal the way Linux answers the call: a handler
+/// that puts -ENOSYS in eax, so libc and the runtimes take their own fallbacks.
+/// One goes in for tina4 itself; a handler does not survive exec, so the
+/// programs tina4 starts get the same handler from a small preloaded library
+/// (src/ish_sigsys.c, built by build.rs), written under ~/.tina4/ish/.
+#[cfg(all(target_os = "linux", target_arch = "x86", target_env = "musl"))]
+mod ish_sigsys {
+    use std::path::PathBuf;
+
+    const SHIM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ish_sigsys.so"));
+    /// eax in musl's i386 mcontext_t, whose gregs the libc crate keeps opaque.
+    const REG_EAX: usize = 11;
+
+    extern "C" fn on_sigsys(_: libc::c_int, _: *mut libc::siginfo_t, context: *mut libc::c_void) {
         unsafe {
-            libc::signal(libc::SIGSYS, libc::SIG_IGN);
+            let context = context as *mut libc::ucontext_t;
+            let gregs = std::ptr::addr_of_mut!((*context).uc_mcontext) as *mut u32;
+            *gregs.add(REG_EAX) = (-libc::ENOSYS) as u32;
+        }
+    }
+
+    pub fn install() {
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            let handler: extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void) = on_sigsys;
+            action.sa_sigaction = handler as libc::sighandler_t;
+            action.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
+            libc::sigaction(libc::SIGSYS, &action, std::ptr::null_mut());
+        }
+        if let Some(shim) = write_shim() {
+            let preload = match std::env::var("LD_PRELOAD") {
+                Ok(existing) if !existing.is_empty() => format!("{}:{}", shim.display(), existing),
+                _ => shim.display().to_string(),
+            };
+            std::env::set_var("LD_PRELOAD", preload);
+        }
+    }
+
+    /// The shim's path, written first if it is missing or out of date. None
+    /// when it cannot be written; the programs tina4 starts then go without.
+    fn write_shim() -> Option<PathBuf> {
+        if SHIM.is_empty() {
+            return None;
+        }
+        let dir = PathBuf::from(std::env::var_os("HOME")?).join(".tina4").join("ish");
+        let path = dir.join("sigsys-enosys.so");
+        if std::fs::read(&path).ok().as_deref() != Some(SHIM) {
+            std::fs::create_dir_all(&dir).ok()?;
+            let partial = dir.join(format!(".sigsys-enosys.so.{}", std::process::id()));
+            std::fs::write(&partial, SHIM).ok()?;
+            std::fs::rename(&partial, &path).ok()?;
+        }
+        Some(path)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn embedded_shim_is_an_i386_shared_object() {
+            let elf = super::SHIM;
+            assert_eq!(&elf[..4], b"\x7fELF");
+            assert_eq!(elf[4], 1, "ELFCLASS32");
+            assert_eq!(u16::from_le_bytes([elf[16], elf[17]]), 3, "ET_DYN");
+            assert_eq!(u16::from_le_bytes([elf[18], elf[19]]), 3, "EM_386");
         }
     }
 }
 
-#[cfg(not(unix))]
-fn ignore_sigsys_on_ish() {}
+fn answer_sigsys_with_enosys_on_ish() {
+    #[cfg(all(target_os = "linux", target_arch = "x86", target_env = "musl"))]
+    if console::is_ish() {
+        ish_sigsys::install();
+    }
+}
 
 fn main() {
     #[cfg(unix)]
@@ -375,7 +441,7 @@ fn main() {
     console::enable_ansi();
 
     prefer_uv_copy_on_android();
-    ignore_sigsys_on_ish();
+    answer_sigsys_with_enosys_on_ish();
 
     // Top-level help is the ONLY place the manifest is consumed: render clap's
     // help for the native conductor commands, then append the framework's
@@ -2320,6 +2386,7 @@ fn update_framework_package() {
 
     if !should_update {
         let hint = match lang {
+            "python" if console::is_ish() => ".venv/bin/python -m pip install --upgrade tina4-python".to_string(),
             "python" => "uv lock --upgrade-package tina4-python && uv sync".to_string(),
             "php" => "composer update tina4stack/tina4php".to_string(),
             "ruby" => "bundle update tina4ruby".to_string(),
@@ -2353,6 +2420,7 @@ fn update_framework_package() {
 /// stays readable.
 fn run_framework_update(lang: &str) -> bool {
     match lang {
+        "python" if console::is_ish() => init::pip_upgrade_framework("."),
         "python" => {
             // Python needs two steps: update lockfile then sync
             let lock_ok = std::process::Command::new("uv")

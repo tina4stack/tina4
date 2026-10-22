@@ -1526,6 +1526,18 @@ const PIP_INSTALL_PYPROJECT_DEPS: &str = "import subprocess, sys, tomllib\n\
 deps = tomllib.load(open('pyproject.toml', 'rb'))['project'].get('dependencies', [])\n\
 sys.exit(subprocess.call([sys.executable, '-m', 'pip', 'install', *deps]))\n";
 
+/// iSH: `tina4 update`'s framework step without uv - upgrade the tina4-python
+/// requirement pyproject.toml lists, with the project's own .venv pip.
+pub fn pip_upgrade_framework(path: &str) -> bool {
+    let venv_python = format!("{}/.venv/bin/python", path);
+    run_cmd_in(path, &venv_python, &["-c", PIP_UPGRADE_TINA4_PYTHON])
+}
+
+const PIP_UPGRADE_TINA4_PYTHON: &str = "import re, subprocess, sys, tomllib\n\
+deps = tomllib.load(open('pyproject.toml', 'rb'))['project'].get('dependencies', [])\n\
+mine = [d for d in deps if re.split(r'[^A-Za-z0-9._-]', d, maxsplit=1)[0].lower().replace('_', '-') == 'tina4-python'] or ['tina4-python']\n\
+sys.exit(subprocess.call([sys.executable, '-m', 'pip', 'install', '--upgrade', *mine]))\n";
+
 // -- File helpers ------------------------------------------------------------
 
 fn write_file(base: &str, rel_path: &str, contents: &str) {

@@ -163,7 +163,8 @@ fn print_runtime_table() {
             name: "Python",
             commands: &["python3", "python"],
             version_flag: "--version",
-            pkg_manager: Some(PkgCheck {
+            // iSH takes no uv: each project installs with its own .venv's pip.
+            pkg_manager: (!crate::console::is_ish()).then_some(PkgCheck {
                 name: "uv",
                 commands: &["uv"],
                 version_flag: "--version",

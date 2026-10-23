@@ -84,6 +84,33 @@ pub fn is_android() -> bool {
         || std::env::var("PREFIX").is_ok_and(|p| p.contains("/com.termux/"))
 }
 
+/// True inside iSH, the Linux shell app for iPhone and iPad. iSH emulates 32-bit
+/// x86 Alpine in user mode and reports its own kernel release, "4.20.69-ish".
+/// The emulator cannot run every program Alpine ships (uv, PHP's Composer and
+/// npm all crash under it), so setup and init take a narrower path there.
+pub fn is_ish() -> bool {
+    kernel_release().is_some_and(|r| is_ish_release(&r))
+}
+
+fn is_ish_release(release: &str) -> bool {
+    release.ends_with("-ish")
+}
+
+#[cfg(unix)]
+fn kernel_release() -> Option<String> {
+    let mut uts: libc::utsname = unsafe { std::mem::zeroed() };
+    if unsafe { libc::uname(&mut uts) } != 0 {
+        return None;
+    }
+    let release = unsafe { std::ffi::CStr::from_ptr(uts.release.as_ptr()) };
+    Some(release.to_string_lossy().into_owned())
+}
+
+#[cfg(not(unix))]
+fn kernel_release() -> Option<String> {
+    None
+}
+
 /// `std::env::current_exe()`, corrected for Termux. termux-exec launches
 /// binaries through the system linker (`/apex/.../linker64 <binary>`), so
 /// /proc/self/exe names the linker, and self-update or uninstall would act on
@@ -490,6 +517,14 @@ pub fn php_vendor_bin(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ish_is_recognised_by_its_kernel_release() {
+        assert!(super::is_ish_release("4.20.69-ish"));
+        assert!(!super::is_ish_release("6.8.0-45-generic"));
+        assert!(!super::is_ish_release("5.15.0-android13"));
+        assert!(!super::is_ish_release(""));
+    }
+
     use super::*;
 
     #[test]

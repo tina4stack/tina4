@@ -75,52 +75,62 @@ fetch_to() {
   fi
 }
 
-# Get latest release metadata (tag + asset list)
-RELEASE_JSON=$(fetch "https://api.github.com/repos/${REPO}/releases/latest")
+# Helper: does a URL exist (HTTP 2xx, following redirects)?  Used to pick the
+# right release asset by probing its download URL rather than reading the API's
+# asset list - so asset selection stays off api.github.com too.
+url_exists() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsL -I -o /dev/null "$1" >/dev/null 2>&1
+  else
+    wget -q --spider "$1" >/dev/null 2>&1
+  fi
+}
 
-LATEST=$(echo "$RELEASE_JSON" | grep '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')
+# Latest release tag from the releases ATOM feed, NOT the GitHub REST API.
+# api.github.com's unauthenticated limit is 60 requests/hour per IP, so an
+# install from a shared or NAT'd IP (an office, a CI runner) would fail with a
+# rate-limit body and "Could not determine latest release". The atom feed is a
+# small static document served from github.com and is not rate-limited; it lists
+# releases newest-first, each as a .../releases/tag/<TAG> link.
+LATEST=$(fetch "https://github.com/${REPO}/releases.atom" \
+  | grep -oE '/releases/tag/[^"<]+' | head -1 | sed 's#.*/releases/tag/##')
 
 if [ -z "$LATEST" ]; then
   echo "Error: Could not determine latest release" >&2
   exit 1
 fi
 
-# Match the correct binary from release assets.
-# Releases may use varying names (e.g. amd64 vs x86_64, darwin vs macos).
+# Match the correct binary. Releases may use varying names (amd64 vs x86_64,
+# darwin vs macos), so build the candidate list for this platform and pick the
+# first whose download URL actually exists (probed, not read from the API).
 if [ "$PLATFORM" = "windows" ]; then
-  BINARY=$(echo "$RELEASE_JSON" | grep -oE '"name": *"tina4-windows-[^"]+\.exe"' | head -1 | sed -E 's/"name": *"([^"]+)"/\1/')
-else
+  CANDIDATES="tina4-windows-${ARCH_NAME}.exe tina4-windows-$([ "$ARCH_NAME" = "amd64" ] && echo x86_64 || echo "$ARCH_NAME").exe"
+elif [ -n "$ANDROID" ]; then
   # Android (Termux) can only run the native Android build, and 32-bit x86
   # (iSH on iOS) only the static musl build, so each is the ONLY candidate
   # there - any fallback would install a binary that cannot exec.
-  if [ -n "$ANDROID" ]; then
-    CANDIDATES="tina4-android-${ARCH_NAME}"
-  elif [ -n "$MUSL_ONLY" ]; then
-    CANDIDATES="tina4-linux-musl-${ARCH_NAME}"
-  else
-    CANDIDATES=""
-  fi
-  # Otherwise try the canonical name first (tina4-linux-amd64), then common alternatives.
-  [ -z "$CANDIDATES" ] && for CANDIDATE in \
-    "tina4-${PLATFORM}-${ARCH_NAME}" \
-    "tina4-${PLATFORM}-$([ "$ARCH_NAME" = "amd64" ] && echo x86_64 || echo "$ARCH_NAME")" \
-    "tina4-$([ "$PLATFORM" = "darwin" ] && echo macos || echo "$PLATFORM")-${ARCH_NAME}" \
-    "tina4-$([ "$PLATFORM" = "darwin" ] && echo macos || echo "$PLATFORM")-$([ "$ARCH_NAME" = "amd64" ] && echo x86_64 || echo "$ARCH_NAME")"
-  do
-    CANDIDATES="$CANDIDATES $CANDIDATE"
-  done
-  for CANDIDATE in $CANDIDATES; do
-    if echo "$RELEASE_JSON" | grep -q "\"name\": *\"${CANDIDATE}\""; then
-      BINARY="$CANDIDATE"
-      break
-    fi
-  done
+  CANDIDATES="tina4-android-${ARCH_NAME}"
+elif [ -n "$MUSL_ONLY" ]; then
+  CANDIDATES="tina4-linux-musl-${ARCH_NAME}"
+else
+  CANDIDATES="tina4-${PLATFORM}-${ARCH_NAME} \
+    tina4-${PLATFORM}-$([ "$ARCH_NAME" = "amd64" ] && echo x86_64 || echo "$ARCH_NAME") \
+    tina4-$([ "$PLATFORM" = "darwin" ] && echo macos || echo "$PLATFORM")-${ARCH_NAME} \
+    tina4-$([ "$PLATFORM" = "darwin" ] && echo macos || echo "$PLATFORM")-$([ "$ARCH_NAME" = "amd64" ] && echo x86_64 || echo "$ARCH_NAME")"
 fi
+
+BINARY=""
+for CANDIDATE in $CANDIDATES; do
+  if url_exists "https://github.com/${REPO}/releases/download/${LATEST}/${CANDIDATE}"; then
+    BINARY="$CANDIDATE"
+    break
+  fi
+done
 
 if [ -z "$BINARY" ]; then
   echo "Error: No matching binary found for ${PLATFORM}/${ARCH_NAME} in release ${LATEST}" >&2
-  echo "Available assets:" >&2
-  echo "$RELEASE_JSON" | grep '"name"' | sed -E 's/.*"name": *"([^"]+)".*/  \1/' >&2
+  echo "Tried: ${CANDIDATES}" >&2
+  echo "See https://github.com/${REPO}/releases/tag/${LATEST}" >&2
   exit 1
 fi
 

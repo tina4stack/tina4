@@ -2688,12 +2688,20 @@ fn clean_v2_binaries() {
 }
 
 fn get_latest_version() -> Option<String> {
-    let api_url = format!("https://api.github.com/repos/{}/releases/latest", REPO);
+    // Resolve the latest tag from the releases ATOM feed, NOT the GitHub REST
+    // API. api.github.com's unauthenticated limit is 60 requests/hour per IP, so
+    // a user behind a shared or NAT'd IP - or who has just run a handful of
+    // `tina4` commands - gets a rate-limit body with no tag and sees "Could not
+    // check latest version", even though an update exists. The atom feed is a
+    // small static document served from github.com (not api.github.com) and is
+    // not subject to that limit; the binary download already uses the non-API
+    // `releases/download/<tag>/...` path, so only this lookup had to move.
+    let atom_url = format!("https://github.com/{}/releases.atom", REPO);
 
     let output = if console::is_windows() {
         std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command",
-                &format!("(Invoke-RestMethod -Uri '{}' -Headers @{{'User-Agent'='tina4-cli'}}).tag_name", api_url)])
+                &format!("(Invoke-WebRequest -Uri '{}' -Headers @{{'User-Agent'='tina4-cli'}} -UseBasicParsing).Content", atom_url)])
             .output()
             .ok()?
     } else {
@@ -2702,47 +2710,27 @@ fn get_latest_version() -> Option<String> {
             return None;
         };
         std::process::Command::new(dl.program())
-            .args(dl.stdout_args(&api_url, &["User-Agent: tina4-cli", "Accept: application/vnd.github+json"]))
+            .args(dl.stdout_args(&atom_url, &["User-Agent: tina4-cli"]))
             .output()
             .ok()?
     };
 
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let text = String::from_utf8_lossy(&output.stdout);
 
-    if text.is_empty() {
+    // The feed lists releases newest-first, each as a
+    // `<link .../releases/tag/<TAG>"/>`. The first one is the latest release.
+    // A tag never contains '"', '<', '/' or whitespace, so read up to any of
+    // them. This parse is identical on every platform.
+    let marker = "/releases/tag/";
+    let pos = text.find(marker)?;
+    let tag: String = text[pos + marker.len()..]
+        .chars()
+        .take_while(|&c| c != '"' && c != '<' && c != '/' && !c.is_whitespace())
+        .collect();
+    if tag.is_empty() {
         return None;
     }
-
-    if console::is_windows() {
-        // PowerShell returns the tag directly
-        if text.starts_with('v') {
-            return Some(text);
-        }
-    }
-
-    // Parse JSON — find "tag_name": "vX.Y.Z" anywhere in the response
-    // Handle both pretty-printed and minified JSON
-    if let Some(pos) = text.find("\"tag_name\"") {
-        let after = &text[pos..];
-        // Find the value after the colon: "tag_name": "v3.3.3"
-        let mut in_value = false;
-        let mut start = 0;
-        for (i, ch) in after.char_indices() {
-            if ch == ':' && !in_value {
-                in_value = true;
-                continue;
-            }
-            if in_value && ch == '"' && start == 0 {
-                start = i + 1;
-                continue;
-            }
-            if in_value && ch == '"' && start > 0 {
-                return Some(after[start..i].to_string());
-            }
-        }
-    }
-
-    None
+    Some(tag)
 }
 
 /// Return a list of possible binary names to try, handling naming

@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.8.104 - 2026-10-23
+
+### Fixed
+- `tina4 update` and `install.sh` resolve the latest release from the releases
+  atom feed instead of the GitHub REST API. api.github.com's unauthenticated
+  limit is 60 requests/hour per IP, so a user behind a shared or NAT'd IP - or
+  who had just run a handful of `tina4` commands - saw "Could not check latest
+  version" (and a fresh install could fail) even when an update existed. The atom
+  feed is a small static document served from github.com and is not rate-limited;
+  the binary download already used the non-API `releases/download/<tag>/` path,
+  so only version resolution moved. install.sh now picks the right asset by
+  probing its download URL rather than reading the API's asset list.
+
 ## 3.8.103 - 2026-10-21
 
 - feat(android): on Termux the installer provisions the project runtime with `pkg` - `tina4 init` and `tina4 doctor` detect Termux and reach for `pkg install` (python, php, ruby, nodejs) instead of the Linux package managers that Termux has no room for, so a fresh phone sets up without a single manual step.

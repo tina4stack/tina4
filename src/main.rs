@@ -1058,7 +1058,7 @@ pub fn handle_serve(port: Option<u16>, host: &str, force_dev: bool, force_produc
     } else {
         match info.language.as_str() {
             "tina4js" => println!(
-                "{} Vite HMR active — press Ctrl+C to stop",
+                "{} esbuild dev server (live-reload) active — press Ctrl+C to stop",
                 icon_eye().green()
             ),
             _ => println!(
@@ -1246,7 +1246,7 @@ enum ServeMode {
 
 /// Decide the serve mode. `--production` wins over everything, then `--dev`.
 /// A tina4-js project has no `TINA4_DEBUG` switch: without `--production` it
-/// runs the Vite dev server, which is development. A backend project is in
+/// runs the esbuild dev server (tina4js dev), which is development. A backend project is in
 /// development only when `TINA4_DEBUG` is truthy, the same switch the
 /// framework reads to turn on the dev toolbar and `/__dev`.
 fn resolve_serve_mode(
@@ -1321,7 +1321,7 @@ fn production_server_install(language: &str) -> Option<(&'static str, &'static s
         "php" => Some(("opcache", "")),        // built-in
         "ruby" => Some(("tina4-server", "")), // built-in; Puma is opt-in via the Gemfile
         "nodejs" => Some(("cluster", "")),    // built-in
-        "tina4js" => Some(("vite", "")),      // uses vite build + preview
+        "tina4js" => Some(("tina4js", "")), // tina4js build; no separate server to install
         _ => None,
     }
 }
@@ -1366,43 +1366,26 @@ fn set_process_group(cmd: &mut std::process::Command) -> &mut std::process::Comm
     cmd
 }
 
-/// Build the command that runs a tina4js project's OWN Vite dev server.
+/// Build the command that runs a tina4js project's dev server: `tina4js dev`,
+/// which bundles and serves on esbuild (no Vite).
 ///
-/// Drive the installed Vite through `node` directly when it is present:
-///   node node_modules/vite/bin/vite.js --port <p> --host <h> --strictPort
+/// Drive the project's OWN tina4js CLI through `node` directly when present:
+///   node node_modules/tina4js/bin/tina4.js dev
 /// `node` is a real executable on every OS, so this launches on Windows too,
 /// where `npx` is `npx.cmd` and Rust's `Command` cannot spawn a bare `.cmd`
 /// shim -- the "program not found" that stopped `tina4 serve` on a tina4js
-/// project. It runs the project's OWN Vite (no network fetch), and Vite still
-/// owns the PWA build. Fall back to `npx vite` only when the local entry is
+/// project. `tina4js dev` reads the port and host from the PORT / HOST env vars
+/// the caller sets. Fall back to `npx tina4js dev` only when the local CLI is
 /// absent (an un-installed project).
-fn tina4js_serve_command(
-    vite_entry: Option<&str>,
-    port: &str,
-    host: &str,
-) -> (String, Vec<String>) {
-    match vite_entry {
+fn tina4js_serve_command(cli_entry: Option<&str>) -> (String, Vec<String>) {
+    match cli_entry {
         Some(entry) => (
             console::resolve_cmd("node"),
-            vec![
-                entry.to_string(),
-                "--port".into(),
-                port.into(),
-                "--host".into(),
-                host.into(),
-                "--strictPort".into(),
-            ],
+            vec![entry.to_string(), "dev".into()],
         ),
         None => (
             console::resolve_cmd("npx"),
-            vec![
-                "vite".into(),
-                "--port".into(),
-                port.into(),
-                "--host".into(),
-                host.into(),
-                "--strictPort".into(),
-            ],
+            vec!["tina4js".into(), "dev".into()],
         ),
     }
 }
@@ -1601,7 +1584,7 @@ fn start_language_server(
             set_process_group(&mut cmd).spawn()
         }
         "tina4js" => {
-            // tina4js runs on the Vite dev server (Vite owns the PWA build).
+            // tina4js runs on the esbuild dev server (`tina4js dev`); no Vite.
             if !std::path::Path::new("node_modules").exists() {
                 eprintln!(
                     "{} Dependencies not installed. Run: {}",
@@ -1610,17 +1593,22 @@ fn start_language_server(
                 );
                 return None;
             }
-            // Drive the project's OWN Vite through `node` (see tina4js_serve_command):
-            // `node` spawns on Windows, where a bare `npx.cmd` shim does not.
-            let vite_js = "node_modules/vite/bin/vite.js";
-            let entry = if std::path::Path::new(vite_js).exists() {
-                Some(vite_js)
+            // Drive the project's OWN tina4js CLI through `node` (see
+            // tina4js_serve_command): `node` spawns on Windows, where a bare
+            // `npx.cmd`/shim does not. `tina4js dev` reads PORT / HOST from env.
+            let cli_js = "node_modules/tina4js/bin/tina4.js";
+            let entry = if std::path::Path::new(cli_js).exists() {
+                Some(cli_js)
             } else {
                 None
             };
-            let (program, args) = tina4js_serve_command(entry, &port_s, host);
+            let (program, args) = tina4js_serve_command(entry);
             let mut cmd = std::process::Command::new(program);
             cmd.args(&args)
+                .env("TINA4_PORT", &port_s)
+                .env("PORT", &port_s)
+                .env("TINA4_HOST", host)
+                .env("HOST", host)
                 .stdout(std::process::Stdio::inherit())
                 .stderr(std::process::Stdio::inherit());
             set_process_group(&mut cmd).spawn()
@@ -1697,11 +1685,11 @@ pub(crate) fn resolve_cli(info: &detect::ProjectInfo) -> (String, Vec<String>) {
         "tina4js" => {
             // A tina4js (frontend) project owns its generators through the
             // `tina4js` bin, run via `npx tina4js generate page|component`.
-            // `cli_name()` returns "vite" — that is the SERVE tool (vite dev +
-            // build), which has no `generate` subcommand and is not spawnable as
-            // a bare program on Windows. Delegating `generate`/`lint`/etc. must
+            // `cli_name()` returns "esbuild" — that is the BUILD tool, which has no
+            // `generate` subcommand and is not spawnable as a bare program on
+            // Windows. Delegating `generate`/`lint`/etc. must
             // target `tina4js`, or `tina4 generate page X` tries to run
-            // `vite generate page X` and dies with "No such file or directory".
+            // `esbuild generate page X` and dies with "No such file or directory".
             if std::path::Path::new("node_modules").exists()
                 && which::which("npx").is_ok() {
                     return ("npx".into(), vec!["tina4js".into()]);
@@ -3616,30 +3604,28 @@ mod tests {
 
     // ---- tina4js serve command (Windows npx-shim fix) --------------------
 
-    /// `tina4 serve` must launch a tina4js project's OWN Vite through `node`,
-    /// not a bare `npx`. On Windows `npx` is `npx.cmd`, which Rust's Command
-    /// cannot spawn -- the "program not found" that stopped `tina4 serve` on a
-    /// tina4js project. `node` is a real executable everywhere.
+    /// `tina4 serve` must launch a tina4js project's OWN `tina4js dev` (esbuild)
+    /// through `node`, not a bare `npx`. On Windows `npx` is `npx.cmd`, which
+    /// Rust's Command cannot spawn -- the "program not found" that stopped
+    /// `tina4 serve` on a tina4js project. `node` is a real executable
+    /// everywhere. The port/host come from env, not flags.
     #[test]
-    fn tina4js_serve_runs_vite_through_node_not_bare_npx() {
+    fn tina4js_serve_runs_tina4js_dev_through_node_not_bare_npx() {
         let (prog, args) =
-            super::tina4js_serve_command(Some("node_modules/vite/bin/vite.js"), "5173", "0.0.0.0");
+            super::tina4js_serve_command(Some("node_modules/tina4js/bin/tina4.js"));
         assert!(prog.contains("node") && !prog.contains("npx"), "must launch via node: {prog}");
-        assert_eq!(args.first().map(String::as_str), Some("node_modules/vite/bin/vite.js"));
-        assert!(args.iter().any(|a| a == "--strictPort"), "{args:?}");
-        assert!(
-            args.iter().any(|a| a == "5173") && args.iter().any(|a| a == "0.0.0.0"),
-            "{args:?}"
-        );
+        assert_eq!(args.first().map(String::as_str), Some("node_modules/tina4js/bin/tina4.js"));
+        assert_eq!(args.get(1).map(String::as_str), Some("dev"));
         assert_ne!(prog, "npx", "bare npx is the Windows failure");
     }
 
-    /// Only a project with no local Vite falls back to `npx vite`.
+    /// Only a project with no local tina4js CLI falls back to `npx tina4js dev`.
     #[test]
-    fn tina4js_serve_falls_back_to_npx_when_local_vite_absent() {
-        let (prog, args) = super::tina4js_serve_command(None, "5173", "0.0.0.0");
+    fn tina4js_serve_falls_back_to_npx_when_local_cli_absent() {
+        let (prog, args) = super::tina4js_serve_command(None);
         assert!(prog.contains("npx"), "{prog}");
-        assert_eq!(args.first().map(String::as_str), Some("vite"));
+        assert_eq!(args.first().map(String::as_str), Some("tina4js"));
+        assert_eq!(args.get(1).map(String::as_str), Some("dev"));
     }
 
     #[test]

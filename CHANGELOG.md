@@ -1,5 +1,22 @@
 # Changelog
 
+## 3.8.105 - 2026-10-25
+
+### Changed
+- `tina4 init js` and `tina4 serve` build with esbuild, not Vite. The scaffold no
+  longer emits a Vite project (`vite`/`vitest`/`jsdom`/`vite.config.ts`); it
+  generates an esbuild project driven by the `tina4js` CLI (`tina4js dev` /
+  `tina4js build`), with a hand-written route barrel (esbuild has no
+  `import.meta.glob`) and no `import.meta.env`. `tina4 serve` runs `tina4js dev`
+  (esbuild dev server + live-reload) instead of the Vite dev server; `tina4 doctor`
+  checks for esbuild, and project detection reports esbuild on port 3000. Pairs
+  with tina4-js 1.7.5. (tina4stack/tina4-js#33)
+
+### Internal
+- `sign-mac.sh` falls back to a direct PE signature-presence check when
+  `osslsigncode verify` aborts on macOS, so a release is not blocked after jsign
+  has already signed (fails closed if no signature is embedded).
+
 ## 3.8.104 - 2026-10-23
 
 ### Fixed

@@ -985,13 +985,10 @@ startServer();
     println!("  {} Created Node.js scaffold", icon_ok().green());
 }
 
-// The vitest pin is ^5, not ^4. Every 4.x release tried -- 4.1.9, 4.1.10 and
-// 4.1.11 -- makes npm 10.9.7 exit 1 with "Cannot read properties of null
-// (reading 'edgesOut')", against an empty cache as well as a warm one, so a
-// scaffolded project ends up with no node_modules at all and `tina4 init` can
-// only warn about it. A package.json holding nothing but that one dependency
-// reproduces it. 5.0.0 installs, and the scaffold it produces tests, audits
-// and builds clean.
+// A tina4-js app builds on esbuild (the same engine the framework and examples
+// use), driven by the `tina4js` CLI - `tina4js dev` / `tina4js build`. The
+// scaffold stays zero-config: no vite.config, no bundler config; esbuild and
+// typescript are the only devDependencies.
 fn scaffold_tina4js(path: &str) {
     let project_name = project_name_from_path(path);
 
@@ -1003,18 +1000,17 @@ fn scaffold_tina4js(path: &str) {
   "private": true,
   "type": "module",
   "scripts": {{
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview",
-    "test": "vitest run"
+    "dev": "tina4js dev",
+    "build": "tina4js build",
+    "build:php": "tina4js build --target php",
+    "build:python": "tina4js build --target python",
+    "typecheck": "tsc --noEmit"
   }},
   "dependencies": {{
-    "tina4js": "^1.5.2"
+    "tina4js": "^1.7.5"
   }},
   "devDependencies": {{
-    "vite": "^8.2.0",
-    "vitest": "^5.0.0",
-    "jsdom": "^30.0.1",
+    "esbuild": "^0.28.2",
     "typescript": "^5.4.0"
   }}
 }}
@@ -1027,8 +1023,8 @@ fn scaffold_tina4js(path: &str) {
     //
     // baseUrl + paths give you the `@/` alias for absolute imports —
     // `import { homePage } from '@/pages/home'` instead of brittle
-    // `../../pages/home` relative chains. The matching Vite alias is
-    // in vite.config.ts; both must agree or the editor and the bundler
+    // `../../pages/home` relative chains. The matching esbuild alias is set by
+    // `tina4js build`/`dev`; both must agree or the editor and the bundler
     // disagree about where `@/` points.
     write_file(
         path,
@@ -1053,74 +1049,6 @@ fn scaffold_tina4js(path: &str) {
 "#,
     );
 
-    // vite.config.ts
-    //
-    // resolve.alias maps `@` → /src so the bundler resolves `@/...`
-    // imports. Keep it in lockstep with the `paths` entry in
-    // tsconfig.json — TypeScript uses tsconfig for type-checking and
-    // editor go-to-definition, Vite uses this for the actual build.
-    write_file(
-        path,
-        "vite.config.ts",
-        r#"import { defineConfig } from 'vite';
-import { resolve } from 'path';
-
-export default defineConfig({
-  resolve: {
-    alias: {
-      // import.meta.dirname, not __dirname: Vite's native config loader does
-      // not define __dirname, and it becomes the default in a future major.
-      '@': resolve(import.meta.dirname, 'src'),
-    },
-  },
-  test: {
-    // tina4-js is a Web Components framework: importing it touches HTMLElement
-    // at module load, so tests need a DOM. Without this every test file fails
-    // to import with "ReferenceError: HTMLElement is not defined".
-    environment: 'jsdom',
-  },
-  server: {
-    port: 5173,
-    // Proxy API calls to tina4-php/python backend in dev
-    // proxy: { '/api': 'http://localhost:7145' },
-  },
-});
-"#,
-    );
-
-    // tests/signals.test.ts
-    //
-    // One real example test, so `npm test` passes on a fresh project and the
-    // testing pattern is demonstrated rather than only declared in the script.
-    // It is a genuine gate: break signal or computed and it goes red.
-    write_file(
-        path,
-        "tests/signals.test.ts",
-        r#"import { describe, it, expect } from 'vitest';
-import { signal, computed } from 'tina4js';
-
-describe('signals', () => {
-  it('holds and updates a value', () => {
-    const count = signal(1);
-    expect(count.value).toBe(1);
-
-    count.value = 5;
-    expect(count.value).toBe(5);
-  });
-
-  it('re-derives a computed when its source changes', () => {
-    const count = signal(2);
-    const doubled = computed(() => count.value * 2);
-    expect(doubled.value).toBe(4);
-
-    // The assertion that matters: a computed is not a snapshot.
-    count.value = 10;
-    expect(doubled.value).toBe(20);
-  });
-});
-"#,
-    );
-
     // index.html
     let index_html = format!(
         r#"<!DOCTYPE html>
@@ -1133,7 +1061,8 @@ describe('signals', () => {
 </head>
 <body>
   <div id="root"></div>
-  <script type="module" src="/src/main.ts"></script>
+  <script type="module" src="/dist/main.js"></script>
+  <script>new EventSource('/esbuild').addEventListener('change', () => location.reload())</script>
 </body>
 </html>
 "#,
@@ -1145,29 +1074,24 @@ describe('signals', () => {
     write_file(
         path,
         "src/main.ts",
-        r#"import { html, route, router, api } from 'tina4js';
+        r#"// Debug overlay first - so it tracks every signal, including the module-level
+// store signals created during the imports below (Ctrl+Shift+D to toggle).
+import 'tina4js/debug';
+import { html, route, router, api } from 'tina4js';
 
-// FOLDERS WIRE THEMSELVES. route() appends to the router table and
-// customElements.define() runs at module scope, so importing a file IS
-// registering what it declares - one glob replaces a hand-maintained barrel,
-// and a new route or component needs no edit here.
-//
-// { eager: true } is MANDATORY. Without it the glob hands back loader functions
-// nobody calls, so NOTHING registers and the app renders an empty page with no
-// error to read.
-import.meta.glob('./routes/**/*.ts', { eager: true });
-import.meta.glob('./components/**/*.ts', { eager: true });
-
-// Debug overlay in dev mode (Ctrl+Shift+D to toggle, tree-shaken from
-// production builds). Signals created before this dynamic import resolves —
-// including module-level store signals — are buffered and still tracked.
-if (import.meta.env.DEV) import('tina4js/debug');
+// FOLDERS WIRE THROUGH A BARREL. The build runs on esbuild (no Vite), which has
+// no import.meta.glob, so wire each route/feature with one import. route()
+// appends to the router table and customElements.define() runs at module scope,
+// so importing a file IS registering what it declares - add a route or component
+// by adding its import to the barrel (src/routes/index.ts) or here.
+import './routes/index';
+import '@/components/app-header';
 
 // Configure API (uncomment to connect to tina4-php/python backend)
 // api.configure({ baseUrl: '/api', auth: true });
 
-// The catch-all belongs HERE, after the glob. Inside routes/ it would sort
-// ahead of the real routes and every path would render 404.
+// The catch-all belongs HERE, after the route barrel. The router takes the first
+// matching pattern, so listing it last keeps a 404 from shadowing real routes.
 route('*', () => html`
   <div class="page">
     <h1>404</h1>
@@ -1181,15 +1105,27 @@ router.start({ target: '#root', mode: 'hash' });
 "#,
     );
 
-    // src/routes/home.ts — one file per route; the glob in main.ts finds them.
+    // src/routes/index.ts — the barrel: one import per route file. esbuild has no
+    // import.meta.glob, so new routes are added here (importing a file runs its
+    // route() call). Keep the catch-all in main.ts, after this barrel.
+    write_file(
+        path,
+        "src/routes/index.ts",
+        r#"// Add a route by adding its file and importing it here.
+import './home';
+import './about';
+"#,
+    );
+
+    // src/routes/home.ts — one file per route; the barrel (routes/index.ts) imports it.
     write_file(
         path,
         "src/routes/home.ts",
         r#"import { route } from 'tina4js';
 import { homePage } from '@/pages/home';
 
-// Adding a route means adding a FILE here. Nothing to register elsewhere:
-// main.ts globs this folder, and importing a file runs its route() call.
+// Adding a route means adding a FILE here and one import in routes/index.ts.
+// Importing a file runs its route() call.
 route('/', homePage);
 "#,
     );
@@ -1731,9 +1667,16 @@ mod tests {
         let package_json = fs::read_to_string(dir.join("package.json")).expect("package.json");
 
         assert!(
-            package_json.contains("\"tina4js\": \"^1.5.2\""),
+            package_json.contains("\"tina4js\": \"^1.7.5\""),
             "new projects must use the current tina4-js release:\n{package_json}"
         );
+        // The app build is esbuild, not Vite: scripts drive the tina4js CLI,
+        // esbuild is the only bundler devDep, and nothing Vite is scaffolded.
+        assert!(package_json.contains("\"dev\": \"tina4js dev\""), "{package_json}");
+        assert!(package_json.contains("\"esbuild\":"), "{package_json}");
+        assert!(!package_json.contains("vite"), "no Vite in the scaffold:\n{package_json}");
+        assert!(!dir.join("vite.config.ts").exists(), "no vite.config.ts");
+        assert!(dir.join("src/routes/index.ts").exists(), "route barrel present");
         let _ = fs::remove_dir_all(&dir);
     }
 }

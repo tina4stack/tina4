@@ -24,7 +24,7 @@ impl ProjectInfo {
             "php" => "tina4php",
             "ruby" => "tina4ruby",
             "nodejs" => "tina4nodejs",
-            "tina4js" => "vite",
+            "tina4js" => "esbuild",
             _ => "tina4",
         }
     }
@@ -36,7 +36,7 @@ impl ProjectInfo {
             "php" => 7145,
             "ruby" => 7147,
             "nodejs" => 7148,
-            "tina4js" => 5173,
+            "tina4js" => 3000,
             _ => 7145,
         }
     }

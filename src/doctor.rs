@@ -266,7 +266,7 @@ fn print_cli_table() {
         CliCheck { name: "tina4php",    lang: "PHP",     install_cmd: "composer global require tina4stack/tina4php" },
         CliCheck { name: "tina4ruby",   lang: "Ruby",    install_cmd: "gem install tina4ruby" },
         CliCheck { name: "tina4nodejs", lang: "Node.js", install_cmd: "npm install -g tina4-nodejs" },
-        CliCheck { name: "vite",       lang: "tina4js",  install_cmd: "npm install vite" },
+        CliCheck { name: "esbuild",    lang: "tina4js",  install_cmd: "npm install -D esbuild" },
     ];
 
     for cli in &clis {
@@ -276,7 +276,7 @@ fn print_cli_table() {
             "tina4python" => &[".venv/bin/tina4python", "venv/bin/tina4python"],
             "tina4ruby" => &["bin/tina4ruby", "exe/tina4ruby"],
             "tina4nodejs" => &["node_modules/.bin/tina4nodejs", "packages/cli/src/bin.ts"],
-            "vite" => &["node_modules/.bin/vite"],
+            "esbuild" => &["node_modules/.bin/esbuild"],
             _ => &[],
         };
         let found_global = which::which(cli.name).is_ok();

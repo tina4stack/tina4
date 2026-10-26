@@ -152,6 +152,21 @@ if [ -f "$tina4_dir/skills.sha256" ] && ! diff -q "$tina4_dir/skills.sha256" "$b
   exit 1
 fi
 
+# Front matter of every staged SKILL.md must be strict YAML with a name and a
+# non-empty description (the text that decides when the skill triggers). A lenient
+# parser once let a malformed block ship (#112). Hard-fail on a real problem; only
+# skip (loudly) when PyYAML is not installed here, since the CI gate re-runs it
+# with PyYAML present and is the authority.
+echo "Validating skill front matter (strict YAML) ..."
+if python3 -c "import yaml" >/dev/null 2>&1; then
+  if ! python3 "$script_dir/validate-skills-frontmatter.py" "$bundle"; then
+    rm -rf "$bundle"
+    exit 1
+  fi
+else
+  echo "  WARNING: PyYAML not installed here (pip install pyyaml) -- front matter NOT validated locally; the CI gate will." >&2
+fi
+
 echo ""
 echo "  Bundle ready: $staged_count skill files + skills.sha256 + 2 installers"
 echo "  Serve check : https://tina4.com/skills/$ref/skills.sha256"

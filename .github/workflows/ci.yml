@@ -16,6 +16,14 @@ jobs:
       # script devs run locally: sh scripts/check-repo-hygiene.sh
       - name: Repo hygiene (no hidden / broken files)
         run: sh scripts/check-repo-hygiene.sh
+      # Strict-YAML gate on this repo's skill front matter (tina4-cli). A lenient
+      # parser once let a malformed block ship (#112); PyYAML is a CI tool, not a
+      # runtime dependency. gen-skills-bundle.sh runs the same check over every
+      # repo's skills at the bundle cut.
+      - name: Validate skill front matter (strict YAML)
+        run: |
+          python3 -m pip install --quiet pyyaml
+          python3 scripts/validate-skills-frontmatter.py .claude/skills
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
       - name: Install cargo-deny
         uses: taiki-e/install-action@bffeee26d4db9be238a4ea78d8826604ebcb594d # v2.82.5

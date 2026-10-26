@@ -528,6 +528,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn resolve_cmd_returns_an_absolute_path_for_a_command_on_path() {
+        // The interpreter resolution for `tina4 serve` (php/ruby/node) goes
+        // through resolve_cmd so Windows and git worktrees find the binary
+        // (#120). A command that is always present must resolve to an absolute
+        // path, never the bare name — that is the difference from the old
+        // Command::new("php") that failed off a login PATH.
+        let probe = if is_windows() { "cmd" } else { "sh" };
+        if which::which(probe).is_ok() {
+            let resolved = resolve_cmd(probe);
+            assert!(
+                std::path::Path::new(&resolved).is_absolute(),
+                "resolve_cmd({probe}) should be absolute, got {resolved}"
+            );
+            assert_ne!(resolved, probe, "resolve_cmd must not hand back the bare name when found");
+        }
+    }
+
+    #[test]
+    fn resolve_cmd_falls_back_to_the_bare_name_when_absent() {
+        // Fallback keeps POSIX behaviour unchanged when the command is not on
+        // PATH: the caller still gets a usable value rather than an error.
+        assert_eq!(resolve_cmd("tina4-definitely-not-a-real-binary-xyz"), "tina4-definitely-not-a-real-binary-xyz");
+    }
+
+    #[test]
     fn only_the_recorded_pid_is_ours() {
         assert_eq!(tina4_holders(&[40, 41], Some(41), 7), vec![41]);
     }

@@ -86,14 +86,23 @@ url_exists() {
   fi
 }
 
-# Latest release tag from the releases ATOM feed, NOT the GitHub REST API.
-# api.github.com's unauthenticated limit is 60 requests/hour per IP, so an
-# install from a shared or NAT'd IP (an office, a CI runner) would fail with a
-# rate-limit body and "Could not determine latest release". The atom feed is a
-# small static document served from github.com and is not rate-limited; it lists
-# releases newest-first, each as a .../releases/tag/<TAG> link.
-LATEST=$(fetch "https://github.com/${REPO}/releases.atom" \
-  | grep -oE '/releases/tag/[^"<]+' | head -1 | sed 's#.*/releases/tag/##')
+# Latest release tag from GitHub's releases/latest redirect, NOT the atom feed
+# and NOT the REST API. api.github.com's unauthenticated limit is 60 requests/
+# hour per IP, so an install from a shared or NAT'd IP (an office, a CI runner)
+# would fail with a rate-limit body. The atom feed lists every pushed TAG,
+# including one whose release is still an unpublished DRAFT during a sign-and-
+# publish window - installing against it 404s on the assets. releases/latest is
+# served from github.com (no rate limit) and GitHub excludes drafts AND
+# prereleases from it, so the redirect lands on the latest PUBLISHED release's
+# page. `fetch` follows the 302; the canonical og:url meta carries the tag. The
+# [A-Za-z0-9] guard skips the /releases/tag/*name placeholder the "Draft a new
+# release" form emits, which a naive first-match would otherwise return.
+PAGE=$(fetch "https://github.com/${REPO}/releases/latest")
+LATEST=$(printf '%s' "$PAGE" \
+  | grep -oE 'og:url[^>]*content="[^"]*/releases/tag/[A-Za-z0-9][^"]*"' \
+  | head -1 | sed 's#.*/releases/tag/##; s#".*##')
+[ -z "$LATEST" ] && LATEST=$(printf '%s' "$PAGE" \
+  | grep -oE '/releases/tag/[A-Za-z0-9][^"<&]*' | head -1 | sed 's#.*/releases/tag/##')
 
 if [ -z "$LATEST" ]; then
   echo "Error: Could not determine latest release" >&2

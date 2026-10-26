@@ -1,5 +1,19 @@
 # Changelog
 
+## 3.8.106 - 2026-10-26
+
+### Fixed
+- `tina4 update` and the `install.sh` one-liner now resolve the latest release
+  from GitHub's `releases/latest` redirect instead of the `releases.atom` feed.
+  The atom feed lists every pushed TAG, so during the window between tagging a
+  release and signing-and-publishing it, the still-unpublished DRAFT tag was
+  returned as "latest" and every `tina4 update` tried to download assets that
+  do not exist yet (HTTP 404). `releases/latest` is served from github.com (so
+  it keeps the 3.8.104 fix for api.github.com's 60-request/hour rate limit) and
+  GitHub excludes drafts and prereleases from it, so a tagged-but-unpublished
+  draft can never break updates again. The tag is read from the resolved page's
+  canonical `og:url`, guarded so the `*name` draft-form placeholder is skipped.
+
 ## 3.8.105 - 2026-10-25
 
 ### Changed

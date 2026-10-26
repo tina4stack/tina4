@@ -2676,20 +2676,29 @@ fn clean_v2_binaries() {
 }
 
 fn get_latest_version() -> Option<String> {
-    // Resolve the latest tag from the releases ATOM feed, NOT the GitHub REST
-    // API. api.github.com's unauthenticated limit is 60 requests/hour per IP, so
-    // a user behind a shared or NAT'd IP - or who has just run a handful of
-    // `tina4` commands - gets a rate-limit body with no tag and sees "Could not
-    // check latest version", even though an update exists. The atom feed is a
-    // small static document served from github.com (not api.github.com) and is
-    // not subject to that limit; the binary download already uses the non-API
-    // `releases/download/<tag>/...` path, so only this lookup had to move.
-    let atom_url = format!("https://github.com/{}/releases.atom", REPO);
+    // Resolve the latest tag from GitHub's `releases/latest` redirect, NOT the
+    // releases.atom feed and NOT the REST API. Two separate traps this avoids:
+    //   * api.github.com's unauthenticated 60-requests/hour/IP limit - a user
+    //     behind a shared or NAT'd IP, or who has just run a handful of `tina4`
+    //     commands, gets a rate-limit body with no tag and sees "Could not
+    //     check latest version" even though an update exists.
+    //   * the atom feed lists every pushed TAG, including one whose release is
+    //     still an unpublished DRAFT during a sign-and-publish window. Reading
+    //     "latest" from it points `tina4 update` at assets that 404 until the
+    //     draft is published - a self-inflicted outage for everyone already on
+    //     the previous version. `releases/latest` is served from github.com (so
+    //     no rate limit) and GitHub excludes drafts AND prereleases from it, so
+    //     a tagged-but-unpublished draft is never returned. The binary download
+    //     already uses the non-API `releases/download/<tag>/...` path.
+    // Every downloader here (curl -fsSL, GNU/busybox wget -qO-, PowerShell
+    // Invoke-WebRequest) follows the 302 to the published release's page, whose
+    // HTML this parses.
+    let url = format!("https://github.com/{}/releases/latest", REPO);
 
     let output = if console::is_windows() {
         std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command",
-                &format!("(Invoke-WebRequest -Uri '{}' -Headers @{{'User-Agent'='tina4-cli'}} -UseBasicParsing).Content", atom_url)])
+                &format!("(Invoke-WebRequest -Uri '{}' -Headers @{{'User-Agent'='tina4-cli'}} -UseBasicParsing).Content", url)])
             .output()
             .ok()?
     } else {
@@ -2698,27 +2707,52 @@ fn get_latest_version() -> Option<String> {
             return None;
         };
         std::process::Command::new(dl.program())
-            .args(dl.stdout_args(&atom_url, &["User-Agent: tina4-cli"]))
+            .args(dl.stdout_args(&url, &["User-Agent: tina4-cli"]))
             .output()
             .ok()?
     };
 
-    let text = String::from_utf8_lossy(&output.stdout);
+    parse_latest_tag(&String::from_utf8_lossy(&output.stdout))
+}
 
-    // The feed lists releases newest-first, each as a
-    // `<link .../releases/tag/<TAG>"/>`. The first one is the latest release.
-    // A tag never contains '"', '<', '/' or whitespace, so read up to any of
-    // them. This parse is identical on every platform.
+/// Extract the release tag from the HTML that GitHub's `releases/latest`
+/// redirect lands on. Pure, so the parse is unit-tested without a network call.
+///
+/// Prefers the canonical `og:url` meta - the single authoritative
+/// `/releases/tag/<TAG>` on the page - and only if that is missing falls back
+/// to the first `/releases/tag/<TAG>` whose tag begins with an alphanumeric.
+/// That guard skips the `/releases/tag/*name` placeholder the "Draft a new
+/// release" form emits, which otherwise wins a naive first-match. A tag never
+/// contains '"', '<', '/', '&' or whitespace, so each is a terminator.
+fn parse_latest_tag(html: &str) -> Option<String> {
     let marker = "/releases/tag/";
-    let pos = text.find(marker)?;
-    let tag: String = text[pos + marker.len()..]
-        .chars()
-        .take_while(|&c| c != '"' && c != '<' && c != '/' && !c.is_whitespace())
-        .collect();
-    if tag.is_empty() {
-        return None;
+    let read_tag = |rest: &str| -> String {
+        rest.chars()
+            .take_while(|&c| c != '"' && c != '<' && c != '/' && c != '&' && !c.is_whitespace())
+            .collect()
+    };
+    let looks_real = |tag: &str| tag.chars().next().is_some_and(|c| c.is_ascii_alphanumeric());
+
+    // Primary: the canonical og:url meta.
+    if let Some(og) = html.find("og:url") {
+        if let Some(rel) = html[og..].find(marker) {
+            let tag = read_tag(&html[og + rel + marker.len()..]);
+            if looks_real(&tag) {
+                return Some(tag);
+            }
+        }
     }
-    Some(tag)
+    // Fallback: first tag link whose tag looks real (skips `*name`).
+    let mut from = 0;
+    while let Some(rel) = html[from..].find(marker) {
+        let start = from + rel + marker.len();
+        let tag = read_tag(&html[start..]);
+        if looks_real(&tag) {
+            return Some(tag);
+        }
+        from = start;
+    }
+    None
 }
 
 /// Return a list of possible binary names to try, handling naming
@@ -4279,5 +4313,54 @@ mod tests {
 
         assert_eq!(installed_skills_targets(&root), vec!["claude", "cursor"]);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn parse_latest_tag_prefers_og_url() {
+        // A faithful slice of GitHub's releases/latest page: the "Draft a new
+        // release" template emits /releases/tag/*name BEFORE the canonical
+        // og:url, so a first-match parse would return "*name". og:url wins.
+        let html = r#"
+            <a href="/tina4stack/tina4/releases/tag/*name">Draft a new release</a>
+            <meta property="og:url" content="/tina4stack/tina4/releases/tag/v3.8.104" />
+            <a href="/tina4stack/tina4/releases/tag/v3.8.104">v3.8.104</a>
+        "#;
+        assert_eq!(parse_latest_tag(html).as_deref(), Some("v3.8.104"));
+    }
+
+    #[test]
+    fn parse_latest_tag_og_url_wins_over_an_earlier_real_tag() {
+        // A stale/older real tag link appearing BEFORE the canonical og:url must
+        // not win - og:url is authoritative for the latest published release.
+        let html = r#"
+            <a href="/x/y/releases/tag/v3.8.100">older</a>
+            <meta property="og:url" content="/x/y/releases/tag/v3.8.104" />
+        "#;
+        assert_eq!(parse_latest_tag(html).as_deref(), Some("v3.8.104"));
+    }
+
+    #[test]
+    fn parse_latest_tag_falls_back_past_placeholder() {
+        // No og:url (a layout change): the *name placeholder must still be
+        // skipped and the first real tag returned.
+        let html = r#"
+            <a href="/tina4stack/tina4/releases/tag/*name">New</a>
+            <a href="/tina4stack/tina4/releases/tag/v3.8.104">v3.8.104</a>
+        "#;
+        assert_eq!(parse_latest_tag(html).as_deref(), Some("v3.8.104"));
+    }
+
+    #[test]
+    fn parse_latest_tag_handles_bare_version() {
+        // Framework-style bare tags (no leading v) are alphanumeric too.
+        let html = r#"<meta property="og:url" content="/x/y/releases/tag/3.13.154">"#;
+        assert_eq!(parse_latest_tag(html).as_deref(), Some("3.13.154"));
+    }
+
+    #[test]
+    fn parse_latest_tag_none_when_absent() {
+        assert_eq!(parse_latest_tag("<html>no releases here</html>"), None);
+        // Only the placeholder present -> nothing real to return.
+        assert_eq!(parse_latest_tag("/releases/tag/*name"), None);
     }
 }

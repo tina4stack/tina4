@@ -16,15 +16,25 @@ Write-Host ""
 Write-Host "  Tina4 CLI Installer" -ForegroundColor Cyan
 Write-Host "  ===================" -ForegroundColor Cyan
 
-# Get latest release
-$release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest"
-$tag = $release.tag_name
-$asset = $release.assets | Where-Object { $_.name -eq $binary }
-
-if (-not $asset) {
-    Write-Error "Could not find $binary in release $tag"
+# Latest release tag from GitHub's releases/latest redirect, NOT the REST API -
+# the same lookup install.sh uses. api.github.com allows 60 unauthenticated
+# requests an hour per IP, so an install from a shared or NAT'd IP (an office,
+# a CI runner) failed with "(403) Forbidden". releases/latest is served from
+# github.com and excludes drafts and prereleases; Invoke-WebRequest follows the
+# 302 to the release page, whose canonical og:url carries the tag. The
+# [A-Za-z0-9] guard skips the /releases/tag/*name placeholder of the "Draft a
+# new release" form.
+$page = (Invoke-WebRequest -Uri "https://github.com/$repo/releases/latest" -UseBasicParsing).Content
+$tag = $null
+$m = [regex]::Match($page, 'og:url[^>]*content="[^"]*/releases/tag/([A-Za-z0-9][^"]*)"')
+if (-not $m.Success) { $m = [regex]::Match($page, '/releases/tag/([A-Za-z0-9][^"<&]*)') }
+if ($m.Success) { $tag = $m.Groups[1].Value }
+if (-not $tag) {
+    Write-Error "Could not determine the latest release"
     exit 1
 }
+# Assets come from the versioned download path, not the API's asset list.
+$download = "https://github.com/$repo/releases/download/$tag"
 
 Write-Host "  Version:    $tag"
 Write-Host "  Install to: $installDir\tina4.exe"
@@ -43,14 +53,20 @@ $dest = "$installDir\tina4.exe"
 $tmp = Join-Path $installDir ([IO.Path]::GetRandomFileName() + ".exe")
 try {
 Write-Host "Downloading $binary..."
-Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $tmp
+try {
+    Invoke-WebRequest -Uri "$download/$binary" -OutFile $tmp -UseBasicParsing
+} catch {
+    Write-Error "Could not download $binary from release ${tag}: $($_.Exception.Message)"
+    exit 1
+}
 
 # Verify integrity against the release SHA256SUMS before trusting the binary.
 # FAIL CLOSED: if SHA256SUMS is not published we cannot prove the download is
 # the published binary, so we refuse to install rather than skip the check.
 # (Keep all output ASCII-only - see the cp1252 note further down.)
-$sumsAsset = $release.assets | Where-Object { $_.name -eq "SHA256SUMS" }
-if (-not $sumsAsset) {
+try {
+    $sumsRaw = (Invoke-WebRequest -Uri "$download/SHA256SUMS" -UseBasicParsing).Content
+} catch {
     Remove-Item $tmp -Force -ErrorAction SilentlyContinue
     Write-Error "SHA256SUMS is not available for $tag - refusing to install an unverified binary."
     exit 1
@@ -60,7 +76,6 @@ if (-not $sumsAsset) {
 # byte[] on "`n" yields per-byte garbage, the regex never matches, and every
 # lookup wrongly reports "is not listed". Decode to UTF-8 text first. (Guard
 # the type so a future string response still works.)
-$sumsRaw = (Invoke-WebRequest -Uri $sumsAsset.browser_download_url -UseBasicParsing).Content
 $sums = if ($sumsRaw -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($sumsRaw) } else { $sumsRaw }
 $lines = @($sums -split "`n" | Where-Object { $_ -match "^[0-9a-fA-F]{64} [ *]$([regex]::Escape($binary))\s*$" })
 $line = if ($lines.Count -eq 1) { $lines[0] } else { $null }

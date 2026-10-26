@@ -494,14 +494,67 @@ pub fn open_browser(url: &str) {
     };
 }
 
-/// Resolve a command name to its full path.
-/// On Windows this is critical: `which` finds `composer.bat` but
-/// `Command::new("composer")` does NOT — it only searches for `.exe`.
-/// By resolving the full path first, `.bat` and `.cmd` wrappers work correctly.
+/// Resolve a command name to its full path, robustly on Windows.
+///
+/// `which::which` is tried first — it finds `.bat`/`.cmd` wrappers that a bare
+/// `Command::new` misses. But the `which` crate has been seen to return `Err`
+/// on Windows for a program that `where` resolves fine (a PATH entry it parses
+/// differently, a PATHEXT it does not read, a trailing separator). The old
+/// fallback was then the BARE name, and Rust's `Command` resolves a bare name
+/// relative to the current directory on Windows — so `tina4 serve` found php in
+/// a normal checkout but not in a linked git worktree (#120, still live as
+/// #127). So on Windows, before giving up, do what `where.exe` does: walk PATH
+/// with PATHEXT and return a FULL path, which spawns identically from any
+/// directory. Only if that finds nothing do we hand back the bare name. POSIX
+/// is unchanged — there `Command` searches PATH itself via `execvp`.
 pub fn resolve_cmd(cmd: &str) -> String {
-    which::which(cmd)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| cmd.to_string())
+    if let Ok(p) = which::which(cmd) {
+        return p.to_string_lossy().to_string();
+    }
+    #[cfg(windows)]
+    {
+        let dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH")
+            .map(|p| std::env::split_paths(&p).collect())
+            .unwrap_or_default();
+        let pathext =
+            std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+        let exts: Vec<String> = pathext
+            .split(';')
+            .filter(|e| !e.is_empty())
+            .map(str::to_string)
+            .collect();
+        if let Some(p) = resolve_executable(cmd, &dirs, &exts, |c| c.is_file()) {
+            return p.to_string_lossy().to_string();
+        }
+    }
+    cmd.to_string()
+}
+
+/// Pure PATH + PATHEXT resolution, mirroring `where.exe`: the first
+/// `<dir>/<cmd>` (as given) or `<dir>/<cmd><ext>` for which `exists` is true,
+/// scanning `dirs` in order and, within each, the as-given name before each
+/// extension in `exts` order. `which`-free and filesystem-free, so it is
+/// unit-tested with a fake `exists` on any platform even though `resolve_cmd`
+/// only calls it on Windows.
+pub(crate) fn resolve_executable<F: Fn(&std::path::Path) -> bool>(
+    cmd: &str,
+    dirs: &[std::path::PathBuf],
+    exts: &[String],
+    exists: F,
+) -> Option<std::path::PathBuf> {
+    for dir in dirs {
+        let as_given = dir.join(cmd);
+        if exists(&as_given) {
+            return Some(as_given);
+        }
+        for ext in exts {
+            let candidate = dir.join(format!("{cmd}{ext}"));
+            if exists(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 /// Get the PHP vendor binary path.
@@ -526,6 +579,7 @@ mod tests {
     }
 
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn resolve_cmd_returns_an_absolute_path_for_a_command_on_path() {
@@ -550,6 +604,65 @@ mod tests {
         // Fallback keeps POSIX behaviour unchanged when the command is not on
         // PATH: the caller still gets a usable value rather than an error.
         assert_eq!(resolve_cmd("tina4-definitely-not-a-real-binary-xyz"), "tina4-definitely-not-a-real-binary-xyz");
+    }
+
+    #[test]
+    fn resolve_executable_finds_a_bare_name_via_pathext() {
+        // "php" (no extension) resolves to php.EXE on PATH — the case `which`
+        // missed on Windows, sending `tina4 serve` back to a bare spawn (#127).
+        let dirs = vec![PathBuf::from("/a"), PathBuf::from("/b")];
+        let exts = [".COM", ".EXE", ".BAT"].map(String::from).to_vec();
+        let php = PathBuf::from("/b/php.EXE");
+        assert_eq!(
+            resolve_executable("php", &dirs, &exts, |c| *c == php),
+            Some(php)
+        );
+    }
+
+    #[test]
+    fn resolve_executable_dir_order_beats_ext_order() {
+        // /a holds only php.EXE (second ext), /b holds php.COM (first ext).
+        // The earlier DIRECTORY must win over the earlier extension.
+        let dirs = vec![PathBuf::from("/a"), PathBuf::from("/b")];
+        let exts = [".COM", ".EXE"].map(String::from).to_vec();
+        let a_exe = PathBuf::from("/a/php.EXE");
+        let b_com = PathBuf::from("/b/php.COM");
+        assert_eq!(
+            resolve_executable("php", &dirs, &exts, |c| *c == a_exe || *c == b_com),
+            Some(a_exe)
+        );
+    }
+
+    #[test]
+    fn resolve_executable_within_a_dir_follows_pathext_order() {
+        // One dir holds both php.COM and php.EXE; .COM comes first in PATHEXT.
+        let dirs = vec![PathBuf::from("/a")];
+        let exts = [".COM", ".EXE"].map(String::from).to_vec();
+        let com = PathBuf::from("/a/php.COM");
+        let exe = PathBuf::from("/a/php.EXE");
+        assert_eq!(
+            resolve_executable("php", &dirs, &exts, |c| *c == com || *c == exe),
+            Some(com)
+        );
+    }
+
+    #[test]
+    fn resolve_executable_takes_a_name_that_already_has_an_extension_as_given() {
+        // composer.bat is matched as-is, ahead of composer.bat.EXE nonsense.
+        let dirs = vec![PathBuf::from("/x")];
+        let exts = [".EXE"].map(String::from).to_vec();
+        let asis = PathBuf::from("/x/composer.bat");
+        assert_eq!(
+            resolve_executable("composer.bat", &dirs, &exts, |c| *c == asis),
+            Some(asis)
+        );
+    }
+
+    #[test]
+    fn resolve_executable_is_none_when_nothing_matches() {
+        let dirs = vec![PathBuf::from("/a"), PathBuf::from("/b")];
+        let exts = [".EXE"].map(String::from).to_vec();
+        assert_eq!(resolve_executable("php", &dirs, &exts, |_| false), None);
     }
 
     #[test]

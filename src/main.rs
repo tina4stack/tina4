@@ -1629,6 +1629,24 @@ fn start_language_server(
                 info.language.cyan(),
                 e
             );
+            // A NotFound here means the interpreter did not resolve. On Windows
+            // that is the #120/#127 shape: `which` missed it and the PATH walk
+            // found nothing. Point at PATH rather than leaving a bare
+            // "program not found" that reads like a code fault.
+            if e.kind() == std::io::ErrorKind::NotFound {
+                let interp = match info.language.as_str() {
+                    "php" => "php",
+                    "ruby" => "ruby",
+                    "python" => "python",
+                    "nodejs" | "tina4js" => "node",
+                    _ => "the interpreter",
+                };
+                eprintln!(
+                    "     {} is not on PATH for this process. Confirm `{}` resolves it from THIS directory, then retry.",
+                    interp.cyan(),
+                    if console::is_windows() { format!("where {interp}") } else { format!("command -v {interp}") }.cyan()
+                );
+            }
             None
         }
     }

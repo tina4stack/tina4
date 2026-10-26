@@ -16,15 +16,25 @@ Write-Host ""
 Write-Host "  Tina4 CLI Installer" -ForegroundColor Cyan
 Write-Host "  ===================" -ForegroundColor Cyan
 
-# Get latest release
-$release = Invoke-RestMethod "https://api.github.com/repos/$repo/releases/latest"
-$tag = $release.tag_name
-$asset = $release.assets | Where-Object { $_.name -eq $binary }
-
-if (-not $asset) {
-    Write-Error "Could not find $binary in release $tag"
+# Latest release tag from GitHub's releases/latest redirect, NOT the REST API -
+# the same lookup install.sh uses. api.github.com allows 60 unauthenticated
+# requests an hour per IP, so an install from a shared or NAT'd IP (an office,
+# a CI runner) failed with "(403) Forbidden". releases/latest is served from
+# github.com and excludes drafts and prereleases; Invoke-WebRequest follows the
+# 302 to the release page, whose canonical og:url carries the tag. The
+# [A-Za-z0-9] guard skips the /releases/tag/*name placeholder of the "Draft a
+# new release" form.
+$page = (Invoke-WebRequest -Uri "https://github.com/$repo/releases/latest" -UseBasicParsing).Content
+$tag = $null
+$m = [regex]::Match($page, 'og:url[^>]*content="[^"]*/releases/tag/([A-Za-z0-9][^"]*)"')
+if (-not $m.Success) { $m = [regex]::Match($page, '/releases/tag/([A-Za-z0-9][^"<&]*)') }
+if ($m.Success) { $tag = $m.Groups[1].Value }
+if (-not $tag) {
+    Write-Error "Could not determine the latest release"
     exit 1
 }
+# Assets come from the versioned download path, not the API's asset list.
+$download = "https://github.com/$repo/releases/download/$tag"
 
 Write-Host "  Version:    $tag"
 Write-Host "  Install to: $installDir\tina4.exe"
@@ -43,14 +53,20 @@ $dest = "$installDir\tina4.exe"
 $tmp = Join-Path $installDir ([IO.Path]::GetRandomFileName() + ".exe")
 try {
 Write-Host "Downloading $binary..."
-Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $tmp
+try {
+    Invoke-WebRequest -Uri "$download/$binary" -OutFile $tmp -UseBasicParsing
+} catch {
+    Write-Error "Could not download $binary from release ${tag}: $($_.Exception.Message)"
+    exit 1
+}
 
 # Verify integrity against the release SHA256SUMS before trusting the binary.
 # FAIL CLOSED: if SHA256SUMS is not published we cannot prove the download is
 # the published binary, so we refuse to install rather than skip the check.
 # (Keep all output ASCII-only - see the cp1252 note further down.)
-$sumsAsset = $release.assets | Where-Object { $_.name -eq "SHA256SUMS" }
-if (-not $sumsAsset) {
+try {
+    $sumsRaw = (Invoke-WebRequest -Uri "$download/SHA256SUMS" -UseBasicParsing).Content
+} catch {
     Remove-Item $tmp -Force -ErrorAction SilentlyContinue
     Write-Error "SHA256SUMS is not available for $tag - refusing to install an unverified binary."
     exit 1
@@ -60,7 +76,6 @@ if (-not $sumsAsset) {
 # byte[] on "`n" yields per-byte garbage, the regex never matches, and every
 # lookup wrongly reports "is not listed". Decode to UTF-8 text first. (Guard
 # the type so a future string response still works.)
-$sumsRaw = (Invoke-WebRequest -Uri $sumsAsset.browser_download_url -UseBasicParsing).Content
 $sums = if ($sumsRaw -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($sumsRaw) } else { $sumsRaw }
 $lines = @($sums -split "`n" | Where-Object { $_ -match "^[0-9a-fA-F]{64} [ *]$([regex]::Escape($binary))\s*$" })
 $line = if ($lines.Count -eq 1) { $lines[0] } else { $null }
@@ -157,8 +172,8 @@ Write-Host ""
 # SIG # Begin signature block
 # MIIoHQYJKoZIhvcNAQcCoIIoDjCCKAoCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDeqo9T0UYKe67l
-# 3nRVZwRYZx4TO5KPKrXYauDeczQLq6CCINgwggXJMIIEsaADAgECAhAbtY8lKt8j
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAdt/tfdx4U8gBr
+# /HcT0bJpZL0rAGk65yBvLAS+sfoa1KCCINgwggXJMIIEsaADAgECAhAbtY8lKt8j
 # AEkoya49fu0nMA0GCSqGSIb3DQEBDAUAMH4xCzAJBgNVBAYTAlBMMSIwIAYDVQQK
 # ExlVbml6ZXRvIFRlY2hub2xvZ2llcyBTLkEuMScwJQYDVQQLEx5DZXJ0dW0gQ2Vy
 # dGlmaWNhdGlvbiBBdXRob3JpdHkxIjAgBgNVBAMTGUNlcnR1bSBUcnVzdGVkIE5l
@@ -338,36 +353,36 @@ Write-Host ""
 # LjE4MDYGA1UEAxMvQ2VydHVtIEV4dGVuZGVkIFZhbGlkYXRpb24gQ29kZSBTaWdu
 # aW5nIDIwMjEgQ0ECEFIdiL99yRWe40RYYdsSYcYwDQYJYIZIAWUDBAIBBQCgajAZ
 # BgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4wDAYKKwYB
-# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQg3aac16MM9gnO3bYGdZ8DCET4vpDMJmDa
-# mIzugCJ3W50wDQYJKoZIhvcNAQEBBQAEggGAQYZP0RcMOvZ53ncyHcOBRrP8EO8u
-# IBrjqt5QOH4n4ixa6tXr6ifjzVRF7zN+Zk9gy24AA4PCBy7Vk6WLPHozmkTCfk/o
-# bH1lRje4gMvz23NB0Cef5euESZAht0YqvZW6o6pUGGSz6ak3e4Krf6Kpu0AAqv2u
-# Ba7VlnO3j1ZEP0gXmmab8bqoLt/NGp9ueAVbLGRjSK4cNr9KlZIZcTJgMDQOtuHI
-# 49D7OVajrXVw+2mfAueWCQv2evYAso2brmtyBZAwoHHbR68v3xXijPq+rJFY/0g6
-# DqK2MYK/P6GCWoRv8C+mB5L8659hILe9UjmMIZD97Hu0rxJoD9mYkJ0tTK+Y7BV2
-# kSNv36iEuKv3aQhBY3qVoX4zgaP53Ysfdfdq1h+i9mrtmHXUgxcIa9ra/taa96V0
-# Wd0HeMcZmUzEaOExWXe+4hPpTTvWuIMKLHiaMM4TzuRsSdOb1m4Aa+gJ4jdLB1xO
-# /ltRZgIln3o5SiE8+NYjq3LnIxO5wwpSO2OuoYIEAjCCA/4GCSqGSIb3DQEJBjGC
+# BAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQg3D0H0O6OA11Q7cp5IvomoRFf6LnHSFON
+# 5PU/c1b6mkwwDQYJKoZIhvcNAQEBBQAEggGAdVrXH3b1cupuZ1FbG6SXKDr/rb3h
+# ShO5hadHl5DbNuXPlcFwtEQ7PwWzjfG+tsl4zfHetBy/4diAti8DzskIV1ARylGU
+# 2R0cZG/KZetSHzdbHWfgj+dKFnsz8O/bdAvTychXUxF1BAOa/B4ZHvGHiNTzCMLL
+# 6mffL1DNrMRwz7Tcpgx1XM8V/VemdHeiOcDGtrI+/v77SafsIAe+TjfX11aKG6Pv
+# TeeFr1LuwmUdh9b6lJfiItWriW3WeUzywm05kHMHl6YapRc8CRq8MVz+Oy2PbV4c
+# vz+dtWxwIMRYCx0knRtTkmdtv2tck33LRKvdvw1SM2OD2mpzeKck80ShNsKIkLxz
+# pdSavbE0vlbASoyUdaCLA7zsqLHEQWHUAJEq+bChBPwERM8AvbcXW/p2364VatbT
+# iS1avU0x1igN/uHJSSVF2JD0dZe412VA35/HCTUZzH39M62/LkfJRxFibeh4olnV
+# vX7GBcscO8QqR5hdf8jkcAnsr2GGT5vMC0/BoYIEAjCCA/4GCSqGSIb3DQEJBjGC
 # A+8wggPrAgEBMGowVjELMAkGA1UEBhMCUEwxITAfBgNVBAoTGEFzc2VjbyBEYXRh
 # IFN5c3RlbXMgUy5BLjEkMCIGA1UEAxMbQ2VydHVtIFRpbWVzdGFtcGluZyAyMDIx
 # IENBAhAo8HfBHDa9/l90MkdwJy4DMA0GCWCGSAFlAwQCAgUAoIIBVjAaBgkqhkiG
-# 9w0BCQMxDQYLKoZIhvcNAQkQAQQwHAYJKoZIhvcNAQkFMQ8XDTI2MDkyNDE3MzU1
-# NlowNwYLKoZIhvcNAQkQAi8xKDAmMCQwIgQghb6Q4QrSQ418ySi2r0iwmrIIF3zs
-# +LASbFjTkQUlxDwwPwYJKoZIhvcNAQkEMTIEMN6qcPI18yT5POpndSyfsfChfqTh
-# SX23uMC5h2PYV5dn6xBzJ0ugV2Whp0E8QOroAjCBnwYLKoZIhvcNAQkQAgwxgY8w
+# 9w0BCQMxDQYLKoZIhvcNAQkQAQQwHAYJKoZIhvcNAQkFMQ8XDTI2MTAyNjEyMjUy
+# M1owNwYLKoZIhvcNAQkQAi8xKDAmMCQwIgQghb6Q4QrSQ418ySi2r0iwmrIIF3zs
+# +LASbFjTkQUlxDwwPwYJKoZIhvcNAQkEMTIEMJC8upGqgZDY96+uEamI8O6oOmAT
+# rcOQ+eflqqxedHeLa7TlfabuJg6dFnecAPN/CjCBnwYLKoZIhvcNAQkQAgwxgY8w
 # gYwwgYkwgYYEFFcUaEEMqFrzQk75FkpRNhD0042YMG4wWqRYMFYxCzAJBgNVBAYT
 # AlBMMSEwHwYDVQQKExhBc3NlY28gRGF0YSBTeXN0ZW1zIFMuQS4xJDAiBgNVBAMT
 # G0NlcnR1bSBUaW1lc3RhbXBpbmcgMjAyMSBDQQIQKPB3wRw2vf5fdDJHcCcuAzAN
-# BgkqhkiG9w0BAQEFAASCAgB/klfMkySubssnidAtByfueRqGr/qOWNWhDH+3TLi5
-# k+El9Qo+N24U77jJ4VWP5bJZm5jEGfP3r5edm5oS89pDasQeistBbzFc0SmFPmho
-# LGtoqihKcQXe+P5o5L46tOwi7JsUQITdDxA0MWq2Dz0A6/ZtuqaFT0N5rmgvUAbP
-# ZdLl/dMfviEJik3fR4VxnwcWhyT9Q7RI4xUl7Ey/eS1oZwYRQe4PF1h1Jseggi2D
-# 2EIs+VnRZieqJMBQo9a5OLc0MbLKrO4Rgxea4pnSSAQoLHa6ep335GIVG0dqJ6Xi
-# S7m2xjG0+Uqcen8jEQtjVEJdnhfpLNVJnaniH3IdgJnFk4N42ZM1JghyYQXV2cIu
-# 2luBV++7FndbL3DhdHO3+jk/o3I1yC3rojlkYfIvksnCOVHMXQWLJ+03HLGi75Rz
-# iapzuTL5c3GCcO3a81NHPsCNadgJYb8rRlQ9yeBYR2tiSp7Cfa1UcVOTnJlRtWcp
-# EQcpJKVrRF4jHmNxCKzoA3bu7p/Im1u9/idrWrNHQ5cXRLj1dQ0loOHAIAphnCg8
-# sSTyV0QIpAWeQk/20KSp9RUpNHafdniM/4ZCnc3XdGbaWlCx1JNv8sCp0qf89sLZ
-# IEKs1WXxJJrR/UGRl42ba5Mors60e0lEANJkhJDzWUME+VwF7yLsSMDkD+1+lQtE
-# eA==
+# BgkqhkiG9w0BAQEFAASCAgAKl//LSC3VO97juoxOc79tRVyMI4O0/14e2qN7GDvC
+# bzEUoZWkZSzZ9ADXMtpeHgFIporWspH33RsQSFLzE7daZxyaWegYOSwfvDIWpuM2
+# a9OAZtc+A8MSV7OwcWJQ/tBTtT4v984FSfQfTgG5QzINg5DdWQjOfTC950f/jywT
+# ZawTtDLcxIkoCZi46QislikM07YqDZ+KuwNhs1YbAvuezWnvFP1sg6hm4Lx+m+jI
+# kia+OOMJTKnIrAA0sjhio1tKjdaGf83cg46hr/2tEyKPXzK2c3CUCRWR6bzFoBoI
+# MalXP7i6Xm4UOUx2CmZUGdGsYCAuSK5Fq9lcouJ2knVNQLUuT4R2p8png6GCu3A0
+# DfN01L7m1t+Ejfr6pwjWSKTLC7l7faGkCYPeqWNJ+JhuCN9ZIxwxbiJxTGIGdbb/
+# 6IM1iR0vNjOyJnecbwdX9fgAmhJXzZap2rDcMhm1jPL0aOCX/N430XswX0dPbFTL
+# y5kTkufPti7hoI68EpnBkjhqfsg0K+PzuoX8TlF2DYVTFhYFKiaOIhwqQjRQYSE7
+# ORNYwmZgBWqBAzPVEc88RNMj40CZbaRAjV6e1NEHG9u4lwigwY3HyPf8PccvD39O
+# RV+D66qx7Hp5R46CK+zbioM+Vkgu3xufB9RpYvSTrzCjrEPakW5597wOJ0bS/fxz
+# kg==
 # SIG # End signature block

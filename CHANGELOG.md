@@ -1,5 +1,20 @@
 # Changelog
 
+## 3.8.108 - 2026-10-26
+
+### Fixed
+- `tina4 serve` now resolves the `php`/`ruby` (and node/npx/bundle) interpreter
+  reliably on Windows. 3.8.107 (#120) routed resolution through `which`, but the
+  `which` crate can return `Err` on Windows for a program `where` finds (a PATH
+  entry it parses differently, a PATHEXT it does not read) — and the fallback was
+  the BARE name, which Rust's `Command` resolves relative to the current
+  directory, so `tina4 serve` still worked in a normal checkout but failed in a
+  linked git worktree (#127). On a `which` miss, Windows now does what `where.exe`
+  does — a PATH + PATHEXT walk returning a FULL path, which spawns identically
+  from any directory — before falling back to the bare name. POSIX is unchanged.
+  A not-found spawn error now also points at PATH instead of a bare
+  "program not found". (tina4stack/tina4#127, follow-up to #120)
+
 ## 3.8.107 - 2026-10-26
 
 ### Fixed

@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.8.107 - 2026-10-26
+
+### Fixed
+- `tina4 serve` resolves the `php` and `ruby` interpreters through `which`
+  (like `node` already did) instead of spawning a bare `Command::new("php")` /
+  `Command::new("ruby")`. A bare name fails to launch on Windows and inside a
+  git worktree where the interpreter is not on the process's login PATH, so
+  `tina4 serve` could not start a PHP (or non-Gemfile Ruby) project there. Falls
+  back to the bare name when the interpreter is not on PATH, so POSIX behaviour
+  is unchanged. (tina4stack/tina4#120)
+
 ## 3.8.106 - 2026-10-26
 
 ### Fixed

@@ -1530,7 +1530,7 @@ fn start_language_server(
                     .stderr(std::process::Stdio::inherit());
                 set_process_group(&mut cmd).spawn()
             } else {
-                let mut cmd = std::process::Command::new("ruby");
+                let mut cmd = std::process::Command::new(console::resolve_cmd("ruby"));
                 cmd.args(["app.rb", "--managed"])
                     .env("TINA4_PORT", &port_s).env("PORT", &port_s)
                     .env("TINA4_HOST", host).env("HOST", host)
@@ -1650,7 +1650,11 @@ pub(crate) fn resolve_cli(info: &detect::ProjectInfo) -> (String, Vec<String>) {
                 // Fallback: try global tina4php
                 return ("tina4php".into(), vec![]);
             };
-            ("php".into(), vec![cli_path])
+            // Resolve `php` to its full path (which::which) like node does, so
+            // `tina4 serve` finds it on Windows and inside a git worktree where a
+            // bare `Command::new("php")` does not (#120). Falls back to bare
+            // "php" when it is not on PATH, so POSIX behaviour is unchanged.
+            (console::resolve_cmd("php"), vec![cli_path])
         }
         "python" => {
             // uv projects: run via 'uv run tina4python' so the venv CLI is found

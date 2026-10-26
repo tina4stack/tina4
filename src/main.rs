@@ -2904,16 +2904,27 @@ enum DownloadFailure {
     Local { name: String, cause: FailureCause },
 }
 
-/// Map curl's exit status onto whether a different asset name could help.
-///
-/// 22 is what `--fail` returns when the HTTP response was an error, so that
-/// and only that means "wrong name, try the next one". Every other code is a
-/// condition on this machine -- 23 write error, 7 connect failure, 6 DNS, and
-/// so on. A curl killed by a signal reports no code at all (SIGXFSZ when a
-/// file-size limit is hit, for instance), which is why this takes the whole
-/// `ExitStatus` and not `.code()`: treating "no code" as a server refusal
-/// would resume the loop over a failure that had already written a truncated
-/// file to disk.
+/// Download with curl. stderr is captured to classify the failure, then passed
+/// through so the user still sees curl's own reason -- the same shape as the
+/// wget path below.
+fn download_with_curl(program: &str, url: &str, dest: &str) -> DownloadOutcome {
+    match std::process::Command::new(program)
+        .args(["-fsSL", "-o", dest, url])
+        .stdout(std::process::Stdio::inherit())
+        .output()
+    {
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            eprint!("{}", stderr);
+            classify_curl_status(&out.status, &stderr)
+        }
+        Err(e) => DownloadOutcome::Local(FailureCause::Unclassified(format!(
+            "the downloader could not be started: {}",
+            e
+        ))),
+    }
+}
+
 /// Download with wget (Alpine / iSH ship busybox wget and no curl). stderr is
 /// captured to classify the failure, then passed through so the user still
 /// sees wget's own reason.
@@ -2962,7 +2973,22 @@ fn classify_wget_failure(code: Option<i32>, stderr: &str) -> DownloadOutcome {
     }
 }
 
-fn classify_curl_status(status: &std::process::ExitStatus) -> DownloadOutcome {
+/// Map curl's exit status onto whether a different asset name could help.
+///
+/// 22 is what `--fail` returns when the HTTP response was an error, so that
+/// and only that means "wrong name, try the next one". Every other code is a
+/// condition on this machine -- 23 write error, 7 connect failure, 6 DNS, and
+/// so on. A curl killed by a signal reports no code at all (SIGXFSZ when a
+/// file-size limit is hit, for instance), which is why this takes the whole
+/// `ExitStatus` and not `.code()`: treating "no code" as a server refusal
+/// would resume the loop over a failure that had already written a truncated
+/// file to disk.
+///
+/// The exit code is not always enough on its own. The curl macOS ships has been
+/// seen exiting 56, not 22, for an HTTP error under `--fail`, and 56 for a
+/// failed write to the destination as well, both in the field. curl's own
+/// line tells them apart, so `stderr` decides those two cases and nothing else.
+fn classify_curl_status(status: &std::process::ExitStatus, stderr: &str) -> DownloadOutcome {
     if status.success() {
         return DownloadOutcome::Ok;
     }
@@ -2984,8 +3010,17 @@ fn classify_curl_status(status: &std::process::ExitStatus) -> DownloadOutcome {
             });
         }
     }
+    let msg = stderr.to_ascii_lowercase();
     match status.code() {
+        // "The requested URL returned error: 404" is the line `--fail` prints
+        // for an HTTP error, whatever exit code this curl pairs it with.
         Some(22) => DownloadOutcome::Http,
+        Some(_) if msg.contains("the requested url returned error") => DownloadOutcome::Http,
+        Some(56) if msg.contains("failure writing output to destination") => {
+            DownloadOutcome::Local(FailureCause::Write(
+                "curl exited 56 -- it could not write the file".to_string(),
+            ))
+        }
         Some(code) => DownloadOutcome::Local(cause_for_curl_code(code)),
         None => DownloadOutcome::Local(FailureCause::Unclassified(
             "curl was killed by a signal".to_string(),
@@ -3209,9 +3244,7 @@ fn download_file_classified(url: &str, dest: &std::path::Path) -> DownloadOutcom
         // PowerShell's Invoke-WebRequest struggles with GitHub's TLS/redirect chain.
         let curl_path = "C:\\Windows\\System32\\curl.exe";
         if std::path::Path::new(curl_path).exists() {
-            std::process::Command::new(curl_path)
-                .args(["-fsSL", "-o", &dest_str, url])
-                .status()
+            return download_with_curl(curl_path, url, &dest_str);
         } else {
             // Fallback to PowerShell with TLS 1.2 forced. Note the trade-off:
             // Invoke-WebRequest exits 1 for everything, so on this branch a
@@ -3235,9 +3268,7 @@ fn download_file_classified(url: &str, dest: &std::path::Path) -> DownloadOutcom
         }
     } else {
         match console::unix_downloader() {
-            Some(console::Downloader::Curl) => std::process::Command::new("curl")
-                .args(["-fsSL", "-o", &dest_str, url])
-                .status(),
+            Some(console::Downloader::Curl) => return download_with_curl("curl", url, &dest_str),
             Some(console::Downloader::Wget) => return download_with_wget(url, &dest_str),
             None => {
                 return DownloadOutcome::Local(FailureCause::Unclassified(
@@ -3248,7 +3279,8 @@ fn download_file_classified(url: &str, dest: &std::path::Path) -> DownloadOutcom
     };
 
     match status {
-        Ok(status) => classify_curl_status(&status),
+        // Only PowerShell reaches here; it has no curl line to read.
+        Ok(status) => classify_curl_status(&status, ""),
         // curl itself could not be started at all -- not a server problem.
         // curl never started, so nothing was reached and nothing was written.
         Err(e) => DownloadOutcome::Local(FailureCause::Unclassified(format!(
@@ -3738,18 +3770,82 @@ mod tests {
 
     #[test]
     fn curl_http_failure_is_the_only_one_worth_another_asset_name() {
-        assert_eq!(classify_curl_status(&status_of("exit 0")), DownloadOutcome::Ok);
-        assert_eq!(classify_curl_status(&status_of("exit 22")), DownloadOutcome::Http);
+        assert_eq!(classify_curl_status(&status_of("exit 0"), ""), DownloadOutcome::Ok);
+        assert_eq!(classify_curl_status(&status_of("exit 22"), ""), DownloadOutcome::Http);
         // 23 is curl's write error -- the full-disk case.
         assert!(matches!(
-            classify_curl_status(&status_of("exit 23")),
+            classify_curl_status(&status_of("exit 23"), ""),
             DownloadOutcome::Local(_)
         ));
         // 7 is a connect failure.
         assert!(matches!(
-            classify_curl_status(&status_of("exit 7")),
+            classify_curl_status(&status_of("exit 7"), ""),
             DownloadOutcome::Local(_)
         ));
+    }
+
+    /// The curl macOS ships has been seen exiting 56 for both an HTTP error
+    /// under `--fail` and a failed write. The stderr lines are the field reports, verbatim. Read on
+    /// its code alone, the 404 told the user "the release asset is fine".
+    #[test]
+    fn curl_56_is_read_by_its_message() {
+        assert_eq!(
+            classify_curl_status(
+                &status_of("exit 56"),
+                "curl: (56) The requested URL returned error: 404\n"
+            ),
+            DownloadOutcome::Http
+        );
+        assert!(matches!(
+            classify_curl_status(
+                &status_of("exit 56"),
+                "curl: (56) Failure writing output to destination, passed 1369 returned 4294967295\n"
+            ),
+            DownloadOutcome::Local(FailureCause::Write(_))
+        ));
+        // A 56 that says neither is a receive error or something unknown: no verdict.
+        assert!(matches!(
+            classify_curl_status(
+                &status_of("exit 56"),
+                "curl: (56) Recv failure: Connection reset by peer\n"
+            ),
+            DownloadOutcome::Local(FailureCause::Unclassified(_))
+        ));
+        // The write text only decides a 56; on a code that already means
+        // something else it does not override it.
+        assert!(matches!(
+            classify_curl_status(
+                &status_of("exit 7"),
+                "curl: (7) Failed to connect\n"
+            ),
+            DownloadOutcome::Local(FailureCause::Network(_))
+        ));
+    }
+
+    /// The download itself has to hand curl's line to the classifier. A stand-in
+    /// curl that prints the macOS field line and exits 56: unread, that line
+    /// leaves a 404 looking like a local failure.
+    #[test]
+    #[cfg(unix)]
+    fn the_curl_download_reads_curls_own_line() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("tina4-curl56-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("curl");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\necho 'curl: (56) The requested URL returned error: 404' >&2\nexit 56\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let dest = dir.join("out");
+        let outcome = download_with_curl(
+            fake.to_str().unwrap(),
+            "https://example.invalid/x",
+            dest.to_str().unwrap(),
+        );
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(outcome, DownloadOutcome::Http);
     }
 
     #[test]
@@ -3760,7 +3856,7 @@ mod tests {
         // followed by 404s for names nobody was ever going to get.
         let status = status_of("kill -XFSZ $$");
         assert!(status.code().is_none(), "expected a signalled status, got {:?}", status);
-        assert!(matches!(classify_curl_status(&status), DownloadOutcome::Local(_)));
+        assert!(matches!(classify_curl_status(&status, ""), DownloadOutcome::Local(_)));
     }
 
     #[test]
@@ -3963,7 +4059,7 @@ mod tests {
             .expect("sh should run");
         assert!(
             matches!(
-                classify_curl_status(&xfsz),
+                classify_curl_status(&xfsz, ""),
                 DownloadOutcome::Local(FailureCause::Write(_))
             ),
             "SIGXFSZ should read as a write failure"
@@ -3976,7 +4072,7 @@ mod tests {
             .expect("sh should run");
         assert!(
             matches!(
-                classify_curl_status(&term),
+                classify_curl_status(&term, ""),
                 DownloadOutcome::Local(FailureCause::Unclassified(_))
             ),
             "an interrupted curl should not be diagnosed as anything"

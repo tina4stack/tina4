@@ -469,11 +469,27 @@ enum LatestRef {
 /// `exit_code` its code (curl's `--fail` returns 22 for any HTTP >= 400; 6/7/28/...
 /// are transport failures), `parsed` the ref extracted from a 200 body. No IO -
 /// unit-tested with a mutation witness.
-fn latest_from_curl(success: bool, exit_code: Option<i32>, parsed: Option<String>) -> LatestRef {
+///
+/// `stderr` is curl's own line. The curl macOS ships has been seen exiting 56,
+/// not 22, for an HTTP error under `--fail`; its "The requested URL returned
+/// error" line still says what happened, so that line counts as an HTTP error
+/// whatever the code.
+fn latest_from_curl(
+    success: bool,
+    exit_code: Option<i32>,
+    stderr: &str,
+    parsed: Option<String>,
+) -> LatestRef {
     if success {
         // 200 but no parseable ref is treated as benign-unknown, not a broken
         // endpoint: the script was served, we just could not read the pin.
         return parsed.map_or(LatestRef::Offline, LatestRef::Found);
+    }
+    if stderr
+        .to_ascii_lowercase()
+        .contains("the requested url returned error")
+    {
+        return LatestRef::HttpError;
     }
     match exit_code {
         Some(22) => LatestRef::HttpError, // curl --fail: the server answered 4xx/5xx
@@ -572,7 +588,12 @@ fn fetch_latest_skills_ref() -> LatestRef {
     } else {
         None
     };
-    latest_from_curl(out.status.success(), out.status.code(), parsed)
+    latest_from_curl(
+        out.status.success(),
+        out.status.code(),
+        &String::from_utf8_lossy(&out.stderr),
+        parsed,
+    )
 }
 
 /// Read-only currency report for the global Tina4 AI skills. Never writes; never
@@ -930,7 +951,7 @@ mod tests {
     #[test]
     fn latest_found_on_success_with_parsed_ref() {
         assert_eq!(
-            latest_from_curl(true, Some(0), Some("1.2.3".into())),
+            latest_from_curl(true, Some(0), "", Some("1.2.3".into())),
             LatestRef::Found("1.2.3".into())
         );
     }
@@ -938,24 +959,48 @@ mod tests {
     #[test]
     fn latest_offline_on_success_but_unparseable() {
         // 200 but no pin marker: benign-unknown, not a broken endpoint.
-        assert_eq!(latest_from_curl(true, Some(0), None), LatestRef::Offline);
+        assert_eq!(latest_from_curl(true, Some(0), "", None), LatestRef::Offline);
     }
 
     #[test]
     fn latest_http_error_on_curl_exit_22() {
         // curl --fail returns 22 for any HTTP >= 400 (the 404 case).
-        assert_eq!(latest_from_curl(false, Some(22), None), LatestRef::HttpError);
+        assert_eq!(latest_from_curl(false, Some(22), "", None), LatestRef::HttpError);
+    }
+
+    #[test]
+    fn latest_http_error_when_curl_says_so_under_another_code() {
+        // The macOS field line: exit 56, and curl's own words for a 404.
+        assert_eq!(
+            latest_from_curl(
+                false,
+                Some(56),
+                "curl: (56) The requested URL returned error: 404\n",
+                None
+            ),
+            LatestRef::HttpError
+        );
+        // A 56 that says nothing of the kind is still a transport failure.
+        assert_eq!(
+            latest_from_curl(
+                false,
+                Some(56),
+                "curl: (56) Recv failure: Connection reset by peer\n",
+                None
+            ),
+            LatestRef::Offline
+        );
     }
 
     #[test]
     fn latest_offline_on_transport_failure() {
         // 7 = couldn't connect; any non-22 non-zero exit is a transport failure.
-        assert_eq!(latest_from_curl(false, Some(7), None), LatestRef::Offline);
+        assert_eq!(latest_from_curl(false, Some(7), "", None), LatestRef::Offline);
     }
 
     #[test]
     fn latest_offline_when_curl_never_ran() {
         // spawn failed / no exit code at all.
-        assert_eq!(latest_from_curl(false, None, None), LatestRef::Offline);
+        assert_eq!(latest_from_curl(false, None, "", None), LatestRef::Offline);
     }
 }

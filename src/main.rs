@@ -1486,6 +1486,10 @@ fn start_language_server(
                 );
                 return None;
             }
+            if php_launcher_missing() {
+                report_php_launcher_missing();
+                return None;
+            }
             let (cmd_name, mut cmd_args) = resolve_cli(info);
             cmd_args.extend([
                 "serve".into(),
@@ -1654,6 +1658,27 @@ fn start_language_server(
 
 // ── Delegate ─────────────────────────────────────────────────────
 
+/// True when a php project has no launcher anywhere: no `vendor/bin/tina4php`,
+/// no `bin/tina4php`, and no global `tina4php` on PATH. `resolve_cli` would
+/// fall back to a bare `tina4php` there, and the spawn fails with
+/// "program not found" (Windows) or "No such file or directory", which names
+/// neither the missing file nor the fix. The `vendor/` check before this one
+/// does not catch it: `vendor/` can exist without the bin proxy.
+fn php_launcher_missing() -> bool {
+    !std::path::Path::new(&console::php_vendor_bin("tina4php")).exists()
+        && !std::path::Path::new("bin/tina4php").exists()
+        && which::which("tina4php").is_err()
+}
+
+fn report_php_launcher_missing() {
+    eprintln!(
+        "{} {} is missing. Run: {}",
+        icon_fail().red(),
+        console::php_vendor_bin("tina4php").cyan(),
+        "composer install".cyan()
+    );
+}
+
 /// Resolve the language CLI command and arguments for the detected project.
 /// PHP needs special handling: `php vendor/bin/tina4php` instead of bare `tina4php`.
 pub(crate) fn resolve_cli(info: &detect::ProjectInfo) -> (String, Vec<String>) {
@@ -1769,6 +1794,10 @@ fn delegate_command(args: Vec<String>) {
                     icon_fail().red(),
                     "composer install".cyan()
                 );
+                std::process::exit(1);
+            }
+            if info.language == "php" && php_launcher_missing() {
+                report_php_launcher_missing();
                 std::process::exit(1);
             }
 

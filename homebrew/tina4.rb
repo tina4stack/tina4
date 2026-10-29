@@ -8,25 +8,25 @@ class Tina4 < Formula
   desc "Unified CLI for the Tina4 framework — Python, PHP, Ruby, Node.js"
   homepage "https://tina4.com"
   license "MPL-2.0"
-  version "3.8.109"
+  version "3.8.111"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/tina4stack/tina4/releases/download/v3.8.109/tina4-darwin-arm64"
-      sha256 "1ad3fde2a4d38fcc44a1c691beba06bf3bde954baba14043e101e58d2adb6d8f"
+      url "https://github.com/tina4stack/tina4/releases/download/v3.8.111/tina4-darwin-arm64"
+      sha256 "4f55a2cf8e6206b7e0517605e115a2e6ae34f5b5971d2dd0637e91ef48281bb6"
     else
-      url "https://github.com/tina4stack/tina4/releases/download/v3.8.109/tina4-darwin-amd64"
-      sha256 "014c107154b231dac3f5a8a2860ee5337afad47e4accf17f75321fce6c13cbed"
+      url "https://github.com/tina4stack/tina4/releases/download/v3.8.111/tina4-darwin-amd64"
+      sha256 "184d575bd2c7268330746df973d47e57364ae467add2ee29f063b1d83bef3445"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/tina4stack/tina4/releases/download/v3.8.109/tina4-linux-arm64"
-      sha256 "e70c9b6ac007b63c812bb8e391cdb66b1470420193d7f39cf22359adc1f2f363"
+      url "https://github.com/tina4stack/tina4/releases/download/v3.8.111/tina4-linux-arm64"
+      sha256 "6bb57f0f8be7c5c5840cc91f514c86a3e551f0b9ae7d394fe2d4a5be9321fb76"
     else
-      url "https://github.com/tina4stack/tina4/releases/download/v3.8.109/tina4-linux-amd64"
-      sha256 "34fad5291586570430bccc98e066cb906a1820344b710cff5c388feb4d54c9b5"
+      url "https://github.com/tina4stack/tina4/releases/download/v3.8.111/tina4-linux-amd64"
+      sha256 "30ffe075fd05485d7da9596560bbb8f8b48f77b102abd16d7b8b6d7e61f25619"
     end
   end
 

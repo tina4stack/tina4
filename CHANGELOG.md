@@ -1,5 +1,15 @@
 # Changelog
 
+## 3.8.110 - 2026-10-29
+
+### Fixed
+- `tina4 init <lang> <name>` scaffolds a BARE project name inside the configured
+  projects folder (the same place `tina4 serve <name>` and `tina4 setup` resolve
+  it), instead of the current directory. An explicit path — one with a separator,
+  an absolute path, or a leading `.` (`./app`, `../app`, `/abs/app`) — is honoured
+  verbatim, and with no projects folder configured the name is still taken
+  relative to the current directory, so existing invocations are unchanged.
+
 ## 3.8.108 - 2026-10-26
 
 ### Fixed

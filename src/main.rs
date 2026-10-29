@@ -86,7 +86,8 @@ enum Commands {
     Init {
         /// Language: python, php, ruby, nodejs, js (tina4-js frontend SPA)
         lang: Option<String>,
-        /// Project directory (absolute or relative path)
+        /// Project name (created in your configured projects folder) OR an explicit
+        /// path (absolute, or starting with `.`/a separator), used verbatim
         path: Option<String>,
     },
 

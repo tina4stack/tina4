@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.8.112 - 2026-10-29
+
+### Fixed
+- `tina4 init python` now scaffolds pytest as a dev dependency
+  (`[dependency-groups] dev = ["pytest"]`), so `tina4 test` runs on a brand-new
+  app. The Python generators write pytest tests under `tests/`, but the scaffold
+  declared only `tina4-python`, so `tina4 test` died with "No module named
+  pytest" until a manual `uv add --dev pytest`. `uv sync` (which `init` runs)
+  installs the dev group by default (PEP 735). PHP/Ruby/Node.js generators do
+  not write user-project tests, so this is Python-only. (tina4stack/tina4#133)
+
 ## 3.8.111 - 2026-10-29
 
 ### Changed

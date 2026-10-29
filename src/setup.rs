@@ -1584,7 +1584,7 @@ mod tests {
 
 /// Is the runtime for this language already on the machine? Lets quick runs
 /// skip the package-manager / elevation dance unless a new language was picked.
-fn runtime_present(lang: &str) -> bool {
+pub(crate) fn runtime_present(lang: &str) -> bool {
     match lang {
         "python" => which::which("python3").is_ok() || which::which("python").is_ok(),
         "nodejs" => which::which("node").is_ok(),

@@ -1,6 +1,6 @@
 # Tina4 CLI
 
-Version 3.8.110 — Unified CLI for Python, PHP, Ruby, Node.js, and tina4-js projects.
+Version 3.8.111 — Unified CLI for Python, PHP, Ruby, Node.js, and tina4-js projects.
 
 ## Build & Test
 
@@ -21,7 +21,11 @@ tina4 setup                      Guided menu: language + AI tool + projects fold
                                  + /__dev, and launches Desktop); Claude Code opens a real
                                  seeded session in the project.
                                  --dry-run = preview only. --skip-install = scaffold, no installs.
-tina4 init <language> <path>     Scaffold a new project (python, php, ruby, nodejs, tina4js)
+tina4 init [language] <name|path>  Scaffold a new project. Language is OPTIONAL — when
+                                 omitted the first installed runtime is used
+                                 (Python -> PHP -> Node.js -> Ruby), announced. A bare
+                                 name is created in your configured projects folder;
+                                 an explicit path (./app, /abs) is used verbatim.
 tina4 serve [project]            Start dev server (file watcher + SCSS + browser). With a
                                  project name, cd into ./<name> (then the configured projects
                                  folder) and serve that project. Bare `tina4 serve` outside a

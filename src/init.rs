@@ -48,18 +48,16 @@ pub fn run(lang: Option<&str>, path: Option<&str>) {
             if matches!(norm.as_str(), "python" | "py" | "php" | "ruby" | "rb" | "nodejs" | "node" | "typescript" | "ts" | "js" | "tina4js" | "tina4-js" | "frontend") {
                 l
             } else {
-                // First arg looks like a path, not a language — prompt for language
-                eprintln!(
-                    "{} No language specified. Please choose one:\n",
-                    icon_warn().yellow()
-                );
-                lang_str = prompt_language();
-                // Treat original 'lang' as the path
+                // The first arg is a project name, not a language: pick the
+                // language ourselves (first installed runtime, else prompt) and
+                // re-run with the original arg as the path. chosen_language()
+                // prints what it picked.
+                lang_str = chosen_language();
                 return run(Some(&lang_str), Some(l));
             }
         }
         None => {
-            lang_str = prompt_language();
+            lang_str = chosen_language();
             &lang_str
         }
     };
@@ -111,6 +109,47 @@ pub fn run(lang: Option<&str>, path: Option<&str>) {
 }
 
 /// Detect installed runtimes and prompt the user to pick one.
+/// The language to scaffold when the user named none. Prefer the first runtime
+/// already installed, in Tina4's order (Python → PHP → Node.js → Ruby), so
+/// `tina4 init zoo` makes a project without a prompt — and on a box with only
+/// Ruby, a Ruby project. Only when NONE of the four is on PATH do we fall back
+/// to the interactive picker. Kept out of `run` so its branching does not add to
+/// that function's complexity.
+fn chosen_language() -> String {
+    match first_installed_language() {
+        Some(l) => {
+            println!(
+                "{} No language given — using {} (first installed runtime).",
+                icon_info().cyan(),
+                l.cyan()
+            );
+            l.to_string()
+        }
+        None => {
+            eprintln!(
+                "{} No language given and no runtime found on PATH. Please choose one:\n",
+                icon_warn().yellow()
+            );
+            prompt_language()
+        }
+    }
+}
+
+/// First installed runtime in Tina4's preference order, or None when none is on
+/// PATH. The order is fixed policy: Python → PHP → Node.js → Ruby.
+fn first_installed_language() -> Option<&'static str> {
+    pick_first_installed(crate::setup::runtime_present)
+}
+
+/// Pure core of [`first_installed_language`]: the first language in the fixed
+/// preference order for which `present` is true. Injecting `present` keeps the
+/// order policy unit-tested without touching the real PATH.
+fn pick_first_installed<F: Fn(&str) -> bool>(present: F) -> Option<&'static str> {
+    ["python", "php", "nodejs", "ruby"]
+        .into_iter()
+        .find(|l| present(l))
+}
+
 fn prompt_language() -> String {
     use std::io::Write;
 
@@ -1554,6 +1593,26 @@ fn project_name_from_path(path: &str) -> String {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn first_installed_prefers_python_then_php_then_nodejs_then_ruby() {
+        // Everything installed → Python wins (top of the order).
+        assert_eq!(pick_first_installed(|_| true), Some("python"));
+        // Python absent → PHP; then Node.js; then Ruby.
+        assert_eq!(pick_first_installed(|l| l != "python"), Some("php"));
+        assert_eq!(pick_first_installed(|l| l == "nodejs" || l == "ruby"), Some("nodejs"));
+    }
+
+    #[test]
+    fn first_installed_picks_ruby_when_only_ruby_is_ready() {
+        // The maintainer's example: a box with only Ruby makes a Ruby project.
+        assert_eq!(pick_first_installed(|l| l == "ruby"), Some("ruby"));
+    }
+
+    #[test]
+    fn first_installed_is_none_when_no_runtime_is_present() {
+        assert_eq!(pick_first_installed(|_| false), None);
+    }
 
     #[test]
     fn init_target_joins_a_bare_name_onto_the_projects_folder() {

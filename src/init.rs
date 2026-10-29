@@ -6,7 +6,7 @@
 
 use colored::Colorize;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::console::{self, icon_fail, icon_info, icon_ok, icon_play, icon_warn};
@@ -78,6 +78,15 @@ pub fn run(lang: Option<&str>, path: Option<&str>) {
     };
 
     let lang_norm = lang.to_lowercase();
+
+    // A BARE project name is scaffolded inside the configured projects folder,
+    // the same place `tina4 serve <name>` and `tina4 setup` resolve it — so
+    // `tina4 init php my-app` lands in ~/<projects>/my-app, not the current
+    // directory. An explicit path (contains a separator, is absolute, or
+    // starts with `.`) is honoured verbatim, so `tina4 init php ./app` and
+    // absolute paths behave exactly as before.
+    let resolved_str = resolve_init_target_announced(path);
+    let path: &str = &resolved_str;
 
     match lang_norm.as_str() {
         "python" | "py" => init_project("python", path),
@@ -184,6 +193,40 @@ fn print_usage() {
     println!("Languages: python, php, ruby, nodejs, js (tina4-js frontend)");
     println!("Example:   tina4 init python ./my-app");
     println!("           tina4 init js ./my-frontend   (tina4-js SPA)");
+}
+
+/// Decide where `tina4 init <lang> <name>` scaffolds. A BARE name (no `/` or
+/// `\`, not absolute, not starting with `.`) is joined onto the configured
+/// projects folder when one is set, matching `tina4 serve <name>` and
+/// `tina4 setup`. Anything that looks like a path — a separator, an absolute
+/// path, or a leading `.`/`..`/`./` — is returned unchanged, as is a bare name
+/// when no projects folder is configured. Pure (projects dir is injected) so the
+/// branch table is unit-tested without touching config or the filesystem.
+/// Resolve the init target and, when a bare name was redirected into the
+/// projects folder, tell the user where it landed. Kept out of `run` so the
+/// announce branch does not add to that function's complexity; the pure
+/// [`resolve_init_target`] stays side-effect-free for the unit tests.
+fn resolve_init_target_announced(name: &str) -> String {
+    let resolved = resolve_init_target(name, crate::setup::configured_projects_dir());
+    if resolved.as_os_str() != Path::new(name).as_os_str() {
+        println!(
+            "{} Creating in your projects folder: {}",
+            icon_info().cyan(),
+            resolved.display()
+        );
+    }
+    resolved.to_string_lossy().into_owned()
+}
+
+fn resolve_init_target(name: &str, projects_dir: Option<PathBuf>) -> PathBuf {
+    let looks_like_path = name.contains('/')
+        || name.contains('\\')
+        || name.starts_with('.')
+        || Path::new(name).is_absolute();
+    match projects_dir {
+        Some(dir) if !looks_like_path => dir.join(name),
+        _ => PathBuf::from(name),
+    }
 }
 
 fn init_project(language: &str, path: &str) {
@@ -1511,6 +1554,34 @@ fn project_name_from_path(path: &str) -> String {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn init_target_joins_a_bare_name_onto_the_projects_folder() {
+        // The bug (#133): `tina4 init php my-app` created ./my-app instead of
+        // landing in the configured projects folder.
+        let dir = PathBuf::from("/home/u/projects");
+        assert_eq!(
+            resolve_init_target("my-app", Some(dir.clone())),
+            dir.join("my-app")
+        );
+    }
+
+    #[test]
+    fn init_target_honours_an_explicit_path_verbatim() {
+        let dir = Some(PathBuf::from("/home/u/projects"));
+        // A leading ./, a separator, and an absolute path are all "explicit" and
+        // must NOT be relocated into the projects folder.
+        assert_eq!(resolve_init_target("./app", dir.clone()), PathBuf::from("./app"));
+        assert_eq!(resolve_init_target("../app", dir.clone()), PathBuf::from("../app"));
+        assert_eq!(resolve_init_target("sub/app", dir.clone()), PathBuf::from("sub/app"));
+        assert_eq!(resolve_init_target("/tmp/app", dir), PathBuf::from("/tmp/app"));
+    }
+
+    #[test]
+    fn init_target_is_verbatim_when_no_projects_folder_is_configured() {
+        // No config → behave exactly as before (relative to the cwd).
+        assert_eq!(resolve_init_target("my-app", None), PathBuf::from("my-app"));
+    }
 
     #[test]
     fn scaffold_binds_a_default_sqlite_database() {

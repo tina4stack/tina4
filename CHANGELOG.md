@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.8.111 - 2026-10-29
+
+### Changed
+- `tina4 init <name>` with no language now picks the first installed runtime —
+  Python -> PHP -> Node.js -> Ruby — and announces it ("No language given —
+  using python (first installed runtime)."), instead of silently defaulting or
+  prompting. `tina4 init zoo` on a box with only Ruby makes a Ruby project. An
+  explicit language (`tina4 init ruby zoo`) is unchanged; the interactive picker
+  is kept only as the fallback when no runtime is on PATH. Ships alongside the
+  3.8.110 projects-folder fix (a bare name is created in the configured projects
+  folder).
+
 ## 3.8.110 - 2026-10-29
 
 ### Fixed

@@ -84,7 +84,9 @@ enum Commands {
 
     /// Scaffold a new Tina4 project: tina4 init <language> <path>
     Init {
-        /// Language: python, php, ruby, nodejs, js (tina4-js frontend SPA)
+        /// Language: python, php, ruby, nodejs, js (tina4-js frontend SPA).
+        /// Optional — if omitted, the first installed runtime is used
+        /// (Python → PHP → Node.js → Ruby) and announced.
         lang: Option<String>,
         /// Project name (created in your configured projects folder) OR an explicit
         /// path (absolute, or starting with `.`/a separator), used verbatim

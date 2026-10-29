@@ -755,6 +755,15 @@ dependencies = [
     "tina4-python>=3.1.0",
 ]
 
+# pytest ships as a dev dependency so `tina4 test` runs out of the box — the
+# generators (`tina4 generate route` etc.) write pytest tests under tests/, and
+# `uv sync` installs this group by default (PEP 735), so a new app can run its
+# own tests without a manual `uv add --dev pytest` (tina4#133).
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
 # Database drivers are optional — install only what you need:
 #   uv add psycopg2-binary   # PostgreSQL
 #   uv add mysql-connector-python  # MySQL

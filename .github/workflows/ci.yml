@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# Least-privilege GITHUB_TOKEN: these jobs only read the repo
+# (CWE-275 / CodeQL actions/missing-workflow-permissions).
+permissions:
+  contents: read
+
 jobs:
   check:
     runs-on: ubuntu-latest

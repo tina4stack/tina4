@@ -13,6 +13,11 @@ on:
   pull_request:
     branches: [main]
 
+# Least-privilege GITHUB_TOKEN: this job only reads the repo
+# (CWE-275 / CodeQL actions/missing-workflow-permissions).
+permissions:
+  contents: read
+
 jobs:
   generator-parity:
     name: ${{ matrix.language }}

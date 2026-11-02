@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.8.113 - 2026-11-02
+
+### Fixed
+- Maintenance release that restores the `releases.atom` ordering after the
+  3.13.156 skills tag. The skills installer's jsDelivr/raw fallbacks fetch
+  `tina4/<ref>/skills.sha256` from a bare framework tag on this repo, so the
+  3.13.156 release pushed a bare `3.13.156` tag here - which then topped the atom
+  feed. `tina4 update` on CLI 3.8.104 (pre-3.8.106, which still takes the first
+  `/releases/tag/` link as the latest CLI) therefore reported "Latest: 3.13.156"
+  and 404'd on every binary asset. Publishing this `v3.8.113` release puts a `v`
+  tag back on top so those installs update cleanly again. No CLI behaviour
+  change. (tina4stack/tina4#142)
+
 ## 3.8.112 - 2026-10-29
 
 ### Fixed

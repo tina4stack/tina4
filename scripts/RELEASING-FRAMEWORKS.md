@@ -219,6 +219,8 @@ git push origin main
 # 3d. Tag the tina4 repo at the framework version, ONCE both .sh and .ps1
 # are on main. Bare tag (no v prefix) - the shell installer track uses
 # these; the CLI track uses vX.Y.Z tags separately.
+# This tag shows up in releases.atom above the last CLI release, which
+# breaks `tina4 update` on 3.8.104 (see "Bare tag on top of releases.atom").
 git tag -a 3.13.<new> -m "Release 3.13.<new>"
 git push origin 3.13.<new>
 ```
@@ -355,11 +357,24 @@ gh release download v3.8.<new> --repo tina4stack/tina4 \
   --pattern tina4-windows-amd64.exe --dir /tmp/verify
 osslsigncode verify /tmp/verify/tina4-windows-amd64.exe
 
+# CLI update feed: tina4 3.8.104 takes the first tag in releases.atom as
+# the latest CLI. A bare 3.13.<ver> first is expected after a release that
+# skips section 5, and means those installs 404 on `tina4 update` until the
+# next CLI release (see "Bare tag on top of releases.atom").
+first=$(curl -sf -A tina4-cli https://github.com/tina4stack/tina4/releases.atom \
+  | grep -o '/releases/tag/[^"]*' | head -1)
+case "$first" in
+  */tag/v*) echo "feed OK: ${first##*/}" ;;
+  "")       echo "feed ERROR: could not read releases.atom" ;;
+  *)        echo "feed WARN: ${first##*/} is first, 3.8.104 updates 404" ;;
+esac
+
 # Docs site (Jenkins refreshes on tina4-documentation main push)
 curl -sf https://tina4.com/ | grep -oE "Current framework release: 3\.13\.[0-9]+"
 ```
 
-Every check must pass. If ANY check fails, the release is not done.
+Every check must pass. If ANY check fails, the release is not done. The
+feed check is the exception: WARN does not block the release.
 
 ## 7. Close resolved issues
 
@@ -418,6 +433,21 @@ that does not close any user-visible ticket.
 
 Each of these has bitten a release. The runbook exists so they only bite
 once.
+
+- **Bare tag on top of releases.atom**: tina4 3.8.104 reads the latest CLI
+  version from the first `/releases/tag/` link in `releases.atom` (fixed in
+  3.8.106, which uses the `releases/latest` redirect, but 3.8.104 installs
+  are still out there). The feed lists plain tags as well as releases. It
+  dated the bare `3.13.156` tag (pushed lightweight, not with `git tag -a`
+  as step 3d says) by its commit, and a release by when it was published.
+  That tag sat on the newest commit with no CLI release after it, so 3.8.104
+  reported "Latest: 3.13.156" and 404'd on `tina4-darwin-arm64` and every
+  other asset. Do not delete or move the bare tag: the jsDelivr and raw
+  fallbacks in `install-skills.sh` and `install-skills.ps1` fetch
+  `tina4/<ref>/skills.sha256` from it. Fix: publish a CLI release
+  (section 5) after the bare tag, which puts a `v` tag back on top. Until
+  then, 3.8.104 users can re-run the CLI installer to get the current
+  release.
 
 - **Node lockfile missing platform binaries**: vitest 4.1.9 -> vite 7.3.6 ->
   esbuild 0.28+. A lockfile generated on Apple Silicon before the vitest

@@ -1,0 +1,44 @@
+# Copyright (c) 2026 Code Infinity
+# SPDX-License-Identifier: MPL-2.0
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# tina4#110: run the skills-regression guard automatically on skills PRs.
+#
+# gen-skills-bundle.sh's regression check only fires at release time, with every
+# source repo checked out. This job catches a dropped skill or reference on the
+# PR that drops it, by comparing the committed skills.sha256 against the manifest
+# tina4.com serves now. It needs nothing but a checkout and one fetch, so it runs
+# only on PRs that touch the skills source or the manifest.
+name: Skills regression
+
+on:
+  pull_request:
+    paths:
+      - '.claude/skills/**'
+      - 'skills.sha256'
+      - 'install-skills.sh'
+      - 'install-skills.ps1'
+      - 'scripts/skills-list.sh'
+      - 'scripts/gen-skills-sha256.sh'
+      - 'scripts/gen-skills-bundle.sh'
+      - 'scripts/check-skills-regression.sh'
+      - 'scripts/check-skills-manifest-regression.sh'
+      - '.github/workflows/skills-regression.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: skills-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression:
+    name: skills-regression
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - name: No published skill may be dropped from the manifest
+        run: bash scripts/check-skills-manifest-regression.sh

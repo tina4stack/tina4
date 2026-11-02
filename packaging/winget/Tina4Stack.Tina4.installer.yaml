@@ -1,11 +1,11 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
 PackageIdentifier: Tina4Stack.Tina4
-PackageVersion: 3.8.113
+PackageVersion: 3.8.114
 InstallerType: portable
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/tina4stack/tina4/releases/download/v3.8.113/tina4-windows-amd64.exe
-    InstallerSha256: 1964B86EADD9C3EBF7BD5D65F911D00D04BDF6E74B042EF00BBB2196C5AEF26F
+    InstallerUrl: https://github.com/tina4stack/tina4/releases/download/v3.8.114/tina4-windows-amd64.exe
+    InstallerSha256: 2743BD83D316177D8B556EF60F7C379E109CCF726A95EC86BDAEF0EBF0319457
     PortableCommandAlias: tina4
 ManifestType: installer
 ManifestVersion: 1.6.0

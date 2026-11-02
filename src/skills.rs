@@ -76,6 +76,14 @@ const FETCH_BUDGET_SECS: u64 = 60;
 /// before the current skills are written.
 const LEGACY_SKILLS: &[&str] = &["tina4-developer"];
 
+/// The checksum manifest of what a target currently has installed, written at
+/// the end of every publish and read at the start of the next one. It is how a
+/// refresh tells a file the user edited from a clean upstream file: a skill
+/// whose on-disk bytes no longer match what we recorded installing is backed up
+/// before it is replaced, instead of being overwritten. Dot-prefixed so coding
+/// tools never scan it as a skill. Same `sha256sum` shape as `skills.sha256`.
+const INSTALLED_MANIFEST: &str = ".tina4-skills.sha256";
+
 /// Which framework repo hosts a skill, for the jsDelivr and raw FALLBACK URLs
 /// only (the primary tina4.com tier is flat and repo-independent). This is the
 /// ONE piece of per-skill knowledge left, and it is a rule, not a list, so new
@@ -295,7 +303,7 @@ fn install_inner(target: &str) -> Result<(), String> {
 
     // Publish into every destination.
     for destination in &destinations {
-        publish(&stage.path, destination, &config.reference)
+        publish(&stage.path, destination, &config.reference, &entries)
             .map_err(|e| format!("Could not install the skills into {} — {e}", destination.display()))?;
         println!("  {} installed for {}", icon_ok().green(), destination.display());
     }
@@ -536,8 +544,16 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// Publish every staged skill into `destination`, replacing each one atomically
-/// and removing any legacy skill directories first.
-fn publish(stage: &Path, destination: &Path, reference: &str) -> std::io::Result<()> {
+/// and removing any legacy skill directories first. A skill the user has edited
+/// since it was installed is backed up aside before it is replaced, so a refresh
+/// never silently discards local changes (`entries` is the new ref's manifest,
+/// recorded for the next refresh to compare against).
+fn publish(
+    stage: &Path,
+    destination: &Path,
+    reference: &str,
+    entries: &[(String, String)],
+) -> std::io::Result<()> {
     fs::create_dir_all(destination)?;
 
     for legacy in LEGACY_SKILLS {
@@ -548,30 +564,155 @@ fn publish(stage: &Path, destination: &Path, reference: &str) -> std::io::Result
         }
     }
 
+    // What we recorded installing last time. Empty for a first install or a
+    // target last written by a pre-backup client; with nothing recorded we
+    // cannot tell an edit from a clean file, so we do not guess - we replace as
+    // before and record the manifest below, so the NEXT refresh is precise.
+    let recorded = read_recorded_manifest(destination);
+
     for entry in fs::read_dir(stage)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
             continue;
         }
-        let name = entry.file_name();
-        let replacement = destination.join(format!(".{}.tina4-new", name.to_string_lossy()));
-        let installed = destination.join(&name);
-        // Build the new copy beside the target, then swing it into place with a
-        // rename so a reader never sees a half-written skill.
-        if replacement.exists() {
-            fs::remove_dir_all(&replacement)?;
-        }
-        copy_dir_all(&entry.path(), &replacement)?;
-        if installed.exists() {
-            fs::remove_dir_all(&installed)?;
-        }
-        fs::rename(&replacement, &installed)?;
+        install_one_skill(&entry.path(), destination, &entry.file_name(), &recorded)?;
     }
 
     // Trimmed on read (see doctor::read_installed_skills_ref), so the trailing
     // newline is immaterial; kept to match install-skills.sh's marker.
     fs::write(destination.join(".tina4-skills-ref"), format!("{reference}\n"))?;
+    // Record what we just installed so the next refresh can spot local edits.
+    write_recorded_manifest(destination, entries)?;
     Ok(())
+}
+
+/// Stage one already-downloaded skill into `destination`: copy it beside the
+/// target, back up the installed copy first if the user edited it, then swing
+/// the new one into place with a rename so a reader never sees a half-written
+/// skill.
+fn install_one_skill(
+    staged: &Path,
+    destination: &Path,
+    name: &std::ffi::OsStr,
+    recorded: &std::collections::HashMap<String, String>,
+) -> std::io::Result<()> {
+    let skill = name.to_string_lossy();
+    let replacement = destination.join(format!(".{skill}.tina4-new"));
+    let installed = destination.join(name);
+    if replacement.exists() {
+        fs::remove_dir_all(&replacement)?;
+    }
+    copy_dir_all(staged, &replacement)?;
+    if installed.exists() {
+        // Preserve the user's work before the directory is removed: a skill whose
+        // files no longer match what we recorded installing is backed up aside.
+        if !recorded.is_empty() && skill_is_modified(&installed, &skill, recorded) {
+            let backup = back_up_skill(&installed, destination, &skill)?;
+            println!(
+                "  {} kept your edited {skill} - backed up to {}",
+                "~".yellow(),
+                backup.display()
+            );
+        }
+        fs::remove_dir_all(&installed)?;
+    }
+    fs::rename(&replacement, &installed)?;
+    Ok(())
+}
+
+/// Read the recorded install manifest from `destination` into `relative -> hash`
+/// (lowercased). A missing file (first install, or an older client that never
+/// wrote one) yields an empty map, which the caller reads as "nothing recorded".
+fn read_recorded_manifest(destination: &Path) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    if let Ok(text) = fs::read_to_string(destination.join(INSTALLED_MANIFEST)) {
+        for line in text.lines() {
+            if let Some((hash, relative)) = parse_manifest_line(line) {
+                map.insert(relative.to_string(), hash.to_ascii_lowercase());
+            }
+        }
+    }
+    map
+}
+
+/// Write the manifest of what we just installed, in `skills.sha256` shape, so the
+/// next refresh can tell an edited file from a clean one.
+fn write_recorded_manifest(
+    destination: &Path,
+    entries: &[(String, String)],
+) -> std::io::Result<()> {
+    let mut body = String::new();
+    for (hash, relative) in entries {
+        body.push_str(hash);
+        body.push_str("  ");
+        body.push_str(relative);
+        body.push('\n');
+    }
+    fs::write(destination.join(INSTALLED_MANIFEST), body)
+}
+
+/// True when the installed `skill` directory no longer matches what `recorded`
+/// says we installed: a file was edited, deleted, or added. Only files the
+/// manifest named for this skill count; the dot-files we write live beside the
+/// skill directories, never inside them, so they are never seen here.
+fn skill_is_modified(
+    installed: &Path,
+    skill: &str,
+    recorded: &std::collections::HashMap<String, String>,
+) -> bool {
+    let prefix = format!("{skill}/");
+    let mut recorded_here = 0usize;
+    for (relative, hash) in recorded {
+        let Some(within) = relative.strip_prefix(&prefix) else {
+            continue;
+        };
+        recorded_here += 1;
+        let mut path = installed.to_path_buf();
+        for component in within.split('/') {
+            path.push(component);
+        }
+        match fs::read(&path) {
+            Ok(bytes) => {
+                if !sha256_hex(&bytes).eq_ignore_ascii_case(hash) {
+                    return true; // edited in place
+                }
+            }
+            Err(_) => return true, // a recorded file was deleted
+        }
+    }
+    // A file the user added under the skill (one the manifest never named) is an
+    // edit too; the recorded files all matched above, so a count mismatch can
+    // only be an addition.
+    count_files(installed) != recorded_here
+}
+
+/// Count the files (not directories) in a tree. Used to notice a file the user
+/// added to a skill that the recorded manifest never named.
+fn count_files(dir: &Path) -> usize {
+    let mut total = 0;
+    if let Ok(read) = fs::read_dir(dir) {
+        for entry in read.flatten() {
+            match entry.file_type() {
+                Ok(file_type) if file_type.is_dir() => total += count_files(&entry.path()),
+                Ok(_) => total += 1,
+                Err(_) => {}
+            }
+        }
+    }
+    total
+}
+
+/// Copy the user's modified skill aside before it is replaced, so the edit is
+/// recoverable. Dot-prefixed (coding tools skip it) and stamped so repeated
+/// refreshes never clobber an earlier backup. Returns the backup path to report.
+fn back_up_skill(installed: &Path, destination: &Path, skill: &str) -> std::io::Result<PathBuf> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let backup = destination.join(format!(".{skill}.tina4-backup-{stamp}"));
+    copy_dir_all(installed, &backup)?;
+    Ok(backup)
 }
 
 /// Recursively copy a directory tree. The stdlib has no equivalent, and the
@@ -798,6 +939,150 @@ mod tests {
         assert!(
             !code.contains("powershell") && !code.contains("iex"),
             "the native skills installer must not reach for PowerShell or iex"
+        );
+    }
+
+    /// A unique temp directory for a test, removed on drop so a panicking test
+    /// leaves nothing behind.
+    struct TmpDir(PathBuf);
+
+    impl TmpDir {
+        fn new(tag: &str) -> Self {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let path = std::env::temp_dir()
+                .join(format!("tina4-skills-test-{tag}-{}-{stamp}", std::process::id()));
+            fs::create_dir_all(&path).unwrap();
+            TmpDir(path)
+        }
+    }
+
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Stage one skill with a single `SKILL.md`, returning the stage path and the
+    /// matching manifest entries so a test can `publish` it.
+    fn stage_one_skill(root: &Path, skill: &str, body: &str) -> (PathBuf, Vec<(String, String)>) {
+        let stage = root.join(format!("stage-{}", sha256_hex(body.as_bytes())));
+        let skill_dir = stage.join(skill);
+        fs::create_dir_all(&skill_dir).unwrap();
+        fs::write(skill_dir.join("SKILL.md"), body).unwrap();
+        (
+            stage,
+            vec![(sha256_hex(body.as_bytes()), format!("{skill}/SKILL.md"))],
+        )
+    }
+
+    /// The backup directory for `skill` under `dest`, if a refresh created one.
+    fn find_backup(dest: &Path, skill: &str) -> Option<PathBuf> {
+        let prefix = format!(".{skill}.tina4-backup-");
+        fs::read_dir(dest).ok()?.flatten().find_map(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&prefix)
+                .then(|| entry.path())
+        })
+    }
+
+    #[test]
+    fn unmodified_skill_refreshes_without_a_backup() {
+        let tmp = TmpDir::new("clean");
+        let dest = tmp.0.join("skills");
+
+        let (stage1, entries1) = stage_one_skill(&tmp.0, "demo", "version one\n");
+        publish(&stage1, &dest, "3.0.0", &entries1).unwrap();
+        assert_eq!(
+            fs::read_to_string(dest.join("demo/SKILL.md")).unwrap(),
+            "version one\n"
+        );
+        assert!(dest.join(INSTALLED_MANIFEST).exists());
+
+        // A clean upstream update - the user changed nothing - must not back up.
+        let (stage2, entries2) = stage_one_skill(&tmp.0, "demo", "version two\n");
+        publish(&stage2, &dest, "3.0.1", &entries2).unwrap();
+        assert_eq!(
+            fs::read_to_string(dest.join("demo/SKILL.md")).unwrap(),
+            "version two\n"
+        );
+        assert!(
+            find_backup(&dest, "demo").is_none(),
+            "a clean file must not be backed up"
+        );
+    }
+
+    #[test]
+    fn edited_skill_is_backed_up_before_replacement() {
+        let tmp = TmpDir::new("edited");
+        let dest = tmp.0.join("skills");
+
+        let (stage1, entries1) = stage_one_skill(&tmp.0, "demo", "original\n");
+        publish(&stage1, &dest, "3.0.0", &entries1).unwrap();
+
+        // The user edits the installed skill in place.
+        fs::write(dest.join("demo/SKILL.md"), "my local edits\n").unwrap();
+
+        let (stage2, entries2) = stage_one_skill(&tmp.0, "demo", "upstream v2\n");
+        publish(&stage2, &dest, "3.0.1", &entries2).unwrap();
+
+        // The new version is installed...
+        assert_eq!(
+            fs::read_to_string(dest.join("demo/SKILL.md")).unwrap(),
+            "upstream v2\n"
+        );
+        // ...and the user's edit survives in a backup, not overwritten.
+        let backup = find_backup(&dest, "demo").expect("a backup of the edited skill");
+        assert_eq!(
+            fs::read_to_string(backup.join("SKILL.md")).unwrap(),
+            "my local edits\n"
+        );
+    }
+
+    #[test]
+    fn an_added_file_counts_as_a_local_edit() {
+        let tmp = TmpDir::new("added");
+        let dest = tmp.0.join("skills");
+
+        let (stage1, entries1) = stage_one_skill(&tmp.0, "demo", "base\n");
+        publish(&stage1, &dest, "3.0.0", &entries1).unwrap();
+
+        // The user drops a file into the skill the manifest never named.
+        fs::write(dest.join("demo/NOTES.md"), "my notes\n").unwrap();
+
+        let (stage2, entries2) = stage_one_skill(&tmp.0, "demo", "base v2\n");
+        publish(&stage2, &dest, "3.0.1", &entries2).unwrap();
+
+        let backup = find_backup(&dest, "demo").expect("an added file is a local edit");
+        assert_eq!(
+            fs::read_to_string(backup.join("NOTES.md")).unwrap(),
+            "my notes\n"
+        );
+    }
+
+    #[test]
+    fn a_target_with_no_recorded_manifest_records_one_without_guessing() {
+        let tmp = TmpDir::new("legacy");
+        let dest = tmp.0.join("skills");
+        // A target an older, pre-backup client wrote: a skill on disk, no manifest.
+        fs::create_dir_all(dest.join("demo")).unwrap();
+        fs::write(dest.join("demo/SKILL.md"), "from an old client\n").unwrap();
+        assert!(!dest.join(INSTALLED_MANIFEST).exists());
+
+        let (stage, entries) = stage_one_skill(&tmp.0, "demo", "new\n");
+        publish(&stage, &dest, "3.0.1", &entries).unwrap();
+
+        // With nothing recorded we do not guess at edits (no backup), but we DO
+        // record a manifest, so the next refresh is precise.
+        assert!(find_backup(&dest, "demo").is_none());
+        assert!(dest.join(INSTALLED_MANIFEST).exists());
+        assert_eq!(
+            fs::read_to_string(dest.join("demo/SKILL.md")).unwrap(),
+            "new\n"
         );
     }
 }

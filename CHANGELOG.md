@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- `tina4 skills` / `tina4 update` now back up a skill you have edited instead of
+  overwriting it. Each install records a checksum manifest of what it wrote
+  (`.tina4-skills.sha256`, beside the existing `.tina4-skills-ref` marker); the
+  next refresh compares the installed files against it, and a skill whose files
+  no longer match - an edit, a deletion, or a file you added - is copied aside to
+  `.<skill>.tina4-backup-<stamp>` (dot-prefixed, so coding tools skip it) before
+  the new version is swung into place. The backup path is printed so you can find
+  it. A clean skill is replaced as before, with no backup. A target written by an
+  older client has no manifest yet, so the first refresh records one without
+  guessing at edits; every refresh after that is precise. (tina4stack/tina4#108)
+
 ## 3.8.113 - 2026-11-02
 
 ### Fixed

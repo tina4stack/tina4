@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.8.114 - 2026-11-02
 
 ### Added
 - `tina4 skills` / `tina4 update` now back up a skill you have edited instead of

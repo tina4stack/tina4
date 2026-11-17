@@ -28,7 +28,7 @@ set -eu
 
 # Pin skills to a released tag, not a moving branch, so an install is reproducible.
 # Bump this when the skills change in a new release. Override with TINA4_SKILLS_REF.
-ref="${TINA4_SKILLS_REF:-3.13.156}"
+ref="${TINA4_SKILLS_REF:-3.13.164}"
 target="${TINA4_SKILLS_TARGET:-}"
 skill_home="${TINA4_SKILLS_HOME:-$HOME}"
 # Three sources, tried in this order per file: tina4.com (Tina4's own infra),
@@ -161,9 +161,11 @@ skill_urls() {
   echo "${raw_root}/$1/${ref}/.claude/skills/$2/$3"
 }
 
+skill_count=0
 # install_skill <repo> <skill> <reference.md ...>
 install_skill() {
   repo="$1"; skill="$2"; shift 2
+  skill_count=$((skill_count + 1))
   mkdir -p "$stage/$skill/references"
   download_file "$stage/$skill/SKILL.md" $(skill_urls "$repo" "$skill" "SKILL.md")
   for reference in "$@"; do
@@ -247,11 +249,12 @@ install_skill tina4-ruby    tina4-developer-ruby    $DEV_REFS
 install_skill tina4-nodejs  tina4-developer-nodejs  $DEV_REFS
 # Shared skills (canonical copy served from tina4-python).
 install_skill tina4-python  tina4-js          html-and-components.md signals-and-reactivity.md persistence.md rtc.md
-install_skill tina4-python  tina4-maintainer  cli-and-deployment.md frond-and-frontend.md routing-and-orm.md subsystems.md checklists/pr-review.md checklists/release.md checklists/signing.md checklists/parity-sweep.md
+install_skill tina4-python  tina4-maintainer  cli-and-deployment.md frond-and-frontend.md routing-and-orm.md subsystems.md checklists/pr-review.md checklists/release.md checklists/signing.md checklists/parity-sweep.md debugging.md verification.md grounding-and-decisions.md principles-and-languages.md code-quality-and-green.md workflow-and-release.md communication.md
 install_skill tina4-python  tina4-architect
 install_skill tina4-python  tina4-design         phase-1-intake.md phase-2-market-research.md design-tokens.md brand-guidelines.md ui-guide.md handoff.md website.md design-record-templates.md
 install_skill tina4-python  tina4-seo            ai-discovery.md content-audit.md discovery-audit.md entity-eeat.md favicon-package.md meta-tags.md robots-sitemap.md structured-data.md templates-and-guards.md validation-and-handoff.md
 install_skill tina4-python  tina4-a11y           aria-and-live-regions.md contrast-and-colour.md discovery-and-scope.md forms.md images-and-media.md interactive-semantics.md keyboard-and-focus.md landmarks-and-structure.md validation-and-handoff.md zoom-reflow-motion.md
+install_skill tina4-python  tina4-test-plan      agent-prompt.md build_test_plan.py coverage-checklist.md example-spec.json _pdf.py _xlsx.py selftest.py
 # The tina4 CLI skill is served from the tina4 (Rust CLI) repo, not tina4-python.
 install_skill tina4         tina4-cli         commands.md
 
@@ -259,4 +262,4 @@ verify_checksums
 publish_skills
 
 echo ""
-echo "  Done - nine skills installed for $target (ref $ref). Restart your coding tool to pick them up."
+echo "  Done - $skill_count skills installed for $target (ref $ref). Restart your coding tool to pick them up."

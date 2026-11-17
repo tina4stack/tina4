@@ -50,7 +50,7 @@ Guided, menu-driven: install everything + scaffold a ready-to-run project.
 Install a language runtime. `LANG`: `python`, `php`, `ruby`, `nodejs`.
 
 ## `tina4 skills [target]`
-Install the latest Tina4 AI skills. `TARGET`: `claude`, `codex`, `cursor`, or `all`. Omit for a menu.
+Install the latest Tina4 AI skills. `TARGET`: `claude` (`~/.claude/skills`), `codex` (`~/.agents/skills`), `cursor` (`~/.cursor/skills`), `hermes` (`~/.hermes/skills`), `deepseek` (`~/.agents/skills`, shared with `codex`), or `all` (every directory once). Omit for a menu.
 
 ## `tina4 ai [options]`
 Detect AI coding tools and install framework context/skills.

@@ -109,7 +109,7 @@ Two kinds of verb, and the difference matters when a command seems "missing":
 | `tina4 scss` | Compile `src/scss/` to `src/public/css/` |
 | `tina4 build` | Build production front-end assets (SCSS minify + bundle) |
 | `tina4 ai [--all] [--force]` | Detect AI tools + install framework context |
-| `tina4 skills [claude\|codex\|cursor\|all]` | Install the latest Tina4 AI skills |
+| `tina4 skills [claude\|codex\|cursor\|hermes\|deepseek\|all]` | Install the latest Tina4 AI skills |
 | `tina4 env` | Configure environment variables interactively |
 | `tina4 docs` / `tina4 books` | Download docs into `.tina4-docs/` / the Tina4 book |
 | `tina4 update` | Self-update the binary + refresh installed skills |

@@ -11,6 +11,8 @@
 #   curl -fsSL https://tina4.com/install-skills.sh | TINA4_SKILLS_TARGET=claude sh
 #   curl -fsSL https://tina4.com/install-skills.sh | TINA4_SKILLS_TARGET=codex sh
 #   curl -fsSL https://tina4.com/install-skills.sh | TINA4_SKILLS_TARGET=cursor sh
+#   curl -fsSL https://tina4.com/install-skills.sh | TINA4_SKILLS_TARGET=hermes sh
+#   curl -fsSL https://tina4.com/install-skills.sh | TINA4_SKILLS_TARGET=deepseek sh
 # Use TINA4_SKILLS_TARGET=all only when every supported tool should receive the skills.
 #
 # POSIX sh ONLY -- no bashisms. Every example above pipes into `sh`, and on
@@ -43,15 +45,20 @@ raw_root="${TINA4_SKILLS_RAW_ROOT:-https://raw.githubusercontent.com/tina4stack}
 retry_count="${TINA4_SKILLS_RETRY_COUNT:-3}"
 retry_delay="${TINA4_SKILLS_RETRY_DELAY:-2}"
 
-# Space separated, not an array: dash has no arrays. Neither path can contain a
-# space, because both are literals under $HOME.
+# Space separated, not an array: dash has no arrays. No path can contain a
+# space, because each is a literal under $HOME.
+#
+# DeepSeek's Deep Code CLI reads user-level skills from ~/.agents/skills -- the
+# same directory Codex reads -- so deepseek and codex are one destination, and
+# `all` lists that directory ONCE. Hermes Agent reads ~/.hermes/skills only.
 case "$target" in
-  claude) destinations="$skill_home/.claude/skills" ;;
-  codex)  destinations="$skill_home/.agents/skills" ;;
-  cursor) destinations="$skill_home/.cursor/skills" ;;
-  all)    destinations="$skill_home/.claude/skills $skill_home/.agents/skills $skill_home/.cursor/skills" ;;
+  claude)         destinations="$skill_home/.claude/skills" ;;
+  codex|deepseek) destinations="$skill_home/.agents/skills" ;;
+  cursor)         destinations="$skill_home/.cursor/skills" ;;
+  hermes)         destinations="$skill_home/.hermes/skills" ;;
+  all)            destinations="$skill_home/.claude/skills $skill_home/.agents/skills $skill_home/.cursor/skills $skill_home/.hermes/skills" ;;
   *)
-    echo "error: set TINA4_SKILLS_TARGET to claude, codex, cursor, or all" >&2
+    echo "error: set TINA4_SKILLS_TARGET to claude, codex, cursor, hermes, deepseek, or all" >&2
     exit 2
     ;;
 esac

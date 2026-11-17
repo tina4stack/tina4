@@ -15,8 +15,43 @@ use std::process::Command;
 /// so what doctor reports as "latest" is exactly what a refresh would install.
 const SKILLS_INSTALL_URL: &str = "https://tina4.com/install-skills.sh";
 const SKILLS_INSTALL_CMD: &str = "tina4 skills claude";
-const CODEX_SKILLS_INSTALL_CMD: &str = "tina4 skills codex";
-const CURSOR_SKILLS_INSTALL_CMD: &str = "tina4 skills cursor";
+
+/// A coding tool whose personal skills home doctor reports on, besides Claude
+/// (which has its own richer check). One table, one report function, so a new
+/// tool is a row here instead of another copy of the report.
+struct ToolSkills {
+    /// Section title, e.g. "Codex / DeepSeek".
+    label: &'static str,
+    /// The directory under `$HOME` that holds `skills/` (`.agents`, ...).
+    tool_dir: &'static str,
+    /// The command that installs or refreshes this home.
+    install_cmd: &'static str,
+    /// What the refresh never touches, printed as the safety footer.
+    never_touches: &'static str,
+}
+
+/// Codex and DeepSeek's Deep Code CLI share `~/.agents/skills`, so they are one
+/// row; Cursor and Hermes each own their home.
+const TOOL_SKILLS: &[ToolSkills] = &[
+    ToolSkills {
+        label: "Codex / DeepSeek",
+        tool_dir: ".agents",
+        install_cmd: "tina4 skills codex",
+        never_touches: "a project's AGENTS.md",
+    },
+    ToolSkills {
+        label: "Cursor",
+        tool_dir: ".cursor",
+        install_cmd: "tina4 skills cursor",
+        never_touches: "project .cursor/skills entrypoints",
+    },
+    ToolSkills {
+        label: "Hermes",
+        tool_dir: ".hermes",
+        install_cmd: "tina4 skills hermes",
+        never_touches: "~/.hermes/config.yaml or a project's .hermes/skills",
+    },
+];
 
 struct ToolCheck {
     name: &'static str,
@@ -53,8 +88,9 @@ pub fn run() {
 
     // --- Tina4 AI skills (global ~/.claude/skills) ---
     check_skills_currency();
-    check_codex_skills_currency();
-    check_cursor_skills_currency();
+    for tool in TOOL_SKILLS {
+        check_tool_skills_currency(tool);
+    }
 
     // --- macOS build tools (Xcode Command Line Tools) ---
     // Homebrew, git, and the PHP/Ruby/Node runtimes need these; Python (uv) does
@@ -689,19 +725,22 @@ fn check_skills_currency() {
     );
 }
 
-/// Read-only currency report for Codex personal skills in ~/.agents/skills.
-fn check_codex_skills_currency() {
+/// Read-only currency report for one tool's personal skills home
+/// (`~/<tool_dir>/skills`), e.g. Codex's ~/.agents/skills or Hermes'
+/// ~/.hermes/skills.
+fn check_tool_skills_currency(tool: &ToolSkills) {
     println!();
-    println!("  {}", "Tina4 AI skills (Codex)".bold());
+    println!("  {}", format!("Tina4 AI skills ({})", tool.label).bold());
     println!("  {}", "-".repeat(70));
 
     let skills_dir = match home_dir() {
-        Some(h) => h.join(".agents").join("skills"),
+        Some(h) => h.join(tool.tool_dir).join("skills"),
         None => {
             println!("  {} could not resolve home directory", icon_warn().yellow());
             return;
         }
     };
+    let cmd = tool.install_cmd;
     let known = [
         "tina4-developer-python", "tina4-developer-php", "tina4-developer-ruby",
         "tina4-developer-nodejs", "tina4-js", "tina4-maintainer",
@@ -715,7 +754,7 @@ fn check_codex_skills_currency() {
     match classify_skills(skills_dir.is_dir(), read_installed_skills_ref(&skills_dir), fetch_latest_skills_ref()) {
         SkillsStatus::NotInstalled => println!(
             "  {} skills not installed  {}  {}",
-            icon_fail().red(), "->".dimmed(), format!("run: {}", CODEX_SKILLS_INSTALL_CMD).yellow()
+            icon_fail().red(), "->".dimmed(), format!("run: {}", cmd).yellow()
         ),
         SkillsStatus::Current(reference) => println!(
             "  {} {}",
@@ -727,7 +766,7 @@ fn check_codex_skills_currency() {
                 icon_warn().yellow(),
                 format!("update available - installed {}, latest {}", installed, latest).yellow()
             );
-            println!("      {} {}", "refresh:".dimmed(), CODEX_SKILLS_INSTALL_CMD.yellow());
+            println!("      {} {}", "refresh:".dimmed(), cmd.yellow());
         }
         SkillsStatus::InstalledUnknownLatest(reference) => println!(
             "  {} {}  {}",
@@ -736,8 +775,8 @@ fn check_codex_skills_currency() {
         ),
         SkillsStatus::UnknownInstalled(latest) => {
             let tail = latest.map_or_else(
-                || "version not recorded - re-run the Codex installer".to_string(),
-                |reference| format!("version not recorded (latest is {}) - re-run the Codex installer", reference),
+                || format!("version not recorded - re-run: {}", cmd),
+                |reference| format!("version not recorded (latest is {}) - re-run: {}", reference, cmd),
             );
             println!("  {} {} ({} skills present)", icon_info().blue(), tail.yellow(), present);
         }
@@ -753,105 +792,45 @@ fn check_codex_skills_currency() {
             );
             println!(
                 "      {} {}",
-                "a refresh uses the same endpoint and may also fail:".dimmed(), CODEX_SKILLS_INSTALL_CMD.yellow()
+                "a refresh uses the same endpoint and may also fail:".dimmed(), cmd.yellow()
             );
         }
     }
     if has_legacy_developer_skill(&skills_dir) {
         println!(
             "      {} legacy tina4-developer skill detected - {} removes it safely.",
-            icon_warn().yellow(), CODEX_SKILLS_INSTALL_CMD.yellow()
+            icon_warn().yellow(), cmd.yellow()
         );
     }
     println!(
         "      {}",
-        "refresh writes ~/.agents/skills only - it never changes a project's AGENTS.md".dimmed()
-    );
-}
-
-/// Read-only currency report for Cursor personal skills in ~/.cursor/skills.
-fn check_cursor_skills_currency() {
-    println!();
-    println!("  {}", "Tina4 AI skills (Cursor)".bold());
-    println!("  {}", "-".repeat(70));
-
-    let skills_dir = match home_dir() {
-        Some(h) => h.join(".cursor").join("skills"),
-        None => {
-            println!("  {} could not resolve home directory", icon_warn().yellow());
-            return;
-        }
-    };
-    let known = [
-        "tina4-developer-python", "tina4-developer-php", "tina4-developer-ruby",
-        "tina4-developer-nodejs", "tina4-js", "tina4-maintainer",
-    ];
-    let present = if skills_dir.is_dir() {
-        known.iter().filter(|s| skills_dir.join(s).join("SKILL.md").is_file()).count()
-    } else {
-        0
-    };
-
-    match classify_skills(skills_dir.is_dir(), read_installed_skills_ref(&skills_dir), fetch_latest_skills_ref()) {
-        SkillsStatus::NotInstalled => println!(
-            "  {} skills not installed  {}  {}",
-            icon_fail().red(), "->".dimmed(), format!("run: {}", CURSOR_SKILLS_INSTALL_CMD).yellow()
-        ),
-        SkillsStatus::Current(reference) => println!(
-            "  {} {}",
-            icon_ok().green(), format!("current - ref {} ({} skills installed)", reference, present).cyan()
-        ),
-        SkillsStatus::Stale { installed, latest } => {
-            println!(
-                "  {} {}",
-                icon_warn().yellow(),
-                format!("update available - installed {}, latest {}", installed, latest).yellow()
-            );
-            println!("      {} {}", "refresh:".dimmed(), CURSOR_SKILLS_INSTALL_CMD.yellow());
-        }
-        SkillsStatus::InstalledUnknownLatest(reference) => println!(
-            "  {} {}  {}",
-            icon_info().blue(), format!("ref {} ({} skills)", reference, present).cyan(),
-            "could not check latest (offline)".dimmed()
-        ),
-        SkillsStatus::UnknownInstalled(latest) => {
-            let tail = latest.map_or_else(
-                || "version not recorded - re-run the Cursor installer".to_string(),
-                |reference| format!("version not recorded (latest is {}) - re-run the Cursor installer", reference),
-            );
-            println!("  {} {} ({} skills present)", icon_info().blue(), tail.yellow(), present);
-        }
-        SkillsStatus::CheckEndpointBroken(installed) => {
-            let head = match installed {
-                Some(reference) => format!("ref {} ({} skills)", reference, present),
-                None => format!("{} skills present", present),
-            };
-            println!(
-                "  {} {}  {}",
-                icon_warn().yellow(), head.cyan(),
-                "skills version check returned an HTTP error - the endpoint may have moved".yellow()
-            );
-            println!(
-                "      {} {}",
-                "a refresh uses the same endpoint and may also fail:".dimmed(), CURSOR_SKILLS_INSTALL_CMD.yellow()
-            );
-        }
-    }
-    if has_legacy_developer_skill(&skills_dir) {
-        println!(
-            "      {} legacy tina4-developer skill detected - {} removes it safely.",
-            icon_warn().yellow(), CURSOR_SKILLS_INSTALL_CMD.yellow()
-        );
-    }
-    println!(
-        "      {}",
-        "refresh writes ~/.cursor/skills only - it never changes project .cursor/skills entrypoints".dimmed()
+        format!("refresh writes ~/{}/skills only - it never changes {}", tool.tool_dir, tool.never_touches).dimmed()
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doctor_reports_every_installer_home() {
+        // Every directory `tina4 skills all` writes is reported: ~/.claude/skills
+        // by check_skills_currency, every other one by a TOOL_SKILLS row.
+        let home = Path::new("/home/dev");
+        let reported: Vec<PathBuf> = std::iter::once(home.join(".claude").join("skills"))
+            .chain(TOOL_SKILLS.iter().map(|t| home.join(t.tool_dir).join("skills")))
+            .collect();
+        let written: Vec<PathBuf> = crate::skills::distinct_destinations(home)
+            .into_iter()
+            .map(|(_, dir)| dir)
+            .collect();
+        assert_eq!(reported, written);
+        // And every row's refresh command is a real `tina4 skills` target.
+        for tool in TOOL_SKILLS {
+            let target = tool.install_cmd.strip_prefix("tina4 skills ").unwrap();
+            assert!(crate::skills::is_target(target), "{} is not a target", tool.install_cmd);
+        }
+    }
 
     #[test]
     fn parses_ref_from_installer_script() {

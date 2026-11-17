@@ -39,8 +39,8 @@ tina4 serve --no-kill            Opt out of port takeover (sets TINA4_NO_TAKEOVE
                                  project's own dev server; the holder is left
                                  running and serve stops (TAKEOVER-DEC-03)
 tina4 doctor                     Check installed languages/tools, ports, AND global
-                                 Tina4 AI-skills currency (~/.claude/skills vs the latest
-                                 published ref). Strictly READ-ONLY: it reports + suggests a
+                                 Tina4 AI-skills currency (~/.claude, ~/.agents, ~/.cursor
+                                 and ~/.hermes skills vs the latest published ref). Strictly READ-ONLY: it reports + suggests a
                                  refresh; it writes nothing and NEVER touches a project CLAUDE.md.
 tina4 install <target>           Install a language runtime, tina4-js, or codeql (for tina4 codeql)
 tina4 generate <what> <name>     Generate model, route, migration, middleware
@@ -155,6 +155,11 @@ tina4 codeql                     Run CodeQL locally as a pre-check, matching CI'
                                  check, not pre-commit.
 tina4 scss                       Compile SCSS files
 tina4 ai                         Detect AI tools and install context
+tina4 skills [target]            Install/refresh the Tina4 AI skills. Targets:
+                                 claude (~/.claude/skills), codex (~/.agents/skills),
+                                 cursor (~/.cursor/skills), hermes (~/.hermes/skills),
+                                 deepseek (~/.agents/skills - the same dir as codex),
+                                 all (every dir, each written ONCE). Omit for a menu.
 tina4 deploy <target> [--runtime R]
                                  Generate deployment scaffolding: docker, systemd,
                                  nginx, cpanel. --runtime is PHP-only and picks the
@@ -170,7 +175,7 @@ tina4 uninstall [--dry-run] [--yes]
                                  Remove everything tina4 put on this machine: the
                                  config + credentials, the installed AI skills (the
                                  tina4-* folders + .tina4-skills-ref marker across
-                                 ~/.claude, ~/.agents, ~/.cursor), and the binary
+                                 ~/.claude, ~/.agents, ~/.cursor, ~/.hermes), and the binary
                                  itself. Lists every target first and asks before it
                                  removes anything. --dry-run only reports; --yes skips
                                  the prompts. The current project's ./.tina4,
@@ -278,12 +283,14 @@ binary via `which::which("claude")` and — because on Windows `claude` is a
 - SCSS compilation via grass crate (zero-dep, no sass/node required)
 - **AI-skills currency check** (`doctor.rs`): `install-skills.sh`/`.ps1` record the
   ref they installed in a GLOBAL marker under each target
-  (`~/.claude/skills`, `~/.agents/skills`, `~/.cursor/skills` → `.tina4-skills-ref`);
-  `tina4 doctor` reads those markers, fetches the current pinned ref from the same
-  installer (`https://tina4.com/install-skills.sh`, so "latest" equals what a
-  refresh installs), and reports Claude / Codex / Cursor separately
-  (current / update-available / offline / not-recorded). Targets:
-  `tina4 skills claude|codex|cursor|all`. The path is read-only (curl for the ref,
+  (`~/.claude/skills`, `~/.agents/skills`, `~/.cursor/skills`, `~/.hermes/skills`
+  → `.tina4-skills-ref`); `tina4 doctor` reads those markers, fetches the current
+  pinned ref from the same installer (`https://tina4.com/install-skills.sh`, so
+  "latest" equals what a refresh installs), and reports Claude / Codex + DeepSeek /
+  Cursor / Hermes separately (current / update-available / offline / not-recorded).
+  Targets: `tina4 skills claude|codex|cursor|hermes|deepseek|all` - the target
+  table is `TARGETS` in `src/skills.rs`. `deepseek` (DeepSeek Deep Code CLI) and
+  `codex` share `~/.agents/skills`, so `all` deduplicates and writes it once. The path is read-only (curl for the ref,
   no HTTP-client dep) and a refresh only ever writes the chosen home skills dir —
   never a project's CLAUDE.md, AGENTS.md, or repo-local `.cursor/skills` entrypoints.
   The classifier + ref parser are pure and unit-tested.

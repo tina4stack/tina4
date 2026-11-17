@@ -26,7 +26,7 @@ skills_dev_refs="auth-and-services.md data-and-orm.md deployment.md routes-and-a
 
 # Per-language developer skills come from their own framework repo. The shared
 # skills (tina4-js, tina4-maintainer, tina4-architect, tina4-design, tina4-seo,
-# tina4-a11y) have a
+# tina4-a11y, tina4-test-plan) have a
 # canonical copy in tina4-python and are served from there.
 skills_entries() {
   cat <<EOF
@@ -35,11 +35,12 @@ tina4-php|tina4-developer-php|$skills_dev_refs
 tina4-ruby|tina4-developer-ruby|$skills_dev_refs
 tina4-nodejs|tina4-developer-nodejs|$skills_dev_refs
 tina4-python|tina4-js|html-and-components.md signals-and-reactivity.md persistence.md rtc.md
-tina4-python|tina4-maintainer|cli-and-deployment.md frond-and-frontend.md routing-and-orm.md subsystems.md checklists/pr-review.md checklists/release.md checklists/signing.md checklists/parity-sweep.md
+tina4-python|tina4-maintainer|cli-and-deployment.md frond-and-frontend.md routing-and-orm.md subsystems.md checklists/pr-review.md checklists/release.md checklists/signing.md debugging.md verification.md grounding-and-decisions.md principles-and-languages.md code-quality-and-green.md workflow-and-release.md communication.md checklists/parity-sweep.md
 tina4-python|tina4-architect|
 tina4-python|tina4-design|phase-1-intake.md phase-2-market-research.md design-tokens.md brand-guidelines.md ui-guide.md handoff.md website.md design-record-templates.md
 tina4-python|tina4-seo|ai-discovery.md content-audit.md discovery-audit.md entity-eeat.md favicon-package.md meta-tags.md robots-sitemap.md structured-data.md templates-and-guards.md validation-and-handoff.md
 tina4-python|tina4-a11y|aria-and-live-regions.md contrast-and-colour.md discovery-and-scope.md forms.md images-and-media.md interactive-semantics.md keyboard-and-focus.md landmarks-and-structure.md validation-and-handoff.md zoom-reflow-motion.md
+tina4-python|tina4-test-plan|agent-prompt.md build_test_plan.py coverage-checklist.md example-spec.json _pdf.py _xlsx.py selftest.py
 tina4|tina4-cli|commands.md
 EOF
 }

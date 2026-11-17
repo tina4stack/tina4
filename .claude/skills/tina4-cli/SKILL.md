@@ -122,7 +122,7 @@ Two kinds of verb, and the difference matters when a command seems "missing":
 | `tina4 ai [--all] [--force]` | Detect AI tools + install framework context |
 | `tina4 ai serve [--port N] [--backend URL]` | Run the local AI gateway (needs sign-in + a model backend) |
 | `tina4 login` / `register` / `whoami [--json]` / `logout` | Tina4 profile (GitHub sign-in at profile.tina4.com) |
-| `tina4 skills [claude\|codex\|cursor\|all]` | Install the latest Tina4 AI skills |
+| `tina4 skills [claude\|codex\|cursor\|hermes\|deepseek\|all]` | Install the latest Tina4 AI skills |
 | `tina4 docs` / `tina4 books` | Download docs into `.tina4-docs/` / the Tina4 book |
 | `tina4 update` (alias `upgrade`) | Self-update the binary + refresh installed skills |
 | `tina4 uninstall [--dry-run] [--yes]` | Remove the client, its config + credentials and the installed skills |

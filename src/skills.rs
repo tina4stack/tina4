@@ -201,18 +201,56 @@ fn parse_installer_ref(installer: &str) -> Option<String> {
     Some(value.to_string())
 }
 
-/// The three destinations a target maps to, under `home`.
-fn destinations_for_target(target: &str, home: &Path) -> Option<Vec<PathBuf>> {
-    let claude = || home.join(".claude").join("skills");
-    let codex = || home.join(".agents").join("skills");
-    let cursor = || home.join(".cursor").join("skills");
-    match target {
-        "claude" => Some(vec![claude()]),
-        "codex" => Some(vec![codex()]),
-        "cursor" => Some(vec![cursor()]),
-        "all" => Some(vec![claude(), codex(), cursor()]),
-        _ => None,
+/// Every named install target and the tool directory (under the skills home) it
+/// writes `skills/` into. This table is the ONE place a target is defined: the
+/// installer, `tina4 update`'s refresh, `tina4 uninstall` and the validation
+/// message all read it.
+///
+/// Two targets may share a directory. DeepSeek's Deep Code CLI reads user-level
+/// skills from `~/.agents/skills` - the same directory Codex reads - so `deepseek`
+/// and `codex` are two names for one destination. Hermes Agent (Nous Research)
+/// reads `~/.hermes/skills` and none of the other homes by default.
+pub(crate) const TARGETS: &[(&str, &str)] = &[
+    ("claude", ".claude"),
+    ("codex", ".agents"),
+    ("cursor", ".cursor"),
+    ("hermes", ".hermes"),
+    ("deepseek", ".agents"),
+];
+
+/// What to print when a target is not one of [`TARGETS`] or `all`.
+pub(crate) const TARGET_CHOICES: &str = "Choose one of: tina4 skills claude, tina4 skills codex, \
+     tina4 skills cursor, tina4 skills hermes, tina4 skills deepseek, or tina4 skills all.";
+
+/// `true` for every name `tina4 skills <target>` accepts.
+pub(crate) fn is_target(target: &str) -> bool {
+    target == "all" || TARGETS.iter().any(|(name, _)| *name == target)
+}
+
+/// Every distinct skills directory under `home`, in [`TARGETS`] order, each
+/// paired with the FIRST target that names it. A directory shared by two targets
+/// (`~/.agents/skills`: codex + deepseek) appears once, so `all` writes it once.
+pub(crate) fn distinct_destinations(home: &Path) -> Vec<(&'static str, PathBuf)> {
+    let mut out: Vec<(&'static str, PathBuf)> = Vec::new();
+    for &(name, tool_dir) in TARGETS {
+        let dir = home.join(tool_dir).join("skills");
+        if !out.iter().any(|(_, seen)| *seen == dir) {
+            out.push((name, dir));
+        }
     }
+    out
+}
+
+/// The destinations a target maps to, under `home`. `all` is every distinct
+/// directory in [`TARGETS`] - deduplicated, never the same directory twice.
+fn destinations_for_target(target: &str, home: &Path) -> Option<Vec<PathBuf>> {
+    if target == "all" {
+        return Some(distinct_destinations(home).into_iter().map(|(_, dir)| dir).collect());
+    }
+    TARGETS
+        .iter()
+        .find(|(name, _)| *name == target)
+        .map(|(_, tool_dir)| vec![home.join(tool_dir).join("skills")])
 }
 
 /// `$TINA4_SKILLS_HOME`, else the user's home directory.
@@ -226,7 +264,8 @@ fn skill_home() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Install the skills for `target` (`claude` / `codex` / `cursor` / `all`).
+/// Install the skills for `target` (`claude` / `codex` / `cursor` / `hermes` /
+/// `deepseek` / `all`).
 /// Returns `true` on a fully verified, published install; on any failure it
 /// prints the reason and a "run later" hint and returns `false`, leaving every
 /// existing skill directory untouched (nothing is published unless every file
@@ -250,10 +289,7 @@ pub fn install(target: &str) -> bool {
 fn install_inner(target: &str) -> Result<(), String> {
     let home = skill_home()
         .ok_or_else(|| "Could not find your home directory (HOME / USERPROFILE unset).".to_string())?;
-    let destinations = destinations_for_target(target, &home).ok_or_else(|| {
-        "Choose one of: tina4 skills claude, tina4 skills codex, tina4 skills cursor, or tina4 skills all."
-            .to_string()
-    })?;
+    let destinations = destinations_for_target(target, &home).ok_or_else(|| TARGET_CHOICES.to_string())?;
 
     let config = Config::from_env();
     println!("  Target: {}  (ref: {})", target, config.reference);
@@ -739,27 +775,42 @@ mod tests {
     #[test]
     fn each_target_maps_to_its_directories() {
         let home = Path::new("/home/dev");
-        assert_eq!(
-            destinations_for_target("claude", home),
-            Some(vec![home.join(".claude").join("skills")])
-        );
-        assert_eq!(
-            destinations_for_target("codex", home),
-            Some(vec![home.join(".agents").join("skills")])
-        );
-        assert_eq!(
-            destinations_for_target("cursor", home),
-            Some(vec![home.join(".cursor").join("skills")])
-        );
+        let skills = |tool: &str| home.join(tool).join("skills");
+        assert_eq!(destinations_for_target("claude", home), Some(vec![skills(".claude")]));
+        assert_eq!(destinations_for_target("codex", home), Some(vec![skills(".agents")]));
+        assert_eq!(destinations_for_target("cursor", home), Some(vec![skills(".cursor")]));
+        assert_eq!(destinations_for_target("hermes", home), Some(vec![skills(".hermes")]));
+        // DeepSeek's Deep Code CLI reads the same user-level dir Codex does.
+        assert_eq!(destinations_for_target("deepseek", home), Some(vec![skills(".agents")]));
+        assert_eq!(destinations_for_target("nonsense", home), None);
+    }
+
+    #[test]
+    fn all_writes_every_directory_exactly_once() {
+        let home = Path::new("/home/dev");
+        let skills = |tool: &str| home.join(tool).join("skills");
+        // codex and deepseek share ~/.agents/skills: `all` must name it ONCE.
         assert_eq!(
             destinations_for_target("all", home),
-            Some(vec![
-                home.join(".claude").join("skills"),
-                home.join(".agents").join("skills"),
-                home.join(".cursor").join("skills"),
-            ])
+            Some(vec![skills(".claude"), skills(".agents"), skills(".cursor"), skills(".hermes")])
         );
-        assert_eq!(destinations_for_target("nonsense", home), None);
+        // Every single target's directory is covered by `all`.
+        let all = destinations_for_target("all", home).unwrap();
+        for (name, _) in TARGETS {
+            for dir in destinations_for_target(name, home).unwrap() {
+                assert!(all.contains(&dir), "`all` misses {name}'s {}", dir.display());
+            }
+        }
+    }
+
+    #[test]
+    fn every_target_and_all_are_accepted_and_nothing_else() {
+        for name in ["claude", "codex", "cursor", "hermes", "deepseek", "all"] {
+            assert!(is_target(name), "{name} should be a target");
+            assert!(TARGET_CHOICES.contains(&format!("tina4 skills {name}")), "{name} missing from the help text");
+        }
+        assert!(!is_target("nonsense"));
+        assert!(!is_target(""));
     }
 
     fn default_config() -> Config {

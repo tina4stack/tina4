@@ -158,8 +158,8 @@ fn collect_project() -> Vec<Target> {
     .collect()
 }
 
-/// The three skills homes the installer writes to (Claude / Codex / Cursor),
-/// honouring the same `TINA4_SKILLS_HOME` override the installer uses.
+/// Every skills home the installer writes to (Claude / Codex + DeepSeek / Cursor
+/// / Hermes), honouring the same `TINA4_SKILLS_HOME` override the installer uses.
 fn skills_homes() -> Vec<PathBuf> {
     let base = std::env::var_os("TINA4_SKILLS_HOME")
         .filter(|v| !v.is_empty())
@@ -167,11 +167,7 @@ fn skills_homes() -> Vec<PathBuf> {
         .or_else(|| std::env::var_os("HOME").filter(|v| !v.is_empty()).map(PathBuf::from))
         .or_else(|| std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()).map(PathBuf::from));
     match base {
-        Some(h) => vec![
-            h.join(".claude").join("skills"),
-            h.join(".agents").join("skills"),
-            h.join(".cursor").join("skills"),
-        ],
+        Some(h) => crate::skills::distinct_destinations(&h).into_iter().map(|(_, dir)| dir).collect(),
         None => Vec::new(),
     }
 }

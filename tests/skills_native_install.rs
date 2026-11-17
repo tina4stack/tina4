@@ -123,10 +123,20 @@ fn file_url(dir: &Path) -> String {
     format!("file://{}", dir.display())
 }
 
-/// Run `tina4 skills <target>` with the fixture roots, into `home`.
+/// Run `tina4 skills codex` with the fixture roots, into `home`.
 fn run_install(home: &Path, fixtures_url: &str, extra_path: Option<&Path>) -> std::process::Output {
+    run_install_target("codex", home, fixtures_url, extra_path)
+}
+
+/// Run `tina4 skills <target>` with the fixture roots, into `home`.
+fn run_install_target(
+    target: &str,
+    home: &Path,
+    fixtures_url: &str,
+    extra_path: Option<&Path>,
+) -> std::process::Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_tina4"));
-    cmd.args(["skills", "codex"])
+    cmd.args(["skills", target])
         .env("HOME", home)
         .env("TINA4_SKILLS_HOME", home)
         .env("TINA4_SKILLS_REF", TEST_REF)
@@ -142,7 +152,10 @@ fn run_install(home: &Path, fixtures_url: &str, extra_path: Option<&Path>) -> st
 }
 
 fn assert_all_skills_landed(home: &Path) {
-    let dest = home.join(".agents").join("skills");
+    assert_all_skills_landed_in(&home.join(".agents").join("skills"));
+}
+
+fn assert_all_skills_landed_in(dest: &Path) {
     assert_eq!(
         fs::read_to_string(dest.join(".tina4-skills-ref")).unwrap().trim(),
         TEST_REF,
@@ -175,6 +188,100 @@ fn the_native_installer_lands_every_skill_verified() {
     assert!(out.status.success(), "install failed:\n{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
     assert!(stdout.contains("verified"), "the checksum gate did not run:\n{stdout}");
     assert_all_skills_landed(&home);
+    let _ = fs::remove_dir_all(&fixtures);
+    let _ = fs::remove_dir_all(&home);
+}
+
+/// Every `<tool>/skills` directory under `home` that holds a ref marker - i.e.
+/// every directory an install actually published into.
+fn published_dirs(home: &Path) -> Vec<String> {
+    let mut dirs: Vec<String> = fs::read_dir(home)
+        .unwrap()
+        .filter_map(|entry| {
+            let tool = entry.ok()?.file_name().to_string_lossy().into_owned();
+            home.join(&tool)
+                .join("skills")
+                .join(".tina4-skills-ref")
+                .is_file()
+                .then(|| format!("{tool}/skills"))
+        })
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// Install `target` into a fresh real HOME; returns (fixtures, home, stdout).
+fn install_target_into_fresh_home(target: &str) -> (PathBuf, PathBuf, String) {
+    let fixtures = build_fixtures();
+    let home = private_dir(&format!("home-{target}"));
+    let out = run_install_target(target, &home, &file_url(&fixtures), None);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success(),
+        "`tina4 skills {target}` failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (fixtures, home, stdout)
+}
+
+/// Hermes Agent reads ~/.hermes/skills - and only that home is written.
+#[test]
+fn hermes_installs_into_its_own_home_only() {
+    let (fixtures, home, _) = install_target_into_fresh_home("hermes");
+    assert_all_skills_landed_in(&home.join(".hermes").join("skills"));
+    assert_eq!(published_dirs(&home), vec![".hermes/skills"]);
+    let _ = fs::remove_dir_all(&fixtures);
+    let _ = fs::remove_dir_all(&home);
+}
+
+/// DeepSeek's Deep Code CLI reads user skills from ~/.agents/skills, the same
+/// directory Codex reads, so `deepseek` writes exactly there.
+#[test]
+fn deepseek_installs_into_the_shared_agents_home() {
+    let (fixtures, home, _) = install_target_into_fresh_home("deepseek");
+    assert_all_skills_landed(&home);
+    assert_eq!(published_dirs(&home), vec![".agents/skills"]);
+    let _ = fs::remove_dir_all(&fixtures);
+    let _ = fs::remove_dir_all(&home);
+}
+
+/// `all` covers every tool, and publishes the shared ~/.agents/skills (Codex +
+/// DeepSeek) ONCE - not once per target that names it.
+#[test]
+fn all_installs_every_home_and_the_shared_one_once() {
+    let (fixtures, home, stdout) = install_target_into_fresh_home("all");
+    let expected = [".agents/skills", ".claude/skills", ".cursor/skills", ".hermes/skills"];
+    assert_eq!(published_dirs(&home), expected);
+    for dir in expected {
+        let dest = home.join(dir);
+        assert_all_skills_landed_in(&dest);
+        let line = format!("installed for {}", dest.display());
+        assert_eq!(
+            stdout.matches(&line).count(),
+            1,
+            "{dir} must be published exactly once:\n{stdout}"
+        );
+    }
+    let _ = fs::remove_dir_all(&fixtures);
+    let _ = fs::remove_dir_all(&home);
+}
+
+/// An unknown target is refused, names the real choices, and writes nothing.
+#[test]
+fn an_unknown_target_is_refused_and_writes_nothing() {
+    let fixtures = build_fixtures();
+    let home = private_dir("home-unknown");
+    let out = run_install_target("windsurf", &home, &file_url(&fixtures), None);
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "an unknown target must fail:\n{all}");
+    for name in ["claude", "codex", "cursor", "hermes", "deepseek", "all"] {
+        assert!(all.contains(&format!("tina4 skills {name}")), "{name} not offered:\n{all}");
+    }
+    assert!(published_dirs(&home).is_empty(), "an unknown target wrote skills");
     let _ = fs::remove_dir_all(&fixtures);
     let _ = fs::remove_dir_all(&home);
 }

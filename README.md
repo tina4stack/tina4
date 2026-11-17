@@ -137,8 +137,8 @@ tina4 serve
 ### AI skills
 
 Use the Tina4 client to install or refresh skills. It shows a menu for Claude,
-Codex, Cursor, or all three, and chooses the correct location and current
-released skills version for you.
+Codex, Cursor, Hermes, DeepSeek, or all of them, and chooses the correct location
+and current released skills version for you.
 
 ```bash
 # Choose interactively (recommended)
@@ -146,7 +146,17 @@ tina4 skills
 ```
 
 For automation, `tina4 skills claude`, `tina4 skills codex`,
-`tina4 skills cursor`, and `tina4 skills all` remain available.
+`tina4 skills cursor`, `tina4 skills hermes`, `tina4 skills deepseek`, and
+`tina4 skills all` remain available.
+
+| Target | Writes |
+|--------|--------|
+| `claude` | `~/.claude/skills` |
+| `codex` | `~/.agents/skills` |
+| `cursor` | `~/.cursor/skills` |
+| `hermes` | `~/.hermes/skills` (Hermes Agent) |
+| `deepseek` | `~/.agents/skills` (DeepSeek Deep Code CLI; the same directory as `codex`) |
+| `all` | every directory above, each written once |
 
 `tina4 setup` offers the same choice during first-time setup and writes `AGENTS.md` for Codex projects. Framework repos also ship Cursor entrypoints under `.cursor/skills` (mirroring `.agents/skills` for Codex). The standalone installer remains available for CI and advanced automation.
 

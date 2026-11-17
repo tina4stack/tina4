@@ -178,9 +178,9 @@ enum Commands {
     /// Sign out and remove the stored credentials
     Logout,
 
-    /// Install the latest Tina4 AI skills for Claude, Codex, Cursor, or all
+    /// Install the latest Tina4 AI skills for Claude, Codex, Cursor, Hermes, DeepSeek, or all
     Skills {
-        /// Target coding tool: claude, codex, cursor, or all. Omit for a menu.
+        /// Target coding tool: claude, codex, cursor, hermes, deepseek, or all. Omit for a menu.
         target: Option<String>,
     },
 
@@ -2346,14 +2346,12 @@ fn installed_skills_targets(home: &std::path::Path) -> Vec<&'static str> {
             .iter()
             .any(|skill| dir.join(skill).join("SKILL.md").is_file())
     };
-    [
-        ("claude", home.join(".claude").join("skills")),
-        ("codex", home.join(".agents").join("skills")),
-        ("cursor", home.join(".cursor").join("skills")),
-    ]
-    .into_iter()
-    .filter_map(|(target, dir)| has_tina4_skill(&dir).then_some(target))
-    .collect()
+    // One entry per distinct directory: ~/.agents/skills is reported as `codex`
+    // (DeepSeek reads the same directory, so refreshing it serves both).
+    skills::distinct_destinations(home)
+        .into_iter()
+        .filter_map(|(target, dir)| has_tina4_skill(&dir).then_some(target))
+        .collect()
 }
 
 /// Keep every installed Tina4 AI target current when the client is updated.
@@ -2369,13 +2367,13 @@ fn refresh_installed_skills() {
         return;
     }
 
-    let target = if targets.len() == 3 {
+    let target = if targets.len() == skills::distinct_destinations(&home).len() {
         "all"
     } else if targets.len() == 1 {
         targets[0]
     } else {
-        // Two of three: refresh each present target so we never enable a tool
-        // the developer did not choose.
+        // Some but not all: refresh each present target so we never enable a
+        // tool the developer did not choose.
         for t in &targets {
             println!("{} Refreshing Tina4 AI skills for {}...", icon_play().green(), t);
             if !setup::install_skills(t) {
@@ -4462,6 +4460,15 @@ mod tests {
         }
 
         assert_eq!(installed_skills_targets(&root), vec!["claude", "cursor"]);
+
+        // A Hermes install is picked up, and the shared ~/.agents/skills (Codex +
+        // DeepSeek) is reported once, as `codex`.
+        for directory in [".hermes/skills", ".agents/skills"] {
+            let path = root.join(directory).join("tina4-js");
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("SKILL.md"), "# Tina4\n").unwrap();
+        }
+        assert_eq!(installed_skills_targets(&root), vec!["claude", "codex", "cursor", "hermes"]);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

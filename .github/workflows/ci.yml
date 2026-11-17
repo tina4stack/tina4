@@ -25,10 +25,14 @@ jobs:
       # parser once let a malformed block ship (#112); PyYAML is a CI tool, not a
       # runtime dependency. gen-skills-bundle.sh runs the same check over every
       # repo's skills at the bundle cut.
-      - name: Validate skill front matter (strict YAML)
+      # It also enforces the strictest install target's limits (Hermes: name
+      # pattern + length, description <= 1024, SKILL.md <= 100,000 chars, closing
+      # fence, non-empty body); the test proves each of those checks is a gate.
+      - name: Validate skill front matter (strict YAML + target limits)
         run: |
           python3 -m pip install --quiet pyyaml
           python3 scripts/validate-skills-frontmatter.py .claude/skills
+          python3 tests/test_validate_skills_frontmatter.py
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
       - name: Install cargo-deny
         uses: taiki-e/install-action@bffeee26d4db9be238a4ea78d8826604ebcb594d # v2.82.5

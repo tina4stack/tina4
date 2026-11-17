@@ -109,7 +109,7 @@ Tina4 profile at profile.tina4.com.
 - `logout`: sign out and remove the stored credentials.
 
 ## `tina4 skills [target]`
-Install the latest Tina4 AI skills. `TARGET`: `claude`, `codex`, `cursor`, or `all`. Omit for a menu.
+Install the latest Tina4 AI skills. `TARGET`: `claude` (`~/.claude/skills`), `codex` (`~/.agents/skills`), `cursor` (`~/.cursor/skills`), `hermes` (`~/.hermes/skills`), `deepseek` (`~/.agents/skills`, the same folder as `codex`), or `all` (each folder written once). Omit for a menu.
 
 ## `tina4 doctor`
 Check installed languages/tools, ports, and global AI-skills currency. Strictly read-only — reports

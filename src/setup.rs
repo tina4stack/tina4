@@ -409,7 +409,7 @@ fn print_plan(
             }
             AiChoice::Codex => println!("    - install the tina4 AI skills globally (~/.agents/skills)"),
             AiChoice::Cursor => println!("    - install the tina4 AI skills globally (~/.cursor/skills)"),
-            AiChoice::All => println!("    - install the tina4 AI skills globally for Claude, Codex, and Cursor"),
+            AiChoice::All => println!("    - install the tina4 AI skills globally for Claude, Codex, Cursor, Hermes, and DeepSeek"),
             AiChoice::None => {}
         }
         match ai {
@@ -810,16 +810,11 @@ fn install_skills_global(ai: AiChoice) {
 /// user. `tina4 skills codex` is the normal refresh path; the hosted script
 /// still accepts environment variables for automation.
 pub fn install_skills(target: &str) -> bool {
-    match target {
-        "claude" | "codex" | "cursor" | "all" => install_skills_target(target),
-        _ => {
-            eprintln!(
-                "  {} Choose one of: tina4 skills claude, tina4 skills codex, tina4 skills cursor, or tina4 skills all.",
-                icon_warn().yellow()
-            );
-            false
-        }
+    if crate::skills::is_target(target) {
+        return install_skills_target(target);
     }
+    eprintln!("  {} {}", icon_warn().yellow(), crate::skills::TARGET_CHOICES);
+    false
 }
 
 /// The human-friendly global skills flow. It is intentionally separate from
@@ -830,8 +825,10 @@ pub fn install_skills_interactive() -> bool {
     println!("    1. Claude");
     println!("    2. Codex");
     println!("    3. Cursor");
-    println!("    4. All three");
-    let choice = prompt("Choose 1-4", "4");
+    println!("    4. Hermes");
+    println!("    5. DeepSeek (Deep Code CLI)");
+    println!("    6. All of them");
+    let choice = prompt("Choose 1-6", "6");
     install_skills(skills_target_from_choice(&choice))
 }
 
@@ -840,6 +837,8 @@ fn skills_target_from_choice(choice: &str) -> &'static str {
         "1" | "claude" => "claude",
         "2" | "codex" => "codex",
         "3" | "cursor" => "cursor",
+        "4" | "hermes" => "hermes",
+        "5" | "deepseek" => "deepseek",
         _ => "all",
     }
 }
@@ -1508,7 +1507,11 @@ mod tests {
         assert_eq!(skills_target_from_choice("1"), "claude");
         assert_eq!(skills_target_from_choice("codex"), "codex");
         assert_eq!(skills_target_from_choice("3"), "cursor");
-        assert_eq!(skills_target_from_choice("4"), "all");
+        assert_eq!(skills_target_from_choice("4"), "hermes");
+        assert_eq!(skills_target_from_choice("hermes"), "hermes");
+        assert_eq!(skills_target_from_choice("5"), "deepseek");
+        assert_eq!(skills_target_from_choice("deepseek"), "deepseek");
+        assert_eq!(skills_target_from_choice("6"), "all");
         assert_eq!(skills_target_from_choice("unexpected"), "all");
     }
 

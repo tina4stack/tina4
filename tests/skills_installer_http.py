@@ -65,6 +65,20 @@ RETRY_COUNT = 1
 # One file the first tier will be missing in "gap" mode.
 GAP_FILE = "tina4-developer-php/references/realtime.md"
 
+# Every TINA4_SKILLS_TARGET and the skills directories (relative to the skills
+# home) it must write -- and ONLY those. DeepSeek's Deep Code CLI reads the same
+# ~/.agents/skills Codex does, so `all` must write that directory exactly once.
+TARGET_DESTINATIONS = {
+    "claude": (".claude/skills",),
+    "codex": (".agents/skills",),
+    "cursor": (".cursor/skills",),
+    "hermes": (".hermes/skills",),
+    "deepseek": (".agents/skills",),
+    "all": (".claude/skills", ".agents/skills", ".cursor/skills", ".hermes/skills"),
+}
+# The targets the "targets" contract drives through a full install.
+CONTRACT_TARGETS = ("hermes", "deepseek", "all")
+
 
 def stage_relpaths() -> list[str]:
     """Every stage-relative file path the installer stages, in manifest order."""
@@ -183,16 +197,36 @@ def installer_default_ref(repo: Path) -> str:
     return match.group(1)
 
 
-def verify_install(skill_home: Path, expected_ref: str) -> None:
-    destination = skill_home / ".agents" / "skills"
-    assert (destination / ".tina4-skills-ref").read_text().strip() == expected_ref
-    for skill, references in INSTALLS.items():
-        assert (destination / skill / "SKILL.md").is_file(), skill
-        for reference in references:
-            assert (destination / skill / "references" / reference).is_file(), (
-                skill,
-                reference,
-            )
+def verify_install(
+    skill_home: Path, expected_ref: str, target: str = "codex", output: str = ""
+) -> None:
+    expected = TARGET_DESTINATIONS[target]
+    for relative in expected:
+        destination = skill_home / relative
+        assert (destination / ".tina4-skills-ref").read_text().strip() == expected_ref
+        for skill, references in INSTALLS.items():
+            assert (destination / skill / "SKILL.md").is_file(), (target, relative, skill)
+            for reference in references:
+                assert (destination / skill / "references" / reference).is_file(), (
+                    target,
+                    skill,
+                    reference,
+                )
+    # Nothing outside the target's own directories: a hermes install must not
+    # also land in ~/.claude, and so on.
+    written = sorted(
+        str(marker.parent.relative_to(skill_home)).replace("\\", "/")
+        for marker in skill_home.glob("*/skills/.tina4-skills-ref")
+    )
+    assert written == sorted(expected), (target, written, expected)
+    if output:
+        # Each directory is published exactly once, even when two targets in
+        # `all` share it (codex + deepseek -> ~/.agents/skills).
+        published = output.replace("\\", "/")
+        for relative in expected:
+            destination = f"{skill_home}/{relative}".replace("\\", "/")
+            count = published.count(f"installed for {destination}\n")
+            assert count == 1, f"{target}: {destination} published {count} times"
 
 
 def assert_dead_tier_written_off(mode: str) -> None:
@@ -243,7 +277,7 @@ def assert_dead_tier_written_off(mode: str) -> None:
     assert SkillHandler.hits["jsdelivr"] > 0, "the fallback tier was never reached"
 
 
-def run_installer(kind: str, mode: str, repo: Path) -> None:
+def run_installer(kind: str, mode: str, repo: Path, target: str = "codex") -> None:
     SkillHandler.attempts = {}
     SkillHandler.hits = {tier: 0 for tier in TIERS}
     SkillHandler.primary_mode = mode
@@ -271,7 +305,7 @@ def run_installer(kind: str, mode: str, repo: Path) -> None:
                 {
                     "HOME": str(skill_home),
                     "TINA4_SKILLS_HOME": str(skill_home),
-                    "TINA4_SKILLS_TARGET": "codex",
+                    "TINA4_SKILLS_TARGET": target,
                     "TINA4_SKILLS_TINA4_ROOT": roots["tina4"],
                     "TINA4_SKILLS_JSDELIVR_ROOT": roots["jsdelivr"],
                     "TINA4_SKILLS_RAW_ROOT": roots["raw"],
@@ -322,9 +356,21 @@ def run_installer(kind: str, mode: str, repo: Path) -> None:
                     "-File",
                     str(repo / "install-skills.ps1"),
                 ]
-            print(f"running {kind} installer in {mode} mode", flush=True)
-            subprocess.run(command, cwd=repo, env=env, check=True)
-            verify_install(skill_home, installer_default_ref(repo))
+            print(f"running {kind} installer in {mode} mode for {target}", flush=True)
+            result = subprocess.run(
+                command,
+                cwd=repo,
+                env=env,
+                check=False,
+                stdout=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            print(result.stdout, flush=True)
+            if result.returncode != 0:
+                raise subprocess.CalledProcessError(result.returncode, command)
+            verify_install(skill_home, installer_default_ref(repo), target, result.stdout)
             assert_dead_tier_written_off(mode)
     finally:
         for tier in TIERS:
@@ -342,6 +388,17 @@ def main() -> None:
     for mode in ("retry", "fallback", "outage", "gap", "revival"):
         run_installer(args.kind, mode, repo)
     print(f"{args.kind}: retry, fallback, outage, gap and revival contracts passed")
+    if args.kind == "powershell" and "hermes" not in (repo / "install-skills.ps1").read_text(
+        encoding="utf-8", errors="replace"
+    ):
+        # install-skills.ps1 is EV-signed: its hermes/deepseek targets land with the
+        # next skills-ref bump and re-sign, not in an unsigned edit. Say so loudly
+        # rather than pass silently; the contract runs as soon as the .ps1 has them.
+        print("powershell: targets contract SKIPPED - install-skills.ps1 has no hermes target yet")
+        return
+    for target in CONTRACT_TARGETS:
+        run_installer(args.kind, "retry", repo, target)
+    print(f"{args.kind}: {', '.join(CONTRACT_TARGETS)} target contracts passed")
 
 
 if __name__ == "__main__":

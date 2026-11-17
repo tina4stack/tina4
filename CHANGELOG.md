@@ -1,5 +1,30 @@
 # Changelog
 
+## 3.8.115 - 2026-11-17
+
+### Added
+- `tina4 skills hermes` and `tina4 skills deepseek` install the Tina4 skills
+  for Hermes Agent (`~/.hermes/skills`) and DeepSeek Deep Code
+  (`~/.agents/skills`, the folder Codex reads too). `all` now includes
+  `~/.hermes/skills`, `tina4 update` refreshes a Hermes install it finds, and
+  `tina4 doctor` reports Hermes beside Claude, Codex + DeepSeek, and Cursor.
+  The skills validator enforces Hermes's limits (description, size, name).
+  (tina4stack/tina4#152)
+- The skills installers serve the 3.13.164 skills: `tina4-test-plan` is new,
+  and `tina4-maintainer` gains the seven references its split added. Both
+  install scripts take the `hermes` and `deepseek` targets too.
+  (tina4stack/tina4#154)
+
+### Fixed
+- The `tina4-cli` skill is rebuilt from the client's own command definitions,
+  so every command and flag it lists exists. (tina4stack/tina4#151)
+- Dependency advisories: quinn-proto 0.11.19, quinn-udp 0.5.16, rustix 1.1.6.
+  (tina4stack/tina4#153)
+- The release workflow signs off the package-manager manifests commit, so its
+  pull request passes the DCO check. (tina4stack/tina4#155)
+- Publishing this release puts a `v` tag back on top of `releases.atom` after
+  the bare `3.13.164` skills tag, as 3.8.113 did for 3.13.156.
+
 ## 3.8.114 - 2026-11-02
 
 ### Added

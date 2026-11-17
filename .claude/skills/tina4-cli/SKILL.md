@@ -1,6 +1,6 @@
 ---
 name: tina4-cli
-updated_for_version: 3.8.114
+updated_for_version: 3.8.115
 description: >
   Use whenever anything involves the `tina4` command-line client (the Rust CLI) — scaffolding a
   project (`tina4 init`), starting the dev server (`tina4 serve`), generating code, or running
@@ -17,7 +17,7 @@ The `tina4` client is the Rust command-line tool that drives every Tina4 project
 language. It detects the project language, installs runtimes, scaffolds projects, compiles SCSS,
 watches files for dev-reload, runs the native code-health metrics engine, and delegates
 language-specific work to the per-language CLI (`tina4python`, `tina4php`, `tina4ruby`,
-`tina4nodejs`). Its version line is its own (e.g. `3.8.114`) and is independent of the framework
+`tina4nodejs`). Its version line is its own (e.g. `3.8.115`) and is independent of the framework
 version (`3.13.x`).
 
 > 🤖 **Skill-active marker.** While this skill is guiding your work, **begin every reply with 🤖** so

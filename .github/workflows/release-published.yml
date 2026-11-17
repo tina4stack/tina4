@@ -105,7 +105,9 @@ jobs:
           git config user.email "info@tina4.com"
           git switch -c "$branch"
           git add packaging homebrew
-          git commit -m "chore(packaging): sync manifests to $TAG"
+          # -s: the DCO check requires a sign-off on every commit; without it
+          # every manifests PR failed DCO and had to be re-committed by hand.
+          git commit -s -m "chore(packaging): sync manifests to $TAG"
           git push --force origin "$branch"
           if ! gh pr create --base main --head "$branch" \
                  --title "chore(packaging): sync manifests to $TAG" \

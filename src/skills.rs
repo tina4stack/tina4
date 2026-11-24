@@ -16,7 +16,7 @@
 //! EV-signed and fine; the spawn was the problem.
 //!
 //! So the whole installer now runs in-process. It fetches each skill file with
-//! the CLI's own download primitive (`crate::download_file_classified`),
+//! the CLI's own download primitive (`crate::download_file_bounded`),
 //! verifies every file against the published `skills.sha256` manifest with
 //! `ring`'s SHA-256, and writes the files into the target directories itself.
 //! No `powershell`, no `sh`, no `cmd`, no `iex`, no `install-skills.*` — this
@@ -32,9 +32,18 @@
 //! for the rest of the run only on a transport failure (no answer / DNS /
 //! connect / TLS), while any HTTP error moves to the next source for that one
 //! file. The set of files that land, and where, is identical.
+//!
+//! Every fetch is bounded per download, not per run (tina4#160): a download that
+//! has received nothing for [`DEFAULT_STALL_TIMEOUT_SECS`] fails as a network
+//! error, so a host that accepts a connection and then says nothing is caught,
+//! while an install that is slow but still moving always completes. Files are
+//! fetched on a small pool of workers, so the total time no longer grows one
+//! `curl` start at a time with the size of the manifest.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use crate::console::{icon_ok, icon_play, icon_warn};
 use colored::Colorize;
@@ -66,11 +75,20 @@ const DEFAULT_RAW_ROOT: &str = "https://raw.githubusercontent.com/tina4stack";
 const DEFAULT_RETRY_COUNT: u32 = 3;
 const DEFAULT_RETRY_DELAY_SECS: u64 = 2;
 
-/// A ceiling on the whole fetch walk, mirroring `fetch_skills_installer`'s
-/// budget: the download primitive runs `curl` without a timeout, so a host that
-/// accepts a connection and then says nothing can hang, and the retries would
-/// multiply that wait. Once this much time has gone, no further attempt starts.
-const FETCH_BUDGET_SECS: u64 = 60;
+/// How long one download may go without receiving a byte before it fails as a
+/// network error. This replaces a 60-second budget on the WHOLE install, which
+/// failed every healthy install that took longer than a minute (tina4#160). It
+/// bounds silence, not total time. `TINA4_SKILLS_STALL_TIMEOUT` overrides it.
+const DEFAULT_STALL_TIMEOUT_SECS: u64 = 30;
+
+/// The stall limit for the one-file lookup of the latest published ref. It has
+/// an offline fallback, so it gives up sooner than a skill file does.
+const REF_LOOKUP_STALL_SECS: u64 = 10;
+
+/// Downloads in flight at once. A browser opens about six connections to a
+/// host; the files are small, so this is about overlapping each `curl` start
+/// and TLS handshake, not bandwidth.
+const FETCH_WORKERS: usize = 6;
 
 /// Skill directories from an older layout that must be removed from a target
 /// before the current skills are written.
@@ -111,6 +129,7 @@ struct Config {
     raw_root: String,
     retry_count: u32,
     retry_delay: std::time::Duration,
+    stall_timeout: std::time::Duration,
 }
 
 impl Config {
@@ -130,6 +149,9 @@ impl Config {
                 "TINA4_SKILLS_RETRY_DELAY",
                 DEFAULT_RETRY_DELAY_SECS,
             )),
+            stall_timeout: std::time::Duration::from_secs(
+                num("TINA4_SKILLS_STALL_TIMEOUT", DEFAULT_STALL_TIMEOUT_SECS).max(1),
+            ),
         }
     }
 
@@ -177,7 +199,11 @@ fn resolve_ref() -> String {
 fn fetch_latest_ref() -> Option<String> {
     let tmp = std::env::temp_dir()
         .join(format!("tina4-skillsref-{}", std::process::id()));
-    let outcome = crate::download_file_classified(SKILLS_INSTALL_URL, &tmp);
+    let outcome = crate::download_file_bounded(
+        SKILLS_INSTALL_URL,
+        &tmp,
+        std::time::Duration::from_secs(REF_LOOKUP_STALL_SECS),
+    );
     let parsed = match outcome {
         crate::DownloadOutcome::Ok => fs::read_to_string(&tmp).ok().and_then(|s| parse_installer_ref(&s)),
         _ => None,
@@ -276,10 +302,13 @@ pub fn install(target: &str) -> bool {
         Ok(()) => true,
         Err(why) => {
             println!("  {} {}", icon_warn().yellow(), why);
+            // `tina4 skills <target>` works from any directory; `tina4 ai`
+            // needs a Tina4 project, so it failed where this hint is most often
+            // read: after `tina4 update`, run from wherever (tina4#160).
             println!(
                 "  {} Skills install skipped — run later: {}",
                 icon_warn().yellow(),
-                "tina4 ai".cyan()
+                format!("tina4 skills {target}").cyan()
             );
             false
         }
@@ -297,20 +326,20 @@ fn install_inner(target: &str) -> Result<(), String> {
     let stage = Stage::new()
         .map_err(|e| format!("Could not create a temporary directory for the skills — {e}"))?;
 
-    let mut dead_hosts: Vec<String> = Vec::new();
-    let started = std::time::Instant::now();
+    let dead_hosts: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
     // The published `skills.sha256` manifest is the SOURCE OF TRUTH for which
     // files make up this ref. Fetch it first and derive the entire file set from
     // it, so the client never carries a hardcoded skill list that can drift from a
     // release (the drift that shipped an 8-skill installer against a 9-skill ref).
-    let entries = fetch_manifest_entries(&config, &stage.path, &mut dead_hosts, started)?;
+    let entries = fetch_manifest_entries(&config, &stage.path, &dead_hosts)?;
 
     // Fetch every file the manifest names, from the right tier. The first path
     // component is the skill; the rest is its path within the skill (SKILL.md, or
     // references/... nested to any depth). New skills, new references and deeper
     // nesting all flow through here with no code change.
     let mut skills_seen: Vec<String> = Vec::new();
+    let mut jobs: Vec<(PathBuf, [String; 3])> = Vec::with_capacity(entries.len());
     for (_hash, relative) in &entries {
         let (skill, within) = relative
             .split_once('/')
@@ -320,17 +349,15 @@ fn install_inner(target: &str) -> Result<(), String> {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Could not create the staging directory for {skill} — {e}"))?;
         }
-        download_file(
-            &config,
-            &dest,
-            &config.skill_urls(repo_for_skill(skill), skill, within),
-            &mut dead_hosts,
-            started,
-        )?;
+        jobs.push((dest, config.skill_urls(repo_for_skill(skill), skill, within)));
         if !skills_seen.iter().any(|s| s == skill) {
             skills_seen.push(skill.to_string());
-            println!("  {} {}  ({})", "+".green(), skill, repo_for_skill(skill));
         }
+    }
+    println!("  Fetching {} files for {} skills...", jobs.len(), skills_seen.len());
+    fetch_all(&config, &jobs, &dead_hosts)?;
+    for skill in &skills_seen {
+        println!("  {} {}  ({})", "+".green(), skill, repo_for_skill(skill));
     }
 
     // Verify every staged file against the manifest BEFORE anything is installed,
@@ -418,7 +445,7 @@ fn host_of(url: &str) -> String {
 fn fetch_one(config: &Config, url: &str, dest: &Path) -> FetchResult {
     let attempts = config.retry_count + 1;
     for attempt in 1..=attempts {
-        match crate::download_file_classified(url, dest) {
+        match crate::download_file_bounded(url, dest, config.stall_timeout) {
             crate::DownloadOutcome::Ok => return FetchResult::Got,
             crate::DownloadOutcome::Http => {
                 let _ = fs::remove_file(dest);
@@ -443,34 +470,33 @@ fn download_file(
     config: &Config,
     dest: &Path,
     urls: &[String],
-    dead_hosts: &mut Vec<String>,
-    started: std::time::Instant,
+    dead_hosts: &Mutex<Vec<String>>,
 ) -> Result<(), String> {
-    let budget = std::time::Duration::from_secs(FETCH_BUDGET_SECS);
     let mut skipped: Vec<&String> = Vec::new();
     for url in urls {
         let host = host_of(url);
-        if dead_hosts.contains(&host) {
+        if lock(dead_hosts).contains(&host) {
             skipped.push(url);
             continue;
-        }
-        if started.elapsed() >= budget {
-            return Err(format!(
-                "gave up fetching {} after {}s",
-                dest.display(),
-                started.elapsed().as_secs()
-            ));
         }
         match fetch_one(config, url, dest) {
             FetchResult::Got => return Ok(()),
             FetchResult::HostDead => {
-                if !dead_hosts.contains(&host) {
-                    dead_hosts.push(host.clone());
+                // Several workers can find the same host dead at once; say so once.
+                let newly_dead = {
+                    let mut dead = lock(dead_hosts);
+                    let newly = !dead.contains(&host);
+                    if newly {
+                        dead.push(host.clone());
+                    }
+                    newly
+                };
+                if newly_dead {
+                    eprintln!(
+                        "  {} {host} is not answering; using the next source for the rest of this run",
+                        "!".yellow()
+                    );
                 }
-                eprintln!(
-                    "  {} {host} is not answering; using the next source for the rest of this run",
-                    "!".yellow()
-                );
             }
             FetchResult::NotHere => {
                 eprintln!("  {} not served by {host}, trying next source", "!".yellow());
@@ -485,6 +511,47 @@ fn download_file(
     Err(format!("every download source failed for {}", dest.display()))
 }
 
+/// Lock a mutex, taking the data even if another worker panicked holding it:
+/// the dead-host list and the first failure stay meaningful either way.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Fetch every `(dest, urls)` job on [`FETCH_WORKERS`] threads sharing one
+/// dead-host list. The first failure stops further downloads from starting and
+/// is the error returned; nothing is published unless every file landed, as
+/// before. Each download is bounded on its own (see [`fetch_one`]), so the run
+/// needs no budget of its own.
+fn fetch_all(
+    config: &Config,
+    jobs: &[(PathBuf, [String; 3])],
+    dead_hosts: &Mutex<Vec<String>>,
+) -> Result<(), String> {
+    let next = AtomicUsize::new(0);
+    let failure: Mutex<Option<String>> = Mutex::new(None);
+    let workers = FETCH_WORKERS.min(jobs.len()).max(1);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| loop {
+                if lock(&failure).is_some() {
+                    return;
+                }
+                let Some((dest, urls)) = jobs.get(next.fetch_add(1, Ordering::Relaxed)) else {
+                    return;
+                };
+                if let Err(why) = download_file(config, dest, urls, dead_hosts) {
+                    lock(&failure).get_or_insert(why);
+                    return;
+                }
+            });
+        }
+    });
+    match failure.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner) {
+        Some(why) => Err(why),
+        None => Ok(()),
+    }
+}
+
 /// Download the published manifest and parse it into `(expected_hash, relative)`
 /// entries - the authoritative list of every file in this skills ref. Every path
 /// is checked component-by-component so it can never escape the stage. An empty
@@ -492,11 +559,10 @@ fn download_file(
 fn fetch_manifest_entries(
     config: &Config,
     stage: &Path,
-    dead_hosts: &mut Vec<String>,
-    started: std::time::Instant,
+    dead_hosts: &Mutex<Vec<String>>,
 ) -> Result<Vec<(String, String)>, String> {
     let manifest_path = stage.join(".skills.sha256");
-    download_file(config, &manifest_path, &config.manifest_urls(), dead_hosts, started)?;
+    download_file(config, &manifest_path, &config.manifest_urls(), dead_hosts)?;
     let manifest = fs::read_to_string(&manifest_path)
         .map_err(|e| format!("Could not read the skills checksum manifest — {e}"))?;
     let _ = fs::remove_file(&manifest_path);
@@ -821,6 +887,7 @@ mod tests {
             raw_root: DEFAULT_RAW_ROOT.to_string(),
             retry_count: DEFAULT_RETRY_COUNT,
             retry_delay: std::time::Duration::from_secs(0),
+            stall_timeout: std::time::Duration::from_secs(DEFAULT_STALL_TIMEOUT_SECS),
         }
     }
 

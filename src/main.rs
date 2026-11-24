@@ -2956,8 +2956,22 @@ enum DownloadFailure {
 /// through so the user still sees curl's own reason -- the same shape as the
 /// wget path below.
 fn download_with_curl(program: &str, url: &str, dest: &str) -> DownloadOutcome {
+    download_with_curl_limited(program, url, dest, None)
+}
+
+/// [`download_with_curl`], optionally bounded by [`curl_limit_args`].
+fn download_with_curl_limited(
+    program: &str,
+    url: &str,
+    dest: &str,
+    stall: Option<std::time::Duration>,
+) -> DownloadOutcome {
+    let mut args: Vec<String> = ["-fsSL", "-o", dest, url].iter().map(|a| a.to_string()).collect();
+    if let Some(stall) = stall {
+        args.extend(curl_limit_args(stall));
+    }
     match std::process::Command::new(program)
-        .args(["-fsSL", "-o", dest, url])
+        .args(&args)
         .stdout(std::process::Stdio::inherit())
         .output()
     {
@@ -2976,9 +2990,15 @@ fn download_with_curl(program: &str, url: &str, dest: &str) -> DownloadOutcome {
 /// Download with wget (Alpine / iSH ship busybox wget and no curl). stderr is
 /// captured to classify the failure, then passed through so the user still
 /// sees wget's own reason.
-fn download_with_wget(url: &str, dest: &str) -> DownloadOutcome {
+fn download_with_wget(url: &str, dest: &str, stall: Option<std::time::Duration>) -> DownloadOutcome {
+    let mut args = console::Downloader::Wget.file_args(url, dest);
+    if let Some(stall) = stall {
+        // `-T` is the network read timeout in GNU wget and busybox wget alike
+        // (busybox, the Alpine / iSH case this path exists for, has no `--tries`).
+        args.splice(0..0, ["-T".to_string(), stall.as_secs().max(1).to_string()]);
+    }
     match std::process::Command::new("wget")
-        .args(console::Downloader::Wget.file_args(url, dest))
+        .args(args)
         .stdout(std::process::Stdio::inherit())
         .output()
     {
@@ -3285,6 +3305,53 @@ fn report_single_download_failure(
 }
 
 fn download_file_classified(url: &str, dest: &std::path::Path) -> DownloadOutcome {
+    download_file_limited(url, dest, None)
+}
+
+/// The most a bounded download may take in total, as a multiple of its stall
+/// limit. The stall limit is what catches a silent host; this only stops a
+/// server that trickles a byte at a time from holding a download forever.
+const DOWNLOAD_MAX_TIME_FACTOR: u32 = 10;
+
+/// curl arguments that bound one download (tina4#160). `--speed-limit 1
+/// --speed-time <stall>` aborts once less than one byte a second has arrived
+/// for `stall` seconds: a no-progress timeout, so a large file on a slow link
+/// that is still moving is never cut off, while a host that accepts and then
+/// says nothing is. `--connect-timeout` covers the connect, `--max-time` the
+/// trickle. A timeout is curl exit 28, which [`cause_for_curl_code`] already
+/// reports as a network failure.
+fn curl_limit_args(stall: std::time::Duration) -> Vec<String> {
+    let stall_secs = stall.as_secs().max(1);
+    let max_secs = stall_secs * u64::from(DOWNLOAD_MAX_TIME_FACTOR);
+    vec![
+        "--connect-timeout".to_string(),
+        stall_secs.to_string(),
+        "--speed-limit".to_string(),
+        "1".to_string(),
+        "--speed-time".to_string(),
+        stall_secs.to_string(),
+        "--max-time".to_string(),
+        max_secs.to_string(),
+    ]
+}
+
+/// [`download_file_classified`] for a download that must not hang: it fails as
+/// a network error once nothing has arrived for `stall`. For the many small
+/// files of a skills install. The self-update download stays unbounded, so a
+/// large binary on a slow link is never cut short.
+pub(crate) fn download_file_bounded(
+    url: &str,
+    dest: &std::path::Path,
+    stall: std::time::Duration,
+) -> DownloadOutcome {
+    download_file_limited(url, dest, Some(stall))
+}
+
+fn download_file_limited(
+    url: &str,
+    dest: &std::path::Path,
+    stall: Option<std::time::Duration>,
+) -> DownloadOutcome {
     let dest_str = dest.to_string_lossy();
 
     let status = if console::is_windows() {
@@ -3292,7 +3359,7 @@ fn download_file_classified(url: &str, dest: &std::path::Path) -> DownloadOutcom
         // PowerShell's Invoke-WebRequest struggles with GitHub's TLS/redirect chain.
         let curl_path = "C:\\Windows\\System32\\curl.exe";
         if std::path::Path::new(curl_path).exists() {
-            return download_with_curl(curl_path, url, &dest_str);
+            return download_with_curl_limited(curl_path, url, &dest_str, stall);
         } else {
             // Fallback to PowerShell with TLS 1.2 forced. Note the trade-off:
             // Invoke-WebRequest exits 1 for everything, so on this branch a
@@ -3309,15 +3376,22 @@ fn download_file_classified(url: &str, dest: &std::path::Path) -> DownloadOutcom
             // machine the resolution exists for. Left bare, the download would
             // die first and a local PATH fault would be reported as a download
             // problem.
+            // Invoke-WebRequest has one timeout, for the whole request; a
+            // bounded download gets the same ceiling curl's `--max-time` has.
+            let timeout = stall
+                .map(|s| format!(" -TimeoutSec {}", s.as_secs().max(1) * u64::from(DOWNLOAD_MAX_TIME_FACTOR)))
+                .unwrap_or_default();
             std::process::Command::new(setup::windows_powershell())
                 .args(["-NoProfile", "-Command",
-                    &format!("[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing", url, dest_str)])
+                    &format!("[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing{}", url, dest_str, timeout)])
                 .status()
         }
     } else {
         match console::unix_downloader() {
-            Some(console::Downloader::Curl) => return download_with_curl("curl", url, &dest_str),
-            Some(console::Downloader::Wget) => return download_with_wget(url, &dest_str),
+            Some(console::Downloader::Curl) => {
+                return download_with_curl_limited("curl", url, &dest_str, stall)
+            }
+            Some(console::Downloader::Wget) => return download_with_wget(url, &dest_str, stall),
             None => {
                 return DownloadOutcome::Local(FailureCause::Unclassified(
                     console::NO_DOWNLOADER.to_string(),

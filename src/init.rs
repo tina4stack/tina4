@@ -931,7 +931,7 @@ server {
 /// lazily and never declares it, exactly like pg or mysql2. The scaffold binds a
 /// SQLite database in .env, so the Gemfile carries the driver and
 /// `tina4 init ruby && tina4 serve` works out of the box (tina4-book#100).
-const RUBY_SQLITE3_GEMFILE_BLOCK: &str = "\n# SQLite driver for the default database (TINA4_DATABASE_URL=sqlite:...).\n# tina4ruby loads it lazily; it is an app dependency, like pg or mysql2.\ngem \"sqlite3\"\n";
+const RUBY_SQLITE3_GEMFILE_BLOCK: &str = "\n# SQLite driver for the default database (TINA4_DATABASE_URL=sqlite:...).\n# tina4ruby loads it lazily; it is an app dependency, like pg or mysql2.\ngem \"sqlite3\", \">= 2.10.2\"\n";
 
 /// Does this Gemfile already declare the sqlite3 gem (either quote style, any
 /// version constraint or options)? A commented-out line does not count.
@@ -1714,6 +1714,12 @@ mod tests {
         let gemfile = fs::read_to_string(dir.join("Gemfile")).expect("scaffold wrote a Gemfile");
         assert!(gemfile.lines().any(|l| l.starts_with("gem \"tina4ruby\"")), "got:\n{gemfile}");
         assert!(gemfile_declares_sqlite3(&gemfile), "Gemfile must declare sqlite3, got:\n{gemfile}");
+        // sqlite3-ruby <= 2.10.1 truncates a SQL string of 4 GiB or more
+        // (CVE-2026-128084); a new project must never resolve one.
+        assert!(
+            gemfile.contains("gem \"sqlite3\", \">= 2.10.2\""),
+            "Gemfile must pin sqlite3 at the patched floor, got:\n{gemfile}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

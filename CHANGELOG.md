@@ -1,5 +1,24 @@
 # Changelog
 
+## 3.8.116 - 2026-11-24
+
+### Fixed
+- `tina4 update` and `tina4 skills` no longer give up on a slow connection.
+  The skills install stopped 60 seconds after it STARTED, whatever it was
+  doing, so a healthy install of 99 files failed near the end with nothing
+  installed. Each download now has its own limit (it fails after 30 seconds
+  with no data; `TINA4_SKILLS_STALL_TIMEOUT` overrides it), files download six
+  at a time, and the latest-ref lookup is bounded too. A real install takes
+  about 5 seconds. When an install does fail, the hint says
+  `tina4 skills <target>`, which works from any directory; it said `tina4 ai`,
+  which needs a project. (tina4stack/tina4#160, tina4stack/tina4#161)
+- `tina4 init ruby` writes `gem "sqlite3", ">= 2.10.2"`. sqlite3-ruby 2.10.1
+  and earlier truncate a SQL string of 4 GiB or more (CVE-2026-128084); the
+  scaffold left the driver unpinned. (tina4stack/tina4#162)
+- Two `serve` environment tests could read their dump file before it was
+  written and fail on CI; the stub now renames a finished file into place.
+  (tina4stack/tina4#162)
+
 ## 3.8.115 - 2026-11-17
 
 ### Added

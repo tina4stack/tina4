@@ -1,6 +1,6 @@
 # `tina4` command reference
 
-Every command and flag, grounded in the client's clap definitions (`src/main.rs`, client 3.8.115)
+Every command and flag, grounded in the client's clap definitions (`src/main.rs`, client 3.8.116)
 and `tina4 <command> --help`. Reference material — plain tables, no prose voice. If a flag here
 disagrees with `tina4 <command> --help` on your installed client, the client is the truth; report the
 drift (the First Principle: docs match code).

@@ -121,7 +121,7 @@ fn serve_exports_the_first_key_of_a_bom_env() {
     )
     .unwrap();
     let stub = bin_dir.join("python3");
-    fs::write(&stub, format!("#!/bin/sh\nenv > '{}'\nexit 0\n", dump.display())).unwrap();
+    fs::write(&stub, format!("#!/bin/sh\nenv > '{0}.tmp' && mv '{0}.tmp' '{0}'\nexit 0\n", dump.display())).unwrap();
     fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_tina4"))

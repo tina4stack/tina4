@@ -151,7 +151,7 @@ fn serve_without_a_port_flag_exports_values_unharmed() {
     fs::write(
         &stub,
         format!(
-            "#!/bin/sh\nenv > '{}'\nexit 0\n",
+            "#!/bin/sh\nenv > '{0}.tmp' && mv '{0}.tmp' '{0}'\nexit 0\n",
             dump.display()
         ),
     )
